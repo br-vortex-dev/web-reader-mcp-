@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: web-reader-mcp
+    runtime: node
+    # Para produto, troque free por starter (~US$ 7/mes): evita o cold start
+    # de ~50s e da RAM para o read_dynamic_page (Playwright).
+    plan: free
+    buildCommand: echo "sem dependencias para instalar"
+    # Para liberar read_dynamic_page (Playwright) no Render:
+    #   plan: starter
+    #   buildCommand: npm install playwright && npx playwright install --with-deps chromium
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Token de autenticacao: o Render gera um valor aleatorio e mostra no dashboard.
+      # Sem ele, qualquer pessoa na internet pode usar seu MCP.
+      - key: MCP_AUTH_TOKEN
+        generateValue: true

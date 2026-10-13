@@ -1,0 +1,171 @@
+# web-reader-mcp
+
+Servidor **MCP feito do zero** para ler páginas web.
+
+- **Zero dependências** — nenhum `npm install` necessário (só Node 18+).
+- **Sem API key e sem scraping de buscador** — não existe chamada a Google, Bing, DuckDuckGo ou similar. A "pesquisa" é feita pela própria IA: ela descobre URLs com `extract_links` e lê o conteúdo com `read_page`.
+- **Protocolo MCP implementado à mão** — JSON-RPC newline-delimited direto no stdio, sem usar o SDK do MCP.
+- **Parser HTML → markdown também feito à mão** — tokenizador próprio, sem cheerio/jsdom.
+
+## Ferramentas
+
+| Ferramenta                  | O que faz                                                               |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `read_page(url)`            | Lê uma página e devolve título, meta descrição e o conteúdo em markdown |
+| `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)  |
+| `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL  |
+| `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript (Playwright, instalação opcional) |
+| `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home) |
+| `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
+
+## Como testar
+
+```bash
+node scripts/smoke-test.mjs
+```
+
+Roda um cliente MCP mínimo que conecta no servidor, lista as ferramentas e exercita todas elas.
+
+## Como usar no WorkBuddy
+
+O servidor já está registrado em `C:\Users\Administrator\.workbuddy-ai\mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "web-reader": {
+      "command": "C:\\Users\\Administrator\\.workbuddy-ai\\binaries\\node\\versions\\22.22.2-6\\node.exe",
+      "args": ["C:\\Users\\Administrator\\Desktop\\FORA lula\\web-reader-mcp\\server.js"]
+    }
+  }
+}
+```
+
+Depois de criado, o MCP **não ativa sozinho**: abra o menu de conectores (canto superior direito da página de conectores), encontre `web-reader` e clique em **Trust/Confiar** para confiar no servidor.
+
+### Exemplos de uso no chat
+
+- "Leia a página <https://pt.wikipedia.org/wiki/Node.js> e me resuma"
+- "Extraia os links de <https://news.ycombinator.com> e me diga quais valem a pena ler"
+- "Leia estas 3 páginas: URL1, URL2, URL3"
+
+## Rodar no Render (como servico web)
+
+MCP em stdio **so roda local** (depende de stdin/stdout de um processo pai). Por isso o  
+servidor tambem fala o transporte **HTTP remoto do MCP** (Streamable HTTP): quando a  
+variavel `PORT` existe (o Render define automaticamente), ele sobe um servidor HTTP com:
+
+- `POST /mcp` — endpoint MCP (JSON-RPC; aceita 1 mensagem ou lote)
+- `GET /health` — health check do Render
+
+O modo e escolhido sozinho: local sem `PORT` → stdio; no Render → HTTP.  
+Para forcar: `node server.js --http` ou `node server.js --stdio`.
+
+### Deploy
+
+1. Suba esta pasta (`web-reader-mcp/`) para um repositorio no GitHub.
+2. No Render: **New + → Blueprint** e aponte para o repositorio (o `render.yaml`  
+   ja esta configurado) — ou **New + → Web Service**, com:
+   - Runtime: **Node**
+   - Build Command: *(vazio — nao ha dependencias)*
+   - Start Command: `node server.js`
+   - Health Check Path: `/health`
+3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
+4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar  
+   `web-reader-mcp v1.0.0 OK`.
+
+### Conectar o MCP remoto
+
+Em qualquer cliente MCP que aceite URL remota, cadastre:
+
+```
+https://SEU-APP.onrender.com/mcp
+```
+
+(no WorkBuddy: menu de conectores → adicionar conector → colar a URL → Trust.)
+
+## Integrar com seu produto (IA dentro do seu site)
+
+A arquitetura são **3 peças independentes** que conversam por HTTP:
+
+```
+usuario final → seu site (Cloudflare) → seu backend → LLM (function calling)
+                                              ↘ MCP web-reader (Render) → web
+```
+
+1. Seu site recebe o pedido do usuário.
+2. Seu backend chama o LLM com as **ferramentas** do MCP (a lista vem de `tools/list`).
+3. O LLM decide chamar uma ferramenta (ex.: `read_page`) — seu backend faz o POST no
+   MCP no Render e devolve o resultado para o LLM.
+4. O LLM responde ao usuário com os dados que leu.
+
+### Snippet do backend (Node)
+
+```js
+const MCP_URL = "https://SEU-APP.onrender.com/mcp";
+
+async function mcp(method, params, id = 1) {
+  const res = await fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${process.env.MCP_AUTH_TOKEN}`, // token secreto (veja abaixo)
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+  });
+  return res.json();
+}
+
+// 1. descobrir as ferramentas (mandar isso pro LLM como "tools")
+const { result: tools } = await mcp("tools/list");
+
+// 2. quando o LLM pedir uma tool:
+const r = await mcp("tools/call", {
+  name: "read_page",
+  arguments: { url: "https://exemplo.com" },
+}, 2);
+const conteudo = r.result.content[0].text; // devolver isso pro LLM
+```
+
+### Seguranca (essencial em produto)
+
+Sem proteção, **qualquer pessoa na internet pode usar seu MCP** e gastar seus recursos.
+Pra ligar a autenticação, defina no Render (Environment → Add Environment Variable):
+
+```
+MCP_AUTH_TOKEN = um-token-longo-e-aleatorio
+```
+
+Com isso, o MCP só aceita chamadas com o header `Authorization: Bearer <token>`
+(sem token → HTTP 401). **Nunca chame o MCP direto do browser** (aí o token vazaria) —
+sempre pelo seu backend, server-side.
+
+### Custos e cuidados no Render
+
+- **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).
+  Pra produto, use o plano pago (evita dormir e dá mais RAM).
+- **30 URLs por chamada**, lotes de 6: pesquisa rápida sem estourar memória.
+- **`read_dynamic_page` (Playwright) no Render**: só no plano pago, build com
+  `npx playwright install --with-deps chromium` (o free não tem RAM pra Chromium).
+  Em Cloudflare Workers/Pages **não roda de jeito nenhum** (serverless, sem processo).
+- **Cloudflare x Render são coisas diferentes**: a Cloudflare hospeda **seu site**;
+  o Render hospeda **o MCP**. Não precisa migrar nada — o site continua na
+  Cloudflare e só faz POST pro Render.
+
+## read_dynamic_page (opcional)
+
+Para páginas cujo conteúdo só aparece depois de executar JavaScript (SPAs, infinite scroll):
+
+```bash
+cd "C:\Users\Administrator\Desktop\FORA lula\web-reader-mcp"
+npm install playwright
+npx playwright install chromium
+```
+
+Sem isso, a ferramenta responde com um erro explicando como instalar — as outras três funcionam normalmente.
+
+## Limitações conhecidas
+
+- Páginas atrás de login não funcionam (o fetch é anônimo).
+- O conteúdo é truncado em 5000 caracteres por padrão (ajustável via `maxChars`).
+- Sites com proteção anti-bot muito agressiva podem barrar a requisição.
