@@ -9,13 +9,13 @@ Servidor **MCP feito do zero** para ler páginas web.
 
 ## Ferramentas
 
-| Ferramenta                  | O que faz                                                               |
-| --------------------------- | ----------------------------------------------------------------------- |
-| `read_page(url)`            | Lê uma página e devolve título, meta descrição e o conteúdo em markdown |
-| `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)  |
-| `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL  |
-| `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript (Playwright, instalação opcional) |
-| `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home) |
+| Ferramenta                  | O que faz                                                                               |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `read_page(url)`            | Lê uma página e devolve título, meta descrição e o conteúdo em markdown                 |
+| `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)                  |
+| `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL                  |
+| `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript (Playwright, instalação opcional)                 |
+| `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
 ## Como testar
@@ -49,6 +49,81 @@ Depois de criado, o MCP **não ativa sozinho**: abra o menu de conectores (canto
 - "Extraia os links de <https://news.ycombinator.com> e me diga quais valem a pena ler"
 - "Leia estas 3 páginas: URL1, URL2, URL3"
 
+## Subir no GitHub (passo a passo)
+
+Os passos abaixo foram feitos nesta maquina e funcionaram. O `render.yaml` precisa
+ficar **na raiz do repositorio** pro Blueprint do Render, entao os comandos rodam
+**dentro da pasta `web-reader-mcp`** (nao na pasta `FORA lula`).
+
+Estrutura que deve estar na pasta antes do push:
+
+```
+web-reader-mcp/
+├── server.js          <- o servidor MCP
+├── package.json
+├── render.yaml        <- config do Render (precisa estar na raiz do repo)
+├── README.md
+└── scripts/
+    ├── smoke-test.mjs
+    ├── demo-multiple.mjs
+    └── benchmark.mjs
+```
+
+(se um dia instalar o Playwright, crie um `.gitignore` com `node_modules/` antes
+do `git add .`, senao ele sobe a pasta inteira do Playwright pro GitHub)
+
+### 1. Criar o repositorio no GitHub
+
+1. Entre em <https://github.com/new>.
+2. **Name**: `web-reader-mcp`.
+3. Visibilidade: **Private** (recomendado) ou Public, tanto faz.
+4. **Desmarque** "Add a README" e "Add .gitignore" - a pasta ja tem README e
+   criar esses arquivos pelo site da conflito no primeiro push.
+
+### 2. Enviar o codigo (linha de comando)
+
+O caminho tem espaco (`FORA lula`), entao use **aspas** no `cd`:
+
+```bash
+cd "C:\Users\Administrator\Desktop\FORA lula\web-reader-mcp"
+```
+
+Depois, na ordem:
+
+```bash
+git init                                                    # cria o repo git local
+git add .                                                   # marca todos os arquivos
+git commit -m "web-reader MCP"                              # grava o 1o commit
+git branch -M main                                          # renomeia o branch pra main
+git remote add origin https://github.com/br-vortex-dev/web-reader-mcp-.git  # liga no GitHub
+git push -u origin main                                     # envia tudo
+```
+
+Recarregue a pagina do repositorio no GitHub: os arquivos vao estar la.
+Pronto - agora e so ir no Render (**New + -> Blueprint**) e apontar pra esse repositorio.
+
+### 3. Se travar pedindo usuario/senha (Windows)
+
+Se o `git push` abrir pop-up de login ou nao sair do lugar, use o GitHub CLI
+(`gh`, ja instalado e autenticado nesta maquina):
+
+```bash
+gh auth setup-git
+```
+
+Isso faz o git usar as credenciais do `gh` e o push passa a funcionar.
+
+### 4. Mandar mudancas no futuro
+
+Toda vez que alterar um arquivo:
+
+```bash
+git status            # ver o que mudou
+git add .
+git commit -m "descreva a mudanca aqui"
+git push
+```
+
 ## Rodar no Render (como servico web)
 
 MCP em stdio **so roda local** (depende de stdin/stdout de um processo pai). Por isso o  
@@ -63,7 +138,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
 
 ### Deploy
 
-1. Suba esta pasta (`web-reader-mcp/`) para um repositorio no GitHub.
+1. Suba o codigo no GitHub (veja a secao *Subir no GitHub* acima deste README).
 2. No Render: **New + → Blueprint** e aponte para o repositorio (o `render.yaml`  
    ja esta configurado) — ou **New + → Web Service**, com:
    - Runtime: **Node**
@@ -95,7 +170,7 @@ usuario final → seu site (Cloudflare) → seu backend → LLM (function callin
 
 1. Seu site recebe o pedido do usuário.
 2. Seu backend chama o LLM com as **ferramentas** do MCP (a lista vem de `tools/list`).
-3. O LLM decide chamar uma ferramenta (ex.: `read_page`) — seu backend faz o POST no
+3. O LLM decide chamar uma ferramenta (ex.: `read_page`) — seu backend faz o POST no  
    MCP no Render e devolve o resultado para o LLM.
 4. O LLM responde ao usuário com os dados que leu.
 
@@ -129,27 +204,27 @@ const conteudo = r.result.content[0].text; // devolver isso pro LLM
 
 ### Seguranca (essencial em produto)
 
-Sem proteção, **qualquer pessoa na internet pode usar seu MCP** e gastar seus recursos.
+Sem proteção, **qualquer pessoa na internet pode usar seu MCP** e gastar seus recursos.  
 Pra ligar a autenticação, defina no Render (Environment → Add Environment Variable):
 
 ```
 MCP_AUTH_TOKEN = um-token-longo-e-aleatorio
 ```
 
-Com isso, o MCP só aceita chamadas com o header `Authorization: Bearer <token>`
-(sem token → HTTP 401). **Nunca chame o MCP direto do browser** (aí o token vazaria) —
+Com isso, o MCP só aceita chamadas com o header `Authorization: Bearer <token>`  
+(sem token → HTTP 401). **Nunca chame o MCP direto do browser** (aí o token vazaria) —  
 sempre pelo seu backend, server-side.
 
 ### Custos e cuidados no Render
 
-- **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).
+- **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).  
   Pra produto, use o plano pago (evita dormir e dá mais RAM).
 - **30 URLs por chamada**, lotes de 6: pesquisa rápida sem estourar memória.
-- **`read_dynamic_page` (Playwright) no Render**: só no plano pago, build com
-  `npx playwright install --with-deps chromium` (o free não tem RAM pra Chromium).
+- **`read_dynamic_page` (Playwright) no Render**: só no plano pago, build com  
+  `npx playwright install --with-deps chromium` (o free não tem RAM pra Chromium).  
   Em Cloudflare Workers/Pages **não roda de jeito nenhum** (serverless, sem processo).
-- **Cloudflare x Render são coisas diferentes**: a Cloudflare hospeda **seu site**;
-  o Render hospeda **o MCP**. Não precisa migrar nada — o site continua na
+- **Cloudflare x Render são coisas diferentes**: a Cloudflare hospeda **seu site**;  
+  o Render hospeda **o MCP**. Não precisa migrar nada — o site continua na  
   Cloudflare e só faz POST pro Render.
 
 ## read_dynamic_page (opcional)
