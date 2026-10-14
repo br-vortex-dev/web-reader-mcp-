@@ -16,6 +16,7 @@
  */
 
 // Apenas built-ins do Node (o projeto continua com zero dependencias).
+import { createHash, timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
@@ -766,6 +767,18 @@ async function fetchNoRedirect(url, headers, signal) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Retry-After pode vir em segundos ("120") ou como data HTTP. Teto de 10s para
+// um servidor malicioso nao conseguir nos prender por horas.
+const RETRY_AFTER_MAX_MS = 10000;
+function parseRetryAfter(valor) {
+  if (!valor) return null;
+  const texto = String(valor).trim();
+  if (/^\d+$/.test(texto)) return Math.min(RETRY_AFTER_MAX_MS, Number(texto) * 1000);
+  const data = Date.parse(texto);
+  if (Number.isFinite(data)) return Math.min(RETRY_AFTER_MAX_MS, Math.max(0, data - Date.now()));
+  return null;
+}
+
 // Le o corpo em STREAMING e corta ao passar do teto: antes o arrayBuffer()
 // carregava a resposta inteira na memoria para so depois conferir o tamanho,
 // entao o teto nao protegia de nada.
@@ -831,6 +844,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
       if (!res.ok) {
         const err = new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim() + ` ao acessar ${url}`);
         err.status = res.status;
+        err.retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
         throw err;
       }
       const buffer = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
@@ -844,7 +858,9 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
       lastError = err;
       const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500 || err.status === 403 || err.status === 401);
       if (!retriable || attempt === retries) throw err;
-      await sleep(400 * 2 ** attempt);
+      // 429/503: respeita o Retry-After do servidor (com teto); senao backoff.
+      const respeitaRetryAfter = (err.status === 429 || err.status === 503) && err.retryAfterMs != null;
+      await sleep(respeitaRetryAfter ? err.retryAfterMs : 400 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
       if (externo) externo.removeEventListener("abort", abortarDeFora);
@@ -1898,6 +1914,18 @@ async function startHttp() {
   // chamada em /mcp precisa do header: Authorization: Bearer <token>
   const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 
+  if (!AUTH_TOKEN) {
+    console.error(
+      `[${SERVER_NAME}] AVISO: MCP_AUTH_TOKEN nao definido — o endpoint /mcp esta ABERTO para qualquer um.`
+    );
+  }
+
+  // Compara o token em TEMPO CONSTANTE. Passa os dois por sha256 antes: assim
+  // os buffers tem sempre 32 bytes, nao existe excecao por tamanho diferente e
+  // o tempo nao revela nem o tamanho nem quantos bytes bateram.
+  const sha256 = (valor) => createHash("sha256").update(String(valor), "utf8").digest();
+  const tokenConfere = (recebido) => timingSafeEqual(sha256(recebido), sha256(AUTH_TOKEN));
+
   // Rate limiting simples: max 60 requisicoes por minuto por cliente
   const RATE_LIMIT_WINDOW_MS = 60 * 1000;
   const RATE_LIMIT_MAX = 60;
@@ -1941,21 +1969,36 @@ async function startHttp() {
   }, RATE_LIMIT_WINDOW_MS);
   rateLimitCleanup.unref();
 
+  // Limite do corpo do POST. Configuravel; 1 MB e folgado para qualquer
+  // mensagem JSON-RPC do MCP.
+  const MAX_BODY_BYTES = Math.max(1024, Math.floor(Number(process.env.MAX_BODY_BYTES) || 1024 * 1024));
+
+  // Le o corpo ate o limite. Ao exceder, interrompe a leitura e rejeita com
+  // status 413 (quem chama responde e descarta a conexao).
   const readBody = (req) =>
     new Promise((resolve, reject) => {
       const chunks = [];
       let size = 0;
+      let encerrado = false;
       req.on("data", (c) => {
+        if (encerrado) return;
         size += c.length;
-        if (size > 2_000_000) {
-          reject(new Error("corpo muito grande"));
-          req.destroy();
+        if (size > MAX_BODY_BYTES) {
+          encerrado = true;
+          const err = new Error(`Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).`);
+          err.status = 413;
+          req.pause(); // para de acumular; a conexao e descartada depois da resposta
+          reject(err);
           return;
         }
         chunks.push(c);
       });
-      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      req.on("error", reject);
+      req.on("end", () => {
+        if (!encerrado) resolve(Buffer.concat(chunks).toString("utf8"));
+      });
+      req.on("error", (err) => {
+        if (!encerrado) reject(err);
+      });
     });
 
   const server = http.createServer(async (req, res) => {
@@ -1992,7 +2035,7 @@ async function startHttp() {
       const authHeader = String(req.headers.authorization || "");
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
       const token = bearer || String(req.headers["x-mcp-token"] || "");
-      if (token !== AUTH_TOKEN) {
+      if (!tokenConfere(token)) {
         res.writeHead(401, {
           "content-type": "application/json",
           "www-authenticate": "Bearer",
@@ -2052,7 +2095,28 @@ async function startHttp() {
     try {
       const raw = await readBody(req);
       parsed = JSON.parse(raw);
-    } catch {
+    } catch (err) {
+      // Se a resposta ja foi enviada/socket morreu, nao tenta escrever de novo.
+      if (res.writableEnded || res.destroyed) return;
+      if (err && err.status === 413) {
+        res.writeHead(413, { "content-type": "application/json", connection: "close" });
+        // Descarta a conexao so depois da resposta sair, para o cliente receber o 413.
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32600, message: `Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).` },
+          }),
+          () => {
+            try {
+              req.destroy();
+            } catch {
+              // socket ja encerrado
+            }
+          }
+        );
+        return;
+      }
       res.writeHead(400, { "content-type": "application/json" });
       res.end(
         JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })
@@ -2087,6 +2151,41 @@ async function startHttp() {
     console.error(`[${SERVER_NAME}] erro no servidor HTTP:`, err);
     process.exit(1);
   });
+
+  // O Render manda SIGTERM a cada deploy. Encerra limpo: para de aceitar
+  // conexoes novas, deixa as requisicoes em andamento terminarem e sai.
+  let encerrando = false;
+  const encerrar = (sinal) => {
+    if (encerrando) return;
+    encerrando = true;
+    console.error(`[${SERVER_NAME}] ${sinal} recebido — encerrando (aguardando ate 5s)...`);
+    const prazo = setTimeout(() => {
+      clearInterval(limpando);
+      console.error(`[${SERVER_NAME}] prazo de encerramento esgotado, saindo.`);
+      process.exit(0);
+    }, 5000);
+    prazo.unref();
+
+    // O keep-alive dos clientes mantem conexoes abertas depois da resposta, e o
+    // close() so completa quando todas fecharem. Fecha as ociosas agora e
+    // reaplica enquanto houver alguma: as que estavam em uso viram ociosas
+    // quando a requisicao em andamento termina.
+    let limpando = null;
+    if (typeof server.closeIdleConnections === "function") {
+      server.closeIdleConnections();
+      limpando = setInterval(() => server.closeIdleConnections(), 100);
+      limpando.unref();
+    }
+
+    server.close(() => {
+      clearTimeout(prazo);
+      clearInterval(limpando);
+      console.error(`[${SERVER_NAME}] encerrado.`);
+      process.exit(0);
+    });
+  };
+  process.on("SIGTERM", () => encerrar("SIGTERM"));
+  process.on("SIGINT", () => encerrar("SIGINT"));
 }
 
 /* ------------------------------ selecao de modo ------------------------- */

@@ -1,0 +1,27 @@
+# Dependencias (o projeto nao tem nenhuma hoje, mas se um dia instalar
+# Playwright para o read_dynamic_page, isto evita subir a pasta inteira)
+node_modules/
+
+# Segredos e configuracao local
+.env
+.env.*
+!.env.example
+
+# Logs e saida de execucao
+*.log
+*.err
+npm-debug.log*
+demo-output.txt
+
+# Estado local do agente (notas de trabalho, nao faz parte do produto)
+.workbuddy-ai/
+
+# Arquivos de editor / SO
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

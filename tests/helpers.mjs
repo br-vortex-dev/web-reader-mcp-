@@ -93,6 +93,24 @@ export async function startFixture() {
       return;
     }
 
+    // /retry-after?segundos=N -> devolve 429 com Retry-After na PRIMEIRA
+    // requisicao e a pagina normal depois, para dar para medir a espera.
+    if (path.startsWith("/retry-after")) {
+      const u = new URL(path, "http://local");
+      const segundos = u.searchParams.get("segundos") || "2";
+      const chave = `retry:${segundos}`;
+      const n = (hits.get(chave) || 0) + 1;
+      hits.set(chave, n);
+      if (n === 1) {
+        res.writeHead(429, { "content-type": "text/html", "retry-after": segundos });
+        res.end("<html><body>429</body></html>");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><html><head><title>Depois do retry</title></head><body><h1>Depois do retry</h1><p>ok</p></body></html>");
+      return;
+    }
+
     // Paginas do teste de crawl parcial: algumas leem, outras falham de
     // proposito (HTTP 404, timeout e conteudo nao-HTML).
     if (path === "/crawl/start") {
