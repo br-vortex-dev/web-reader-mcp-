@@ -373,6 +373,16 @@ const SKIP_TAGS = new Set([
   "head", "select", "button",
 ]);
 
+// Tags de bloco que, DENTRO de <pre>, nao podem emitir quebra de linha: a
+// formatacao do codigo vem das quebras do proprio fonte. Pagina que
+// embrulha cada linha de codigo no proprio elemento (estilo react.dev)
+// explodia o bloco em linhas em branco.
+const PRE_SILENCE_TAGS = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "p", "div", "section", "article", "main", "figure", "figcaption",
+  "details", "summary", "ul", "ol", "dl", "blockquote", "li",
+]);
+
 const NAMED_ENTITIES = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
   iexcl: "\u00a1", cent: "\u00a2", pound: "\u00a3", curren: "\u00a4",
@@ -634,6 +644,9 @@ function htmlToMarkdown(html, baseUrl) {
         continue;
       }
       if (skipDepth > 0) continue;
+      // BUG-8: dentro de <pre>, tag de bloco nao emite quebra de linha — a
+      // formatacao do codigo vem das quebras do proprio fonte.
+      if (preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
       if (!token.selfClosing) openStack.push(token.tag);
       switch (token.tag) {
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
@@ -726,6 +739,8 @@ function htmlToMarkdown(html, baseUrl) {
       continue;
     }
     if (skipDepth > 0) continue;
+    // BUG-8: mesma coisa do open — dentro de <pre>, bloco nao emite nada.
+    if (preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
     for (let k = openStack.length - 1; k >= 0; k--) {
       if (openStack[k] === token.tag) {
         openStack.length = k;
