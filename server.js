@@ -2016,11 +2016,16 @@ async function crawlOnePage(url, maxChars, timeoutMs) {
   ensureHtml(contentType, html);
   // BUG-1: pagina do crawl que for texto puro/XML volta cru tambem.
   if (isConteudoBruto(contentType, html)) {
+    // BUG-10: devolver { linksInternos } aqui quebrava o toolCrawlSite, que
+    // le .links — o crawl em texto puro/XML morria com TypeError
+    // "primeira.links is not iterable" antes de comecar. Os dois ramos
+    // devolvem a mesma forma: { conteudo, links }.
+    const links = extractLinks(html, finalUrl).filter(
+      (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
+    );
     return {
       conteudo: conteudoBrutoResult(html, finalUrl, maxChars),
-      linksInternos: extractLinks(html, finalUrl).filter(
-        (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
-      ),
+      links: links.map((l) => l.href),
     };
   }
   const meta = extractMeta(html);
