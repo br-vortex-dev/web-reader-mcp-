@@ -71,6 +71,9 @@ export async function startFixture() {
   // Contador de requisicoes por id: deixa visivel de FORA se a resposta veio do
   // cache (mesmo contador) ou foi baixada de novo (contador maior).
   const hits = new Map();
+  // Contador por caminho (usado pelos testes de retry: 403 definitivo tem de
+  // bater no servidor UMA vez so).
+  const contagem = new Map();
   // Candidatos "/api/..." que o servidor realmente buscou (ordem de chegada).
   const probes = [];
 
@@ -221,6 +224,133 @@ export async function startFixture() {
       return;
     }
 
+    // ---- fixtures da rodada de correcoes (bugs da bateria de campo) ----
+
+    // BUG-1: robots.txt de verdade (texto puro). Com as quebras coladas,
+    // "Disallow: /" do Yandex passa a valer para todo mundo.
+    if (path === "/robots") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end(
+        "User-agent: *\nDisallow: /busca\nAllow: /busca/about\n\n" +
+          "User-agent: Yandex\nDisallow: /\n\nSitemap: https://exemplo.org/sitemap.xml\n"
+      );
+      return;
+    }
+
+    // BUG-1: sitemap XML real (varias URLs em linhas separadas).
+    if (path === "/sitemap-fixture") {
+      res.writeHead(200, { "content-type": "application/xml; charset=utf-8" });
+      res.end(
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+          "  <url><loc>https://exemplo.org/</loc><lastmod>2026-10-14</lastmod></url>\n" +
+          "  <url><loc>https://exemplo.org/sobre</loc><lastmod>2026-10-13</lastmod></url>\n" +
+          "  <url><loc>https://exemplo.org/contato</loc><lastmod>2026-10-12</lastmod></url>\n" +
+          "</urlset>\n"
+      );
+      return;
+    }
+
+    // BUG-1: markdown cru servido como texto puro.
+    if (path === "/md-fixture") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end("# Titulo\n\nPrimeiro paragrafo.\n\n- item um\n- item dois\n\n## Fim\n");
+      return;
+    }
+
+    // BUG-2: feed Atom com CDATA. Como XML, tem de voltar inteiro (cru).
+    if (path === "/atom") {
+      res.writeHead(200, { "content-type": "application/atom+xml; charset=utf-8" });
+      res.end(
+        '<?xml version="1.0" encoding="utf-8"?>\n' +
+          '<feed xmlns="http://www.w3.org/2005/Atom">\n' +
+          "  <title>Feed de teste</title>\n" +
+          '  <entry><title>Primeira noticia</title><content type="html"><![CDATA[<p>Texto com <b>negrito</b> dentro]]></content></entry>\n' +
+          '  <entry><title>Segunda noticia</title><content type="html"><![CDATA[<p>Outro texto &amp; entidade</p>]]></content></entry>\n' +
+          "</feed>\n"
+      );
+      return;
+    }
+
+    // BUG-3: pagina SSR rica (conteudo completo no HTML) QUE TAMBEM carrega o
+    // marcador __NEXT_DATA__. read_dynamic_page nao pode trocar o texto
+    // completo pelo dump de JSON.
+    if (path === "/ssr-rico") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>SSR Rico</title></head><body>" +
+          "<h1>Documentacao</h1>" +
+          "<p>" + "Conteudo estatico completo. ".repeat(30) + "</p>" +
+          "<pre><code>def soma(a, b):\n    return a + b\n</code></pre>" +
+          "<p>Mais texto depois do codigo. " + "Explicacao detalhada. ".repeat(20) + "</p>" +
+          '<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"titulo":"Produto X"}}}</script>' +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // BUG-5: SPA pura — casca vazia, nada de texto estatico.
+    if (path === "/vazia") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html><head><title>App</title><meta name="description" content="Um app"></head><body>' +
+          '<div id="root"></div><script src="/app.js"></script></body></html>'
+      );
+      return;
+    }
+
+    // BUG-6: 403 definitivo, com contador — retry aparece como contagem > 1.
+    if (path === "/negado") {
+      contagem.set("/negado", (contagem.get("/negado") || 0) + 1);
+      res.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+      res.end("<html><body>proibido</body></html>");
+      return;
+    }
+
+    // BUG-7: pagina no estilo GitHub — numeros de linha e a estatistica
+    // duplicada marcados como aria-hidden (enfeite para leitor de tela).
+    if (path === "/github-like") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>repo/arquivo.js</title></head><body>" +
+          '<div class="alerta">Skip to content</div>' +
+          "<h1>arquivo.js</h1>" +
+          '<div class="filemeta"><span aria-hidden="true">17 lines (17 loc) · 710 Bytes</span>' +
+          "<span>17 lines (17 loc) · 710 Bytes</span></div>" +
+          '<table><tr><td aria-hidden="true">1</td><td>const a = 1;</td></tr>' +
+          '<tr><td aria-hidden="true">2</td><td>const b = 2;</td></tr></table>' +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // BUG-8: <pre> onde cada linha de codigo vem no proprio elemento (estilo
+    // react.dev) — o parser explodia linhas em branco entre as linhas.
+    if (path === "/react-like") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>React Like</title></head><body>" +
+          "<h1>Exemplo</h1>" +
+          "<pre><code>" +
+          '<div class="line">function Soma() {</div>\n' +
+          '<div class="line">  return 1 + 1;</div>\n' +
+          "<div>}</div>\n" +
+          "</code></pre></body></html>"
+      );
+      return;
+    }
+
+    // BUG-2: CDATA dentro de HTML — o ]]> vazava como texto visivel.
+    if (path === "/cdata") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>CDATA</title></head><body>" +
+          "<h1>Feed</h1><p><![CDATA[Texto com <marcacao> dentro]]></p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(FIXTURE_HTML);
   });
@@ -233,6 +363,7 @@ export async function startFixture() {
     clearProbes: () => {
       probes.length = 0;
     },
+    contagemDe: (caminho) => contagem.get(caminho) || 0,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
