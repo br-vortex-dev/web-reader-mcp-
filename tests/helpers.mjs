@@ -111,6 +111,17 @@ export async function startFixture() {
       return;
     }
 
+    // /lento?ms=N -> pagina que demora N ms (para testar limites de concorrencia)
+    if (path.startsWith("/lento")) {
+      const u = new URL(path, "http://local");
+      const ms = Number(u.searchParams.get("ms")) || 300;
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end("<!DOCTYPE html><html><head><title>Lento</title></head><body><h1>Lento</h1><p>ok</p></body></html>");
+      }, ms);
+      return;
+    }
+
     // Paginas do teste de crawl parcial: algumas leem, outras falham de
     // proposito (HTTP 404, timeout e conteudo nao-HTML).
     if (path === "/crawl/start") {

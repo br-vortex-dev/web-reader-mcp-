@@ -46,6 +46,300 @@ const FETCH_CONCURRENCY = Math.max(
 const API_MAX_CANDIDATES = Math.max(0, Math.floor(Number(process.env.API_MAX_CANDIDATES || 3)));
 const API_TOTAL_BUDGET_MS = Math.max(500, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 10000));
 
+/* --------------------------------------------------------------------------
+ * Controle de admissao e de saida
+ *
+ * Sem isso o servidor aceita trabalho sem limite: medido, a latencia p50 vai
+ * de 0,2s com 100 requisicoes simultaneas para 8s com 2000, porque nao existe
+ * contrapressao — todo mundo entra e todo mundo fica lento. Com um teto de
+ * trabalho em andamento + fila curta, quem entra e atendido rapido e quem nao
+ * entra recebe 503 explicito (nunca perda silenciosa).
+ * ------------------------------------------------------------------------ */
+
+const clampEnv = (valor, padrao, min, max) => {
+  const n = Math.floor(Number(valor));
+  if (!Number.isFinite(n) || n <= 0) return padrao;
+  return Math.max(min, Math.min(max, n));
+};
+
+// Como clampEnv, mas aceita 0 — usado onde 0 tem significado proprio
+// ("sem fila", "sem teto de conexoes").
+const clampEnvZero = (valor, padrao, min, max) => {
+  if (valor === undefined || valor === null || valor === "") return padrao;
+  const n = Math.floor(Number(valor));
+  if (!Number.isFinite(n) || n < 0) return padrao;
+  return Math.max(min, Math.min(max, n));
+};
+
+// Teto de requisicoes sendo processadas ao mesmo tempo (camada HTTP).
+// Calibrado por medicao (ver load/harness.mjs): a vazao satura em ~310 req/s
+// por nucleo e o "joelho" da curva fica em ~64 simultaneas, onde a latencia
+// ainda e baixa (p50 ~190 ms). Acima disso a vazao nao sobe e a latencia sobe.
+// 128 fica logo depois do joelho: da margem para upstream lento sem sacrificar
+// muito a latencia. Numero maior NAO aumenta a vazao — so a fila de espera.
+const MAX_INFLIGHT_REQUESTS = clampEnv(process.env.MAX_INFLIGHT_REQUESTS, 128, 1, 100000);
+// Quantas esperam por uma vaga. Fila maior = menos 503 e mais espera; o tamanho
+// sai da conta "vazao x prazo": ~300 req/s x 15 s ~ 4500 requisicoes.
+const MAX_WAITING_REQUESTS = clampEnvZero(process.env.MAX_WAITING_REQUESTS, 4096, 0, 1000000);
+// Teto de espera por uma vaga: passou disso, 503 com Retry-After. Precisa ser
+// menor que o timeout do cliente MCP (tipicamente 30-60 s) para ele receber a
+// resposta em vez de estourar sozinho.
+const MAX_WAIT_MS = clampEnv(process.env.MAX_WAIT_MS, 15000, 1, 600000);
+
+// Teto de downloads simultaneos. So limita sockets/tarefas: quem protege a
+// MEMORIA e o orcamento por bytes (abaixo). Por isso o default e alto.
+const OUTBOUND_MAX_CONCURRENCY = clampEnv(process.env.OUTBOUND_MAX_CONCURRENCY, 128, 1, 4096);
+// Quantos downloads esperam por uma vaga. Fila cheia => erro claro e imediato.
+const OUTBOUND_MAX_QUEUE = clampEnvZero(process.env.OUTBOUND_MAX_QUEUE, 200, 0, 100000);
+
+// Orcamento de MEMORIA para downloads em voo. Este e o teto que importa: e por
+// bytes reservados, e nao por numero de downloads, entao muitas paginas
+// pequenas (o caso comum) passam ao mesmo tempo e poucas grandes sao
+// limitadas. A reserva e feita UMA vez, antes de ler, entao nao existe
+// hold-and-wait e nao ha risco de deadlock.
+const OUTBOUND_MEMORY_BUDGET = clampEnv(
+  process.env.OUTBOUND_MEMORY_BUDGET,
+  128 * 1024 * 1024,
+  4 * 1024 * 1024,
+  1024 * 1024 * 1024
+);
+
+// Tuning do servidor HTTP. A ordem importa: Node exige
+// keepAliveTimeout <= headersTimeout <= requestTimeout.
+const HTTP_REQUEST_TIMEOUT_MS = clampEnv(process.env.HTTP_REQUEST_TIMEOUT_MS, 300000, 1000, 600000);
+const HTTP_HEADERS_TIMEOUT_MS = clampEnv(process.env.HTTP_HEADERS_TIMEOUT_MS, 66000, 1000, HTTP_REQUEST_TIMEOUT_MS);
+const HTTP_KEEPALIVE_TIMEOUT_MS = clampEnv(process.env.HTTP_KEEPALIVE_TIMEOUT_MS, 65000, 1000, HTTP_HEADERS_TIMEOUT_MS);
+// 0 = sem teto (o limite real vira o de file descriptors do sistema).
+const MAX_CONNECTIONS = clampEnvZero(process.env.MAX_CONNECTIONS, 0, 0, 1000000);
+
+// Fila FIFO com indice de cabeca em vez de shift()/splice(): com milhares de
+// esperando, shift() e splice() sao O(n) e o custo aparece justamente sob
+// carga. O tamanho e mantido por contador (nunca varrendo o array) e a remocao
+// por timeout e "preguicosa" (marca e pula na saida).
+function criarFila() {
+  let itens = [];
+  let cabeca = 0;
+  let pendentes = 0;
+
+  const compactar = () => {
+    if (cabeca > 1024 && cabeca * 2 >= itens.length) {
+      itens = itens.slice(cabeca);
+      cabeca = 0;
+    }
+  };
+
+  const peek = () => {
+    while (cabeca < itens.length && itens[cabeca].decidido) {
+      itens[cabeca] = undefined;
+      cabeca++;
+    }
+    compactar();
+    return cabeca < itens.length ? itens[cabeca] : undefined;
+  };
+
+  return {
+    get tamanho() {
+      return pendentes;
+    },
+    push: (item) => {
+      itens.push(item);
+      pendentes++;
+    },
+    peek,
+    shift: () => {
+      const item = peek();
+      if (item) {
+        itens[cabeca] = undefined;
+        cabeca++;
+        pendentes--;
+      }
+      return item;
+    },
+    cancelar: (item) => {
+      if (!item.decidido) {
+        item.decidido = true;
+        pendentes--;
+      }
+    },
+  };
+}
+
+// Limitador por BYTES em voo (semaforo ponderado, fila limitada).
+// Diferente de um teto por numero de downloads, ele deixa passar muitas paginas
+// pequenas ao mesmo tempo e poucas grandes — que e o que a memoria precisa.
+// A reserva acontece uma unica vez, antes de ler o corpo, entao nunca ha
+// "segura e espera" (que poderia travar tudo).
+function criarLimitadorDeBytes({ orcamentoBytes, filaMax, nome, esperaMaxMs = 0 }) {
+  let usado = 0;
+  const fila = criarFila();
+  const stats = { nome, orcamentoBytes, usado: 0, naFila: 0, recusados: 0, atendidos: 0, picoUsado: 0, picoFila: 0 };
+
+  const sincronizar = () => {
+    stats.usado = usado;
+    stats.naFila = fila.tamanho;
+    stats.picoUsado = Math.max(stats.picoUsado, usado);
+    stats.picoFila = Math.max(stats.picoFila, fila.tamanho);
+  };
+
+  const ocupado = () =>
+    new Error(
+      `Servidor ocupado (${nome}): ${usado} de ${orcamentoBytes} bytes reservados. Tente de novo em instantes.`
+    );
+
+  const ajustar = (bytes) => Math.max(1, Math.min(bytes, orcamentoBytes));
+
+  // Atende a fila em ordem, parando no primeiro que nao couber (FIFO estrito;
+  // quem nao cabe espera a proxima liberacao ou estoura o prazo).
+  const tentarAtender = () => {
+    for (;;) {
+      const item = fila.peek();
+      if (!item) break;
+      if (usado + item.bytes > orcamentoBytes) break;
+      fila.shift();
+      if (item.timer) clearTimeout(item.timer);
+      item.decidido = true;
+      usado += item.bytes;
+      item.resolve();
+    }
+    sincronizar();
+  };
+
+  const adquirir = (bytes) => {
+    const pedido = ajustar(bytes);
+    // Fila vazia e espaco livre: entra direto. Se ha fila, respeita a ordem.
+    if (fila.tamanho === 0 && usado + pedido <= orcamentoBytes) {
+      usado += pedido;
+      sincronizar();
+      return Promise.resolve();
+    }
+    if (fila.tamanho >= filaMax) {
+      stats.recusados++;
+      return Promise.reject(ocupado());
+    }
+    return new Promise((resolve, reject) => {
+      const entrada = { bytes: pedido, resolve, reject, decidido: false, timer: null };
+      if (esperaMaxMs > 0) {
+        entrada.timer = setTimeout(() => {
+          if (entrada.decidido) return;
+          fila.cancelar(entrada);
+          stats.recusados++;
+          sincronizar();
+          reject(ocupado());
+        }, esperaMaxMs);
+        entrada.timer.unref();
+      }
+      fila.push(entrada);
+      sincronizar();
+    });
+  };
+
+  const liberar = (bytes) => {
+    usado = Math.max(0, usado - ajustar(bytes));
+    stats.atendidos++;
+    tentarAtender();
+  };
+
+  return { adquirir, liberar, stats };
+}
+
+/* --------------------------------------------------------------------------
+ * Limitador de concorrencia com fila limitada (a "fila assincrona" possivel
+ * sem dependencias). Nao existe pool externo que ajude aqui: a capacidade e
+ * deste processo, entao a fila tem que ser local e CURTA.
+ * ------------------------------------------------------------------------ */
+function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
+  let ativos = 0;
+  const fila = criarFila();
+  const stats = { nome, limite, filaMax, ativos: 0, naFila: 0, recusados: 0, atendidos: 0, picoAtivos: 0, picoFila: 0 };
+
+  const sincronizar = () => {
+    stats.ativos = ativos;
+    stats.naFila = fila.tamanho;
+    stats.picoAtivos = Math.max(stats.picoAtivos, ativos);
+    stats.picoFila = Math.max(stats.picoFila, fila.tamanho);
+  };
+
+  const ocupado = () =>
+    new Error(`Servidor ocupado (${nome}): ${ativos} em andamento e ${fila.tamanho} na fila. Tente de novo em instantes.`);
+
+  const atender = () => {
+    const item = fila.shift();
+    if (!item) return;
+    if (item.timer) clearTimeout(item.timer);
+    item.decidido = true;
+    ativos++;
+    item.resolve();
+  };
+
+  const liberar = () => {
+    ativos--;
+    atender();
+    sincronizar();
+  };
+
+  const adquirir = () => {
+    if (ativos < limite) {
+      ativos++;
+      sincronizar();
+      return Promise.resolve();
+    }
+    if (fila.tamanho >= filaMax) {
+      stats.recusados++;
+      return Promise.reject(ocupado());
+    }
+    return new Promise((resolve, reject) => {
+      const entrada = { decidido: false, timer: null, resolve, reject };
+      if (esperaMaxMs > 0) {
+        entrada.timer = setTimeout(() => {
+          if (entrada.decidido) return;
+          fila.cancelar(entrada);
+          stats.recusados++;
+          sincronizar();
+          reject(ocupado());
+        }, esperaMaxMs);
+        entrada.timer.unref();
+      }
+      fila.push(entrada);
+      sincronizar();
+    });
+  };
+
+  // Roda `fn` respeitando o limite. A vaga e liberada mesmo se `fn` falhar.
+  const executar = async (fn) => {
+    await adquirir();
+    try {
+      const resultado = await fn();
+      stats.atendidos++;
+      return resultado;
+    } finally {
+      liberar();
+    }
+  };
+
+  return { executar, adquirir, liberar, stats };
+}
+
+// Admissao das requisicoes HTTP (criada em startHttp) e saida (usada por todo
+// fetch de pagina, em qualquer ferramenta).
+const admissaoHttp = criarLimitador({
+  limite: MAX_INFLIGHT_REQUESTS,
+  filaMax: MAX_WAITING_REQUESTS,
+  esperaMaxMs: MAX_WAIT_MS,
+  nome: "requisicoes",
+});
+const limiteSaida = criarLimitador({
+  limite: OUTBOUND_MAX_CONCURRENCY,
+  filaMax: OUTBOUND_MAX_QUEUE,
+  nome: "downloads",
+});
+// Teto de memoria dos downloads em voo (por bytes reservados).
+const orcamentoSaida = criarLimitadorDeBytes({
+  orcamentoBytes: OUTBOUND_MEMORY_BUDGET,
+  filaMax: OUTBOUND_MAX_QUEUE,
+  esperaMaxMs: MAX_WAIT_MS,
+  nome: "memoria-de-download",
+});
+
 // User-agents alternativos para sites que bloqueiam o primeiro
 const ALT_USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -782,31 +1076,46 @@ function parseRetryAfter(valor) {
 // Le o corpo em STREAMING e corta ao passar do teto: antes o arrayBuffer()
 // carregava a resposta inteira na memoria para so depois conferir o tamanho,
 // entao o teto nao protegia de nada.
+//
+// Antes de comecar a ler, RESERVA memoria no orcamento de saida com base no
+// content-length. E assim que o teto fica por bytes em voo e nao por numero de
+// downloads: 200 paginas de 200 KB passam juntas (40 MB), 20 paginas de 8 MB
+// nao (160 MB). A reserva e unica e no inicio, entao nao ha hold-and-wait.
 async function readBodyWithLimit(res, maxBytes) {
   const body = res.body;
   if (!body) return Buffer.alloc(0);
-  const reader = body.getReader();
-  const chunks = [];
-  let total = 0;
+
+  const declarado = Number(res.headers.get("content-length"));
+  const estimativa = Number.isFinite(declarado) && declarado > 0 ? declarado : 256 * 1024;
+  const reserva = Math.min(maxBytes, estimativa);
+  await orcamentoSaida.adquirir(reserva);
+
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new Error(`Resposta muito grande (acima de ${maxBytes} bytes, maximo ${MAX_RESPONSE_BYTES})`);
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    // Solta a conexao e para de ler o resto do corpo.
+    const reader = body.getReader();
+    const chunks = [];
+    let total = 0;
     try {
-      await reader.cancel();
-    } catch {
-      // corpo ja encerrado
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new Error(`Resposta muito grande (acima de ${maxBytes} bytes, maximo ${MAX_RESPONSE_BYTES})`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      // Solta a conexao e para de ler o resto do corpo.
+      try {
+        await reader.cancel();
+      } catch {
+        // corpo ja encerrado
+      }
     }
+    return Buffer.concat(chunks, total);
+  } finally {
+    orcamentoSaida.liberar(reserva);
   }
-  return Buffer.concat(chunks, total);
 }
 
 async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo } = {}) {
@@ -992,7 +1301,10 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, re
     return hit.payload;
   }
   if (hit) cacheDelete(url); // expirada: libera os bytes na hora
-  const payload = await fetchTextWithFallback(url, { timeoutMs, signal, retries });
+  // Todo download de pagina passa pelo limitador de saida: e o que impede
+  // 10 mil requisicoes simultaneas de abrirem 10 mil downloads de ate 10 MB.
+  // Fila cheia devolve erro claro em vez de acumular latencia sem limite.
+  const payload = await limiteSaida.executar(() => fetchTextWithFallback(url, { timeoutMs, signal, retries }));
   const bytes = payloadBytes(payload);
   // Grande demais para o cache: devolve normal, so nao guarda.
   if (bytes <= CACHE_MAX_ENTRY_BYTES) {
@@ -1926,9 +2238,9 @@ async function startHttp() {
   const sha256 = (valor) => createHash("sha256").update(String(valor), "utf8").digest();
   const tokenConfere = (recebido) => timingSafeEqual(sha256(recebido), sha256(AUTH_TOKEN));
 
-  // Rate limiting simples: max 60 requisicoes por minuto por cliente
-  const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-  const RATE_LIMIT_MAX = 60;
+  // Rate limiting simples: max RATE_LIMIT_MAX requisicoes por janela, por cliente
+  const RATE_LIMIT_WINDOW_MS = clampEnv(process.env.RATE_LIMIT_WINDOW_MS, 60 * 1000, 1000, 3600000);
+  const RATE_LIMIT_MAX = clampEnv(process.env.RATE_LIMIT_MAX, 60, 1, 1000000);
   const RATE_LIMIT_MAX_ENTRIES = 10000;
   const rateLimitMap = new Map();
 
@@ -2016,11 +2328,27 @@ async function startHttp() {
 
     if (path === "/health" || path === "/") {
       const cache = cacheStats();
+      const req_ = admissaoHttp.stats;
+      const out = limiteSaida.stats;
+      const mem = process.memoryUsage();
+      // O /health NUNCA passa pelo controle de admissao: se ele fosse
+      // enfileirado, o health check do Render marcaria o servico como fora do
+      // ar justamente quando ele esta sob carga.
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       res.end(
         `web-reader-mcp v${SERVER_VERSION} OK | cache: ${cache.entries} entradas, ` +
           `${cache.bytes} bytes / ${cache.maxBytes} bytes ` +
-          `(max ${cache.maxEntries} entradas, ttl ${Math.round(cache.ttlMs / 60000)} min)`
+          `(max ${cache.maxEntries} entradas, ttl ${Math.round(cache.ttlMs / 60000)} min) | ` +
+          `requisicoes: ${req_.ativos} ativas, ${req_.naFila} na fila ` +
+          `(max ${req_.limite}/${req_.filaMax}, recusadas ${req_.recusados}) | ` +
+          `downloads: ${out.ativos} ativos, ${out.naFila} na fila ` +
+          `(max ${out.limite}/${out.filaMax}, recusados ${out.recusados}) | ` +
+          `memoria de download: ${Math.round(orcamentoSaida.stats.usado / 1024 / 1024)} MB de ` +
+          `${Math.round(orcamentoSaida.stats.orcamentoBytes / 1024 / 1024)} MB ` +
+          `(pico ${Math.round(orcamentoSaida.stats.picoUsado / 1024 / 1024)} MB, ` +
+          `${orcamentoSaida.stats.naFila} na fila, recusados ${orcamentoSaida.stats.recusados}) | ` +
+          `conexoes: ${typeof server.getConnections === "function" ? await new Promise((r) => server.getConnections((e, n) => r(e ? -1 : n))) : "?"} | ` +
+          `rss: ${Math.round(mem.rss / 1024 / 1024)} MB`
       );
       return;
     }
@@ -2091,59 +2419,107 @@ async function startHttp() {
       return;
     }
 
-    let parsed;
+    // Controle de admissao. Sob carga extrema a requisicao espera um pouco por
+    // uma vaga e, se nao conseguir, recebe 503 explicito na hora. Sem isto o
+    // servidor aceita trabalho sem limite e a latencia cresce sem teto (medido:
+    // p50 de 8s com 2000 simultaneas) — e ai TODO mundo estoura o timeout, que
+    // e a forma mais silenciosa de "perder requisicao".
     try {
-      const raw = await readBody(req);
-      parsed = JSON.parse(raw);
+      await admissaoHttp.adquirir();
     } catch (err) {
-      // Se a resposta ja foi enviada/socket morreu, nao tenta escrever de novo.
-      if (res.writableEnded || res.destroyed) return;
-      if (err && err.status === 413) {
-        // Nao le mais o corpo: a leitura ja foi interrompida em readBody e o
-        // request ficou pausado. Nao chamamos req.destroy() aqui de proposito:
-        // destroy() manda RST e o cliente pode perder o 413 que acabamos de
-        // enviar (era uma corrida real, aparecia sob carga). Com
-        // 'connection: close' o proprio Node fecha a conexao de forma limpa
-        // (FIN) depois da resposta.
-        res.writeHead(413, { "content-type": "application/json", connection: "close" });
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32600, message: `Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).` },
-          })
-        );
-        return;
-      }
-      res.writeHead(400, { "content-type": "application/json" });
+      res.writeHead(503, {
+        "content-type": "application/json",
+        "retry-after": 1,
+        "access-control-allow-origin": "*",
+      });
       res.end(
-        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32002, message: err.message },
+        })
       );
       return;
     }
 
-    const messages = Array.isArray(parsed) ? parsed : [parsed];
-    const responses = [];
-    for (const msg of messages) {
-      await handleMessage(msg, (message) => responses.push(message));
-    }
+    try {
+      let parsed;
+      try {
+        const raw = await readBody(req);
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        // Se a resposta ja foi enviada/socket morreu, nao tenta escrever de novo.
+        if (res.writableEnded || res.destroyed) return;
+        if (err && err.status === 413) {
+          // Nao le mais o corpo: a leitura ja foi interrompida em readBody e o
+          // request ficou pausado. Nao chamamos req.destroy() aqui de proposito:
+          // destroy() manda RST e o cliente pode perder o 413 que acabamos de
+          // enviar (era uma corrida real, aparecia sob carga). Com
+          // 'connection: close' o proprio Node fecha a conexao de forma limpa
+          // (FIN) depois da resposta.
+          res.writeHead(413, { "content-type": "application/json", connection: "close" });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32600, message: `Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).` },
+            })
+          );
+          return;
+        }
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })
+        );
+        return;
+      }
 
-    if (responses.length === 0) {
-      // so notificacoes
-      res.writeHead(202, { "content-type": "application/json", "access-control-allow-origin": "*" });
-      res.end();
-      return;
-    }
+      const messages = Array.isArray(parsed) ? parsed : [parsed];
+      const responses = [];
+      for (const msg of messages) {
+        await handleMessage(msg, (message) => responses.push(message));
+      }
 
-    res.writeHead(200, {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-    });
-    res.end(JSON.stringify(responses.length === 1 && !Array.isArray(parsed) ? responses[0] : responses));
+      if (responses.length === 0) {
+        // so notificacoes
+        res.writeHead(202, { "content-type": "application/json", "access-control-allow-origin": "*" });
+        res.end();
+        return;
+      }
+
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*",
+      });
+      res.end(JSON.stringify(responses.length === 1 && !Array.isArray(parsed) ? responses[0] : responses));
+    } finally {
+      // A vaga e sempre devolvida, inclusive nos returns acima e em erro.
+      admissaoHttp.liberar();
+    }
   });
 
+  /* ------------------------- tuning do servidor HTTP --------------------- *
+   * Sob alta concorrencia o que mais custa nao e o CPU: e o churn de conexao.
+   * O keepAliveTimeout padrao do Node e de 5s, entao um cliente ativo fica
+   * reabrindo conexao (TCP + TLS no proxy) sem parar. Subir o keep-alive para
+   * acima do idle timeout do balanceador evita esse churn e evita 502 por
+   * corrida (o balanceador reusa uma conexao que o servidor acabou de fechar).
+   * ---------------------------------------------------------------------- */
+  server.keepAliveTimeout = HTTP_KEEPALIVE_TIMEOUT_MS;
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+  // Deixa o Node responder rapido quando o cliente some no meio.
+  server.maxRequestsPerSocket = 0; // 0 = sem teto de requisicoes por conexao
+  if (MAX_CONNECTIONS > 0) server.maxConnections = MAX_CONNECTIONS;
+
   server.listen(port, () => {
-    console.error(`[${SERVER_NAME}] v${SERVER_VERSION} no ar - modo HTTP (Render) na porta ${port}`);
+    console.error(
+      `[${SERVER_NAME}] v${SERVER_VERSION} no ar - modo HTTP (Render) na porta ${port} | ` +
+        `admissao: ${MAX_INFLIGHT_REQUESTS}+${MAX_WAITING_REQUESTS} (espera ${MAX_WAIT_MS} ms) | ` +
+        `downloads: ${OUTBOUND_MAX_CONCURRENCY}+${OUTBOUND_MAX_QUEUE} | ` +
+        `rate limit: ${RATE_LIMIT_MAX}/${Math.round(RATE_LIMIT_WINDOW_MS / 1000)}s | ` +
+        `keep-alive: ${HTTP_KEEPALIVE_TIMEOUT_MS} ms`
+    );
   });
   server.on("error", (err) => {
     console.error(`[${SERVER_NAME}] erro no servidor HTTP:`, err);
