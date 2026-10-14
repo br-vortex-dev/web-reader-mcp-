@@ -1361,12 +1361,47 @@ function ensureHtml(contentType, html) {
   }
 }
 
+// --------------------------------------------------------------------- *
+// Conteudo puro (texto plano e XML): devolver como veio                  *
+// --------------------------------------------------------------------- *
+// robots.txt, sitemap.xml, feeds RSS/Atom, .md e .json crus: o pipeline de
+// markdown colapsa TODAS as quebras de linha e arrancaria as tags. Em
+// robots.txt isso faz o "Disallow: /" do Yandex valer para todo mundo; num
+// sitemap, cola as URLs umas nas outras. A fidelidade manda devolver o
+// texto cru — so com o fim de linha normalizado.
+function isConteudoBruto(contentType, html) {
+  const ct = String(contentType || "").toLowerCase();
+  if (!ct || ct.includes("html")) return false;
+  // text/plain e qualquer variante de xml (sitemap, RSS, Atom, SVG...)
+  if (!/^text\/plain|xml/.test(ct)) return false;
+  // Servidor mal-configurado que manda HTML como text/plain: segue no parser.
+  if (/^\s*<!doctype html|^\s*<html[\s>]/i.test(html)) return false;
+  return true;
+}
+
+function conteudoBrutoResult(html, finalUrl, maxChars) {
+  const texto = html.replace(/\r\n?/g, "\n");
+  const { text, truncated } = truncate(texto, maxChars);
+  return formatReadResult({
+    finalUrl,
+    meta: extractMeta(html),
+    text,
+    truncated,
+    fullLength: texto.length,
+    extraLabel: "Conteudo de texto puro/XML (sem conversao para markdown)",
+  });
+}
+
 async function toolReadPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
   ensureHtml(contentType, html);
+  // BUG-1: texto puro e XML voltam como vieram, com as quebras de linha.
+  if (isConteudoBruto(contentType, html)) {
+    return conteudoBrutoResult(html, finalUrl, maxChars);
+  }
   const meta = extractMeta(html);
   let markdown = htmlToMarkdown(html, finalUrl);
   // Se o conteúdo extraído for muito curto, tenta extrair dados embutidos
@@ -1620,6 +1655,10 @@ async function toolReadDynamicPage(args) {
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
   ensureHtml(contentType, html);
+  // BUG-1: sitemap/feed/robots passados como "dinamicos" tambem voltam crus.
+  if (isConteudoBruto(contentType, html)) {
+    return conteudoBrutoResult(html, finalUrl, maxChars);
+  }
   const meta = extractMeta(html);
   const markdown = htmlToMarkdown(html, finalUrl);
 
@@ -1685,8 +1724,12 @@ async function toolExtractLinks(args) {
 
 async function readOnePage(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
-  const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html);
+  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  ensureHtml(contentType, html);
+  // BUG-1: mesma regra do read_page — texto puro/XML volta cru.
+  if (isConteudoBruto(contentType, html)) {
+    return conteudoBrutoResult(html, finalUrl, maxChars);
+  }
   const meta = extractMeta(html);
   const markdown = htmlToMarkdown(html, finalUrl);
   const { text, truncated } = truncate(markdown, maxChars);
@@ -1858,8 +1901,17 @@ function classifyFetchError(err) {
 // se isola (no meio do crawl) ou propaga (na URL inicial).
 async function crawlOnePage(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
-  const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html);
+  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  ensureHtml(contentType, html);
+  // BUG-1: pagina do crawl que for texto puro/XML volta cru tambem.
+  if (isConteudoBruto(contentType, html)) {
+    return {
+      conteudo: conteudoBrutoResult(html, finalUrl, maxChars),
+      linksInternos: extractLinks(html, finalUrl).filter(
+        (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
+      ),
+    };
+  }
   const meta = extractMeta(html);
   const markdown = htmlToMarkdown(html, finalUrl);
   const { text, truncated } = truncate(markdown, maxChars);
