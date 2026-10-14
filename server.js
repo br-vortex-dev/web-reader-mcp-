@@ -1313,15 +1313,16 @@ async function toolReadDynamicPage(args) {
   const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
 
   // Se achou dados, usa eles; senao, cai no conteudo estatico com aviso.
+  // O cabecalho (titulo, URL, rotulo, contagem) e montado UMA vez pelo
+  // formatReadResult — antes o fullText ja trazia tudo e saia duplicado.
   if (dynamicMarkdown) {
-    const fullText = `# ${meta.title || "(sem titulo)"}\nURL: ${finalUrl}\nPagina dinamica — dados extraidos do HTML embutido:\n\n${dynamicMarkdown}`;
-    const { text, truncated } = truncate(fullText, maxChars);
+    const { text, truncated } = truncate(dynamicMarkdown, maxChars);
     return formatReadResult({
       finalUrl,
       meta,
       text,
       truncated,
-      fullLength: fullText.length,
+      fullLength: dynamicMarkdown.length,
       extraLabel: "Pagina dinamica — dados extraidos do HTML embutido",
     });
   }

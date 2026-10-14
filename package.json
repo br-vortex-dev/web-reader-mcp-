@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test tests/cache.test.mjs tests/crawl.test.mjs tests/internal-api.test.mjs tests/parser.test.mjs tests/security.test.mjs tests/integration.test.mjs",
+    "test": "node --test tests/cache.test.mjs tests/crawl.test.mjs tests/dynamic.test.mjs tests/internal-api.test.mjs tests/parser.test.mjs tests/security.test.mjs tests/integration.test.mjs",
     "test:e2e": "node scripts/smoke-test.mjs"
   }
 }

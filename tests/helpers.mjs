@@ -127,6 +127,21 @@ export async function startFixture() {
       return;
     }
 
+    // /dinamica -> pagina curta com dados embutidos (__NEXT_DATA__): dispara o
+    // caminho de read_dynamic_page que montava o cabecalho duas vezes.
+    if (path === "/dinamica") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>ComDados</title>" +
+          '<meta name="description" content="Descricao de teste"></head><body>' +
+          '<div id="root"></div>' +
+          '<script id="__NEXT_DATA__" type="application/json">' +
+          '{"props":{"pageProps":{"titulo":"Produto X","preco":123.45}}}' +
+          "</script></body></html>"
+      );
+      return;
+    }
+
     // /api/pagina?cands=/a|/b -> pagina curta (markdown < 300 chars) cujo script
     // cita os candidatos. Dispara o extractEmbeddedData do read_page.
     if (path.startsWith("/api/pagina")) {
