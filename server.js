@@ -2099,21 +2099,19 @@ async function startHttp() {
       // Se a resposta ja foi enviada/socket morreu, nao tenta escrever de novo.
       if (res.writableEnded || res.destroyed) return;
       if (err && err.status === 413) {
+        // Nao le mais o corpo: a leitura ja foi interrompida em readBody e o
+        // request ficou pausado. Nao chamamos req.destroy() aqui de proposito:
+        // destroy() manda RST e o cliente pode perder o 413 que acabamos de
+        // enviar (era uma corrida real, aparecia sob carga). Com
+        // 'connection: close' o proprio Node fecha a conexao de forma limpa
+        // (FIN) depois da resposta.
         res.writeHead(413, { "content-type": "application/json", connection: "close" });
-        // Descarta a conexao so depois da resposta sair, para o cliente receber o 413.
         res.end(
           JSON.stringify({
             jsonrpc: "2.0",
             id: null,
             error: { code: -32600, message: `Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).` },
-          }),
-          () => {
-            try {
-              req.destroy();
-            } catch {
-              // socket ja encerrado
-            }
-          }
+          })
         );
         return;
       }
