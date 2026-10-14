@@ -26,7 +26,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 npm test
 ```
 
-Roda oito arquivos em `tests/` (60 testes, ~25 s, sem rede na maioria):
+Roda nove arquivos em `tests/` (66 testes, ~30 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -37,6 +37,7 @@ Roda oito arquivos em `tests/` (60 testes, ~25 s, sem rede na maioria):
 | `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
 | `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |
 | `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
+| `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 
 Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
@@ -296,10 +297,52 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `FETCH_CONCURRENCY` | `6` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
 | `API_MAX_CANDIDATES` | `3` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
 | `API_TOTAL_BUDGET_MS` | `10000` (10 s) | Orçamento total dessa busca de APIs internas. |
+| `MAX_INFLIGHT_REQUESTS` | `128` | Quantas requisições são processadas ao mesmo tempo. Calibrado pelo **joelho da curva de capacidade** (~64 no hardware de referência). **Aumentar não aumenta a vazão** — só a fila. |
+| `MAX_WAITING_REQUESTS` | `4096` | Quantas esperam por uma vaga. `0` = recusa na hora. |
+| `MAX_WAIT_MS` | `15000` (15 s) | Teto de espera por uma vaga; depois disso, **503 com `Retry-After`**. Deve ser menor que o timeout do seu cliente MCP. |
+| `OUTBOUND_MAX_CONCURRENCY` | `128` | Downloads simultâneos (limita sockets/tarefas). |
+| `OUTBOUND_MAX_QUEUE` | `200` | Quantos downloads esperam por vaga. Fila cheia = erro claro e imediato. |
+| `OUTBOUND_MEMORY_BUDGET` | `134217728` (128 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, MAX_RESPONSE_BYTES)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. |
+| `HTTP_KEEPALIVE_TIMEOUT_MS` | `65000` | Keep-alive do servidor. O padrão do Node é 5 s, o que causa **churn de conexão** sob carga; e precisa ser **maior que o idle timeout do balanceador**, senão dá 502. |
+| `HTTP_HEADERS_TIMEOUT_MS` | `66000` | Precisa ser ≥ keep-alive. |
+| `HTTP_REQUEST_TIMEOUT_MS` | `300000` | Precisa ser ≥ headers. |
+| `MAX_CONNECTIONS` | `0` (sem teto) | Teto de conexões aceitas; `0` deixa o limite para o SO. |
+| `RATE_LIMIT_MAX` | `60` | Requisições por janela, por cliente. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Tamanho da janela do rate limit. |
 
 Uma variável só de teste, usada pela suíte: `TEST_SERVER_PATH`, que aponta os
 testes para outra cópia do `server.js` (serve para provar que os testes falham
 numa versão antiga).
+
+### Capacidade e carga
+
+O teto deste serviço é **CPU de um núcleo**: ~310 req/s por núcleo, porque cada
+página custa ~3 ms de `tokenize` + `htmlToMarkdown`. Não é HTTP, cache nem fila.
+
+Curva medida (`node load/harness.mjs --mode read --delay 150`):
+
+| Concorrência | Vazão | p50 | Sucesso |
+| --- | --- | --- | --- |
+| 32 | 182 req/s | 171 ms | 100% |
+| **64** | **309 req/s** | **189 ms** | 100% |
+| 128 | 311 req/s | 364 ms | 100% |
+| 2.000 | 293 req/s | 6,3 s | 100% |
+
+O **joelho está em ~64 simultâneas**. Repare que 10.000 clientes respeitando o
+rate limit (60/min cada) geram apenas **166 req/s** — isso é o caso real, e cai
+confortavelmente à esquerda do joelho. Já 10.000 requisições *em voo* não cabem
+numa instância: o servidor atende o que pode e responde **503 explícito** para o
+resto, sem estourar a memória.
+
+Para testar carga:
+
+```bash
+node load/harness.mjs --concurrency 64 --seconds 15 --mode read --delay 150
+k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t load/k6.js
+```
+
+O `k6` não é dependência do projeto — instale à parte (`winget`/`brew`/`apt`).
+Detalhes, números antes/depois e o caminho para 10k em `RELATORIO-CAPACIDADE.md`.
 
 ### Rate limit e `x-forwarded-for`
 
