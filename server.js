@@ -1662,6 +1662,13 @@ async function toolReadDynamicPage(args) {
   const meta = extractMeta(html);
   const markdown = htmlToMarkdown(html, finalUrl);
 
+  // BUG-3: se o HTML estatico ja tem conteudo completo, ele GANHA. Dados
+  // embutidos (__NEXT_DATA__ etc.) so substituem quando o estatico e curto
+  // — a MESMA regra que o read_page aplica (la: markdown < 300 caracteres).
+  // Antes uma pagina SSR rica (react.dev) tinha a documentacao inteira
+  // sobrescrita por um dump de JSON.
+  const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= 300;
+
   // Se nao parece dinamica, retorna o conteudo estatico normal.
   if (!isDynamicPage(html, markdown)) {
     const { text, truncated } = truncate(markdown, maxChars);
@@ -1672,6 +1679,20 @@ async function toolReadDynamicPage(args) {
       truncated,
       fullLength: markdown.length,
       extraLabel: "Pagina estatica (nao precisa de JavaScript)",
+    });
+  }
+
+  // Pagina "dinamica" (tem marcador de framework) MAS com texto completo no
+  // HTML: entrega o estatico e diz por que nao usou os dados embutidos.
+  if (estaticoCompleto) {
+    const { text, truncated } = truncate(markdown, maxChars);
+    return formatReadResult({
+      finalUrl,
+      meta,
+      text,
+      truncated,
+      fullLength: markdown.length,
+      extraLabel: "Conteudo estatico do HTML usado (dados embutidos nao substituiram — markdown completo)",
     });
   }
 
