@@ -81,6 +81,25 @@ const NAMED_ENTITIES = {
   darr: "\u2193", harr: "\u2194", minus: "\u2212", infin: "\u221e",
   ne: "\u2260", le: "\u2264", ge: "\u2265", hearts: "\u2665",
   diams: "\u2666", clubs: "\u2663", spades: "\u2660",
+  // Letras do Latin-1 (ISO-8859-1) — sem elas "&ccedil;&atilde;o" saia literal.
+  Agrave: "\u00c0", Aacute: "\u00c1", Acirc: "\u00c2", Atilde: "\u00c3", Auml: "\u00c4",
+  Aring: "\u00c5", AElig: "\u00c6", Ccedil: "\u00c7", Egrave: "\u00c8", Eacute: "\u00c9",
+  Ecirc: "\u00ca", Euml: "\u00cb", Igrave: "\u00cc", Iacute: "\u00cd", Icirc: "\u00ce",
+  Iuml: "\u00cf", ETH: "\u00d0", Ntilde: "\u00d1", Ograve: "\u00d2", Oacute: "\u00d3",
+  Ocirc: "\u00d4", Otilde: "\u00d5", Ouml: "\u00d6", Oslash: "\u00d8", Ugrave: "\u00d9",
+  Uacute: "\u00da", Ucirc: "\u00db", Uuml: "\u00dc", Yacute: "\u00dd", THORN: "\u00de",
+  szlig: "\u00df", agrave: "\u00e0", aacute: "\u00e1", acirc: "\u00e2", atilde: "\u00e3",
+  auml: "\u00e4", aring: "\u00e5", aelig: "\u00e6", ccedil: "\u00e7", egrave: "\u00e8",
+  eacute: "\u00e9", ecirc: "\u00ea", euml: "\u00eb", igrave: "\u00ec", iacute: "\u00ed",
+  icirc: "\u00ee", iuml: "\u00ef", eth: "\u00f0", ntilde: "\u00f1", ograve: "\u00f2",
+  oacute: "\u00f3", ocirc: "\u00f4", otilde: "\u00f5", ouml: "\u00f6", oslash: "\u00f8",
+  ugrave: "\u00f9", uacute: "\u00fa", ucirc: "\u00fb", uuml: "\u00fc", yacute: "\u00fd",
+  thorn: "\u00fe", yuml: "\u00ff",
+  // Tipografia extra
+  OElig: "\u0152", oelig: "\u0153", Scaron: "\u0160", scaron: "\u0161",
+  Yuml: "\u0178", fnof: "\u0192", circ: "\u02c6", tilde: "\u02dc",
+  ensp: " ", emsp: " ", thinsp: "\u2009", zwnj: "\u200c", zwj: "\u200d",
+  lrm: "\u200e", rlm: "\u200f", oplus: "\u2295", otimes: "\u2297",
 };
 
 function decodeEntities(input) {
@@ -91,11 +110,12 @@ function decodeEntities(input) {
       if (body[0] === "#") {
         const isHex = body[1] === "x" || body[1] === "X";
         const code = parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
-        if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return "";
+        // Codigo invalido/fora do range: mantem o texto original, nunca some.
+        if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match;
         try {
           return String.fromCodePoint(code);
         } catch {
-          return "";
+          return match;
         }
       }
       const replacement = NAMED_ENTITIES[body];
@@ -148,6 +168,19 @@ function tokenize(html) {
       continue;
     }
     const nextChar = html[lt + 1];
+    // Regra do HTML: "<" so inicia uma tag se vier uma letra ASCII, "/", "!" ou "?".
+    // Qualquer outra coisa (ex.: "3 < 5") e texto literal — antes o tokenizer
+    // engolia o trecho ate o proximo ">" e o conteudo sumia.
+    const startsTag =
+      nextChar === "/" ||
+      nextChar === "!" ||
+      nextChar === "?" ||
+      (nextChar !== undefined && /[A-Za-z]/.test(nextChar));
+    if (!startsTag) {
+      tokens.push({ type: "text", value: "<" });
+      i = lt + 1;
+      continue;
+    }
     if (nextChar === "!" || nextChar === "?") {
       const end = findTagEnd(html, lt);
       i = end === -1 ? html.length : end + 1;
@@ -187,13 +220,22 @@ function resolveUrl(href, baseUrl) {
   }
 }
 
+// Normaliza espacos e quebras do markdown SEM tocar no interior de blocos
+// cercados (```): antes o colapso de espacos rodava no documento inteiro e
+// destruia a indentacao do codigo (Python, YAML...).
 function cleanMarkdown(text) {
-  return text
-    .replace(/\r\n?/g, "\n")
+  const blocks = [];
+  // Normaliza fim de linha antes de mascarar (seguro para o codigo).
+  const normalized = String(text).replace(/\r\n?/g, "\n");
+  // Mascara cada bloco cercado para o colapso de espacos nao entrar nele.
+  const masked = normalized.replace(/```[\s\S]*?```/g, (match) => `\u0000${blocks.push(match) - 1}\u0000`);
+  const cleaned = masked
     .replace(/[ \t]+\n/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  // Restaura os blocos intactos.
+  return cleaned.replace(/\u0000(\d+)\u0000/g, (_, index) => blocks[Number(index)]);
 }
 
 // Converte o HTML em markdown enxuto (titulos, listas, links, negrito, codigo, tabelas).
@@ -204,13 +246,49 @@ function htmlToMarkdown(html, baseUrl) {
   const openStack = [];
   const aStack = [];
 
+  // --- tabela: conteudo acumulado em buffer e emitido no fim, para sair GFM valido ---
+  let tableDepth = 0;
+  let tableRows = []; // [{ cells: [{ text }] }]
+  let tableRow = null;
+  let tableCell = null;
+
+  // Com uma celula aberta o texto vai para ela; sem celula, vai para a saida.
+  const emit = (chunk) => {
+    if (tableCell) tableCell.text += chunk;
+    else out += chunk;
+  };
+
+  // Monta a tabela markdown: linha de cabecalho (th ou a primeira linha),
+  // separador | --- |, escape de "|" e quebras de linha viram espaco.
+  const renderTable = (rows) => {
+    const validas = rows.filter((row) => row.cells.length > 0);
+    if (validas.length === 0) return "";
+    const cols = Math.max(...validas.map((row) => row.cells.length));
+    const celula = (cell) =>
+      String(cell ? cell.text : "")
+        .replace(/\s+/g, " ")
+        .replace(/\|/g, "\\|")
+        .trim();
+    const linha = (cells) => {
+      const partes = [];
+      for (let c = 0; c < cols; c++) partes.push(celula(cells[c]));
+      return `| ${partes.join(" | ")} |`;
+    };
+    const linhas = [
+      linha(validas[0].cells),
+      `| ${Array.from({ length: cols }, () => "---").join(" | ")} |`,
+    ];
+    for (let r = 1; r < validas.length; r++) linhas.push(linha(validas[r].cells));
+    return "\n\n" + linhas.join("\n") + "\n\n";
+  };
+
   for (const token of tokenize(html)) {
     const isSkipped = SKIP_TAGS.has(token.tag);
 
     if (token.type === "text") {
       if (skipDepth > 0) continue;
       const decoded = decodeEntities(token.value);
-      out += preDepth > 0 ? decoded : decoded.replace(/\s+/g, " ");
+      emit(preDepth > 0 ? decoded : decoded.replace(/\s+/g, " "));
       continue;
     }
 
@@ -223,55 +301,72 @@ function htmlToMarkdown(html, baseUrl) {
       if (!token.selfClosing) openStack.push(token.tag);
       switch (token.tag) {
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
-          out += "\n\n" + "#".repeat(Number(token.tag[1])) + " ";
+          emit("\n\n" + "#".repeat(Number(token.tag[1])) + " ");
           break;
         case "p": case "div": case "section": case "article": case "main":
         case "figure": case "figcaption": case "details": case "summary":
-        case "ul": case "ol": case "dl": case "table": case "tbody":
-        case "thead": case "tfoot": case "caption":
-          out += "\n";
+        case "ul": case "ol": case "dl":
+          emit("\n");
           break;
         case "blockquote":
-          out += "\n> ";
+          emit("\n> ");
           break;
         case "li":
-          out += "- ";
+          emit("- ");
+          break;
+        // --- tabela ---
+        case "table":
+          if (tableDepth === 0) {
+            tableRows = [];
+            tableRow = null;
+            tableCell = null;
+          }
+          tableDepth++; // tabela aninhada: so acumula, nao perde texto
+          break;
+        case "caption": case "tbody": case "thead": case "tfoot":
+          if (tableDepth === 0) emit("\n");
           break;
         case "tr":
-          out += "\n";
+          if (tableDepth > 0) {
+            tableRow = { cells: [] };
+            tableCell = null;
+          } else {
+            emit("\n");
+          }
           break;
         case "th": case "td":
-          out += " ";
+          if (tableDepth > 0) tableCell = { text: "" };
+          else emit(" ");
           break;
         case "a": {
           const href = resolveUrl(token.attrs.href, baseUrl);
           aStack.push(href);
-          if (href) out += "[";
+          if (href) emit("[");
           break;
         }
         case "strong": case "b":
-          out += "**";
+          emit("**");
           break;
         case "em": case "i":
-          out += "*";
+          emit("*");
           break;
         case "code":
-          if (preDepth === 0) out += "`";
+          if (preDepth === 0) emit("`");
           break;
         case "pre":
           preDepth++;
-          out += "\n\n```\n";
+          emit("\n\n```\n");
           break;
         case "br":
-          out += "\n";
+          emit(tableCell ? " " : "\n"); // quebra dentro de celula vira espaco
           break;
         case "hr":
-          out += "\n\n---\n\n";
+          emit("\n\n---\n\n");
           break;
         case "img": {
           const src = resolveUrl(token.attrs.src, baseUrl);
           const alt = (token.attrs.alt || "").trim();
-          if (src) out += `![${alt}](${src})`;
+          if (src) emit(`![${alt}](${src})`);
           break;
         }
         default:
@@ -295,38 +390,73 @@ function htmlToMarkdown(html, baseUrl) {
     switch (token.tag) {
       case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
       case "p": case "div": case "section": case "article": case "main":
-      case "ul": case "ol": case "dl": case "table": case "blockquote":
+      case "ul": case "ol": case "dl": case "blockquote":
       case "figure": case "figcaption": case "details":
-        out += "\n\n";
+        emit("\n\n");
         break;
-      case "li": case "tr": case "tbody": case "thead": case "tfoot":
-        out += "\n";
+      case "li":
+        emit("\n");
+        break;
+      // --- tabela ---
+      case "table":
+        if (tableDepth > 0) {
+          tableDepth--;
+          if (tableDepth === 0) {
+            out += renderTable(tableRows);
+            tableRows = [];
+            tableRow = null;
+            tableCell = null;
+          }
+        }
+        break;
+      case "caption": case "tbody": case "thead": case "tfoot":
+        if (tableDepth === 0) emit("\n");
+        break;
+      case "tr":
+        if (tableDepth > 0) {
+          if (tableRow && tableRow.cells.length > 0) tableRows.push(tableRow);
+          tableRow = null;
+          tableCell = null;
+        } else {
+          emit("\n");
+        }
         break;
       case "th": case "td":
-        out += " |";
+        if (tableDepth > 0) {
+          if (tableRow && tableCell) tableRow.cells.push(tableCell);
+          tableCell = null;
+        } else {
+          emit(" |");
+        }
         break;
       case "a": {
         const href = aStack.pop();
-        if (href) out += `](${href})`;
+        if (href) emit(`](${href})`);
         break;
       }
       case "strong": case "b":
-        out += "**";
+        emit("**");
         break;
       case "em": case "i":
-        out += "*";
+        emit("*");
         break;
       case "code":
-        if (preDepth === 0) out += "`";
+        if (preDepth === 0) emit("`");
         break;
       case "pre":
         if (preDepth > 0) preDepth--;
-        out += "\n\n```\n\n";
+        // O codigo quase sempre termina com quebras de linha; tira as que
+        // sobram para o bloco nao sair com linhas em branco no fim.
+        if (!tableCell) out = out.replace(/\n+$/, "");
+        emit("\n```\n\n");
         break;
       default:
         break;
     }
   }
+
+  // Tabela malformada (sem </table>): nao perde o conteudo acumulado.
+  if (tableDepth > 0) out += renderTable(tableRows);
 
   return cleanMarkdown(out);
 }
