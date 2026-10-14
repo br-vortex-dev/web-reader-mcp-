@@ -16,13 +16,24 @@
  */
 
 const SERVER_NAME = "web-reader";
-const SERVER_VERSION = "1.0.0";
+const SERVER_VERSION = "1.1.0";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const DEFAULT_TIMEOUT_MS = 20000;
+const DEFAULT_TIMEOUT_MS = 25000;
 const DEFAULT_MAX_CHARS = 8000;
 const HARD_MAX_CHARS = 50000;
 const MAX_PAGES_PER_CALL = 30;
+
+// User-agents alternativos para sites que bloqueiam o primeiro
+const ALT_USER_AGENTS = [
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+];
 
 const PROTOCOL_VERSIONS = new Set([
   "2024-11-05",
@@ -429,13 +440,22 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const userAgent = attempt === 0 ? USER_AGENT : ALT_USER_AGENTS[(attempt - 1) % ALT_USER_AGENTS.length];
     try {
       const res = await fetch(url, {
         method: "GET",
         headers: {
-          "User-Agent": USER_AGENT,
+          "User-Agent": userAgent,
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+          "Upgrade-Insecure-Requests": "1",
         },
         redirect: "follow",
         signal: controller.signal,
@@ -445,21 +465,66 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
         err.status = res.status;
         throw err;
       }
+      const buffer = await res.arrayBuffer();
+      const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
       return {
-        text: await res.text(),
+        text,
         finalUrl: res.url || url,
         contentType: (res.headers.get("content-type") || "").toLowerCase(),
       };
     } catch (err) {
       lastError = err;
-      const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500);
+      const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500 || err.status === 403 || err.status === 401);
       if (!retriable || attempt === retries) throw err;
-      await sleep(400 * 2 ** attempt); // 400ms, 800ms
+      await sleep(400 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
     }
   }
   throw lastError;
+}
+
+// Tenta buscar a página com HTTPS se HTTP falhar.
+async function fetchTextWithFallback(url, options) {
+  try {
+    return await fetchText(url, options);
+  } catch (err) {
+    if (url.startsWith("http://")) {
+      const httpsUrl = url.replace(/^http:/, "https:");
+      try {
+        return await fetchText(httpsUrl, options);
+      } catch {
+        throw err;
+      }
+    }
+    throw err;
+  }
+}
+
+// Decodifica o buffer de acordo com o charset do content-type ou detecta BOM.
+async function decodeBuffer(buffer, contentType) {
+  const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
+  const charset = charsetMatch ? charsetMatch[1].toLowerCase().replace(/["']/g, "") : "";
+  const bytes = new Uint8Array(buffer);
+  // Detecta BOM
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    return new TextDecoder("utf-8").decode(bytes.slice(3));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+    return new TextDecoder("utf-16be").decode(bytes.slice(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+    return new TextDecoder("utf-16le").decode(bytes.slice(2));
+  }
+  // Usa charset do content-type, ou UTF-8 como fallback
+  try {
+    if (charset && charset !== "utf-8" && charset !== "utf8") {
+      return new TextDecoder(charset).decode(bytes);
+    }
+  } catch {
+    // charset desconhecido, cai no UTF-8
+  }
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 // Cache em memoria (LRU + TTL): evita rebaixar a mesma pagina e reduz
@@ -475,7 +540,7 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     pageCache.set(url, hit);
     return hit.payload;
   }
-  const payload = await fetchText(url, { timeoutMs });
+  const payload = await fetchTextWithFallback(url, { timeoutMs });
   pageCache.set(url, { at: Date.now(), payload });
   if (pageCache.size > CACHE_MAX_ENTRIES) {
     const oldestKey = pageCache.keys().next().value;
@@ -539,9 +604,50 @@ async function toolReadPage(args) {
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
   ensureHtml(contentType, html);
   const meta = extractMeta(html);
-  const markdown = htmlToMarkdown(html, finalUrl);
+  let markdown = htmlToMarkdown(html, finalUrl);
+  // Se o conteúdo extraído for muito curto, tenta extrair dados embutidos
+  if (markdown.replace(/\s+/g, " ").trim().length < 300 && isDynamicPage(html, markdown)) {
+    const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
+    if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
+      markdown = dynamicMarkdown;
+    }
+  }
   const { text, truncated } = truncate(markdown, maxChars);
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length });
+}
+
+// Extrai dados embutidos de páginas dinâmicas e converte em markdown.
+async function extractEmbeddedData(html, baseUrl, timeoutMs) {
+  const sources = [];
+  // __NEXT_DATA__ (Next.js)
+  const nextData = extractJsonById(html, "__NEXT_DATA__");
+  if (nextData) sources.push({ nome: "__NEXT_DATA__", dados: nextData });
+  // __NUXT__ (Nuxt.js)
+  const nuxtMatch = html.match(/window\.__NUXT__\s*=\s*([\s\S]*?);?\s*<\/script>/i);
+  if (nuxtMatch) {
+    try {
+      const nuxtData = eval(`(${nuxtMatch[1]})`);
+      sources.push({ nome: "__NUXT__", dados: nuxtData });
+    } catch { /* ignora */ }
+  }
+  // window.__INITIAL_STATE__ ou similar
+  const windowState = extractWindowState(html);
+  if (windowState) sources.push({ nome: "__INITIAL_STATE__", dados: windowState });
+  // JSON-LD
+  const jsonLd = extractJsonLd(html);
+  if (jsonLd.length > 0) sources.push({ nome: "JSON-LD", dados: jsonLd });
+  // APIs internas
+  const apiResults = await tryInternalApi(html, baseUrl, timeoutMs);
+  for (const api of apiResults) {
+    sources.push({ nome: `API: ${api.url}`, dados: api.data });
+  }
+  if (sources.length === 0) return null;
+  const parts = [];
+  for (const source of sources) {
+    const md = jsonToMarkdown(source.dados);
+    if (md) parts.push(`## ${source.nome}\n${md}`);
+  }
+  return parts.join("\n\n");
 }
 
 // ===================================================================== *
@@ -549,7 +655,6 @@ async function toolReadPage(args) {
 // =====================================================================
 
 // Detecta se uma pagina provavelmente precisa de JavaScript para renderizar.
-// Sinais: pouco conteudo visivel, scripts de framework, divs vazios com id.
 function isDynamicPage(html, markdown) {
   const visibleText = markdown.replace(/\s+/g, " ").trim();
   const hasFrameworkScript =
