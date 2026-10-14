@@ -100,8 +100,11 @@ web-reader-mcp/
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
 ├── .gitignore
 ├── README.md
+├── RELATORIO-CAMPO.md <- relatorio da rodada de campo na web real (nota 7,5/10)
 ├── tests/             <- testes automatizados (node:test, sem dependencias)
-└── scripts/           <- clientes MCP manuais (smoke-test, benchmark, debug)
+├── campo/             <- bateria de campo: driver + saidas brutas de 70 casos
+├── load/              <- harness de carga e script k6
+└── scripts/           <- clientes MCP manuais (smoke-test, live-test)
 ```
 
 O `.gitignore` já cobre `node_modules/`, `.env`, logs e arquivos de editor. Se um
@@ -342,7 +345,9 @@ k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t load/k6.js
 ```
 
 O `k6` não é dependência do projeto — instale à parte (`winget`/`brew`/`apt`).
-Detalhes, números antes/depois e o caminho para 10k em `RELATORIO-CAPACIDADE.md`.
+Os números antes/depois do tuning e o caminho para 10k req/s ficaram registrados
+no histórico de commits do repositório (rodada de capacidade de outubro de 2026);
+tudo continua recuperável pelo git.
 
 ### Rate limit e `x-forwarded-for`
 
