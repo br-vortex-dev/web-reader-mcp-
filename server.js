@@ -1132,6 +1132,25 @@ async function readBodyWithLimit(res, maxBytes) {
   }
 }
 
+// Erro de rede do fetch: a mensagem publica eh so "fetch failed" — 18
+// caracteres que nao dizem NADA a quem le o erro. A causa real (DNS,
+// conexao recusada, certificado invalido) vive em err.cause, as vezes
+// dentro de um AggregateError (happy eyeballs: varios IPs tentados).
+function erroComCausa(err) {
+  const descrever = (c) => {
+    if (!c) return "";
+    if (c.errors && c.errors.length > 0) {
+      return c.errors.map((e) => e.code || e.message).filter(Boolean).join("; ");
+    }
+    return c.message || c.code || String(c);
+  };
+  const causa = descrever(err.cause);
+  const melhorado = new Error(causa ? `${err.message}: ${causa}` : err.message);
+  melhorado.cause = err.cause;
+  if (err.retryAfterMs != null) melhorado.retryAfterMs = err.retryAfterMs;
+  return melhorado;
+}
+
 async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -1179,7 +1198,18 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
       };
     } catch (err) {
       lastError = err;
-      const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500 || err.status === 403 || err.status === 401);
+      // BUG-4: falha de rede (TypeError do fetch, sem status HTTP) precisa
+      // expor a causa — "Erro: fetch failed" puro nao permite diagnosticar
+      // nada (era o que saida em certificado invalido e conexao recusada).
+      if (err instanceof TypeError && err.cause && err.status === undefined) {
+        err = erroComCausa(err);
+        lastError = err;
+      }
+      // BUG-6: 401/403 sao DEFINITIVOS (autenticacao/permissao): retentar
+      // so multiplica a latencia — o campo mediu 3,8 s num 403 que ia
+      // falhar 3 vezes igual. 429/503/500 sao transitorios e continuam
+      // sendo retentados (com Retry-After quando o servidor manda).
+      const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500);
       if (!retriable || attempt === retries) throw err;
       // 429/503: respeita o Retry-After do servidor (com teto); senao backoff.
       const respeitaRetryAfter = (err.status === 429 || err.status === 503) && err.retryAfterMs != null;
