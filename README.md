@@ -310,7 +310,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `HTTP_HEADERS_TIMEOUT_MS` | `66000` | Precisa ser ≥ keep-alive. |
 | `HTTP_REQUEST_TIMEOUT_MS` | `300000` | Precisa ser ≥ headers. |
 | `MAX_CONNECTIONS` | `0` (sem teto) | Teto de conexões aceitas; `0` deixa o limite para o SO. |
-| `RATE_LIMIT_MAX` | `60` | Requisições por janela, por cliente. |
+| `RATE_LIMIT_MAX` | `60` | Requisições por janela, por cliente. O `render.yaml` usa **10000**: quando quem chama é o backend de um site, todos os usuários chegam pelo mesmo IP e 60/min seria um balde único para o site inteiro. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Tamanho da janela do rate limit. |
 
 Uma variável só de teste, usada pela suíte: `TEST_SERVER_PATH`, que aponta os
@@ -351,10 +351,22 @@ tudo continua recuperável pelo git.
 
 ### Rate limit e `x-forwarded-for`
 
-O limite é de **60 requisições por minuto por cliente**. A chave do limite é o IP do
+O limite é de **60 requisições por minuto por cliente** no padrão — em produção o
+`render.yaml` define **10000**. A chave do limite é o IP do
 socket (`req.socket.remoteAddress`), e **não** o `x-forwarded-for` — esse header é
 escrito pelo cliente e era usado antigamente como chave, o que permitia burlar o limite
 inteiro só rotacionando o valor dele.
+
+**Por que 10000 em produção:** quando o MCP fica atrás de um site de IA, quem chama é
+o *backend* do site — todos os usuários chegam com o **mesmo IP**. Com 60/min o balde
+seria único para o site inteiro: 15 usuários lendo 4 páginas por minuto já estouravam.
+Com 10000/min por cliente, o rate limit deixa de morder no uso normal e a proteção de
+capacidade volta a ser a admissão (`MAX_INFLIGHT_REQUESTS`: 128 em voo, depois 503
+explícito) — que é a proteção de verdade, calibrada pelo joelho da curva. O limite
+continua existindo contra abuso distribuído e segue sendo cortesia com os sites de
+terceiros; se um dia o consumo crescer a ponto de preocupar, o caminho é baixar o
+valor ou voltar a atribuir por usuário (`TRUST_PROXY_HOPS: 2` + o backend escrevendo o
+IP do usuário no `x-forwarded-for`).
 
 Como no Render o app fica atrás de um proxy, o IP real do cliente chega no
 `x-forwarded-for`. A variável `TRUST_PROXY_HOPS` diz em quantas entradas confiar,
