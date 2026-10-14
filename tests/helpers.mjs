@@ -62,6 +62,8 @@ export const FIXTURE_HTML = `<!DOCTYPE html><html><head><title>Fixture Parser</t
 
 // Servidor de fixture. Rotas:
 //   /pagina                     -> FIXTURE_HTML
+//   /page/<id>?kb=N             -> pagina de ~N KB, com contador de requisicoes
+//   /crawl/start                -> links para paginas que leem e que falham
 //   /chain/N                    -> N redirects relativos e depois /pagina
 //   /redirect-to-private        -> 302 para http://127.0.0.1:<porta>/pagina
 //   /redirect-to-file           -> 302 para file:///etc/passwd
@@ -86,6 +88,40 @@ export async function startFixture() {
         `<!DOCTYPE html><html><head><title>Pagina ${id}</title></head><body>` +
           `<h1>Pagina ${id}</h1><p>REQ-${id}-${n}</p><p>${recheio}</p></body></html>`
       );
+      return;
+    }
+
+    // Paginas do teste de crawl parcial: algumas leem, outras falham de
+    // proposito (HTTP 404, timeout e conteudo nao-HTML).
+    if (path === "/crawl/start") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Crawl</title></head><body><h1>Inicio</h1>" +
+          '<p><a href="/crawl/ok1">OK 1</a></p>' +
+          '<p><a href="/crawl/ok2">OK 2</a></p>' +
+          '<p><a href="/crawl/erro404">Erro 404</a></p>' +
+          '<p><a href="/crawl/trava">Trava</a></p>' +
+          '<p><a href="/crawl/naohtml">Nao HTML</a></p>' +
+          "</body></html>"
+      );
+      return;
+    }
+    if (path.startsWith("/crawl/ok")) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><head><title>${path}</title></head><body><h1>${path}</h1><p>conteudo ok</p></body></html>`);
+      return;
+    }
+    if (path === "/crawl/erro404") {
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end("<html><body>404</body></html>");
+      return;
+    }
+    if (path === "/crawl/trava") {
+      return; // aceita a conexao e nunca responde (forca timeout)
+    }
+    if (path === "/crawl/naohtml") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"isto":"nao e html"}');
       return;
     }
 

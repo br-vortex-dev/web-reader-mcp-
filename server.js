@@ -1440,6 +1440,50 @@ function isNavigationUrl(url) {
   return NAVIGATION_PATTERNS.some((pattern) => pattern.test(url));
 }
 
+// Classifica a falha de uma leitura para o resumo do crawl. Sem isso a IA ve
+// so "0 paginas lidas" e nao sabe se o site estava vazio ou se foi bloqueado.
+function classifyFetchError(err) {
+  const msg = String((err && err.message) || "");
+  const code = String((err && err.cause && err.cause.code) || "");
+  const texto = `${msg} ${code}`;
+  if (/Host bloqueado/.test(msg)) return "bloqueadas por endereco privado/interno";
+  if (/Redirects em excesso/.test(msg)) return "com redirects em excesso";
+  if (/Resposta muito grande/.test(msg)) return "com resposta grande demais";
+  if (/aborted|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|TimeoutError|timeout/i.test(texto)) return "com timeout";
+  if (/ENOTFOUND|EAI_AGAIN|nao resolvido/i.test(texto)) return "com host nao resolvido (DNS)";
+  if (/ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|UND_ERR_SOCKET/i.test(texto)) {
+    return "com conexao recusada/interrompida";
+  }
+  const http = msg.match(/HTTP (\d{3})/);
+  if (http) return `com HTTP ${http[1]}`;
+  if (/nao e HTML|nao parece ser HTML/.test(msg)) return "com conteudo nao-HTML";
+  return "com outros erros";
+}
+
+// Le UMA pagina do crawl. Lanca erro quando a pagina falha: quem chama decide
+// se isola (no meio do crawl) ou propaga (na URL inicial).
+async function crawlOnePage(url, maxChars, timeoutMs) {
+  const parsed = validateHttpUrl(url);
+  const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
+  ensureHtml("", html);
+  const meta = extractMeta(html);
+  const markdown = htmlToMarkdown(html, finalUrl);
+  const { text, truncated } = truncate(markdown, maxChars);
+  const linksInternos = extractLinks(html, finalUrl).filter(
+    (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
+  );
+  return {
+    conteudo: formatReadResult({
+      finalUrl,
+      meta,
+      text,
+      truncated,
+      fullLength: markdown.length,
+    }),
+    links: linksInternos.map((l) => l.href),
+  };
+}
+
 async function toolCrawlSite(args) {
   const start = validateHttpUrl(args.url);
   const maxPages = Math.max(2, Math.min(30, Number(args.maxPages) || 10));
@@ -1447,72 +1491,80 @@ async function toolCrawlSite(args) {
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const baseHost = hostOf(start.href);
 
-  const visited = new Set();
-  const queue = [start.href];
-  const paginas = [];
-  const CONCURRENCY = FETCH_CONCURRENCY;
+  const visited = new Set([start.href]);
+  const queue = [];
+  const conteudos = []; // texto de cada pagina lida (ou o aviso de erro)
+  const falhas = []; // { url, motivo, mensagem }
+  let lidas = 0;
 
-  while (queue.length > 0 && paginas.length < maxPages) {
+  // Pre-flight da URL inicial: se ela nao puder ser lida (bloqueio, DNS,
+  // timeout, HTTP), o crawl nem comeca — e isso e ERRO, nao resultado vazio.
+  try {
+    const primeira = await crawlOnePage(start.href, maxChars, timeoutMs);
+    conteudos.push(primeira.conteudo);
+    lidas++;
+    for (const href of primeira.links) {
+      if (!visited.has(href)) {
+        visited.add(href);
+        queue.push(href);
+      }
+    }
+  } catch (err) {
+    throw new Error(`Nao foi possivel iniciar o crawl em ${start.href}: ${err.message}`);
+  }
+
+  const CONCURRENCY = FETCH_CONCURRENCY;
+  while (queue.length > 0 && conteudos.length < maxPages) {
     const lote = [];
     while (
       lote.length < CONCURRENCY &&
       queue.length > 0 &&
-      paginas.length + lote.length < maxPages
+      conteudos.length + lote.length < maxPages
     ) {
-      const proxima = queue.shift();
-      if (proxima && !visited.has(proxima)) {
-        visited.add(proxima);
-        lote.push(proxima);
-      }
+      lote.push(queue.shift());
     }
     if (lote.length === 0) break;
 
+    // Uma pagina que falha nao derruba o crawl: o erro fica isolado.
     const resultados = await Promise.all(
       lote.map(async (url) => {
         try {
-          const parsed = validateHttpUrl(url);
-          const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-          ensureHtml("", html);
-          const meta = extractMeta(html);
-          const markdown = htmlToMarkdown(html, finalUrl);
-          const { text, truncated } = truncate(markdown, maxChars);
-          const linksInternos = extractLinks(html, finalUrl).filter(
-            (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
-          );
-          return {
-            ok: true,
-            conteudo: formatReadResult({
-              finalUrl,
-              meta,
-              text,
-              truncated,
-              fullLength: markdown.length,
-            }),
-            links: linksInternos.map((l) => l.href),
-          };
+          return { ok: true, url, ...(await crawlOnePage(url, maxChars, timeoutMs)) };
         } catch (err) {
-          return { ok: false, url, erro: err.message };
+          return { ok: false, url, erro: err };
         }
       })
     );
 
     for (const r of resultados) {
       if (r.ok) {
-        paginas.push(r.conteudo);
+        conteudos.push(r.conteudo);
+        lidas++;
         for (const href of r.links) {
-          if (!visited.has(href)) queue.push(href);
+          if (!visited.has(href)) {
+            visited.add(href);
+            queue.push(href);
+          }
         }
       } else {
-        paginas.push(`# Erro ao ler ${r.url}\n${r.erro}`);
+        falhas.push({ url: r.url, motivo: classifyFetchError(r.erro), mensagem: r.erro.message });
+        conteudos.push(`# Erro ao ler ${r.url}\n${r.erro.message}`);
       }
     }
   }
 
-  const ok = paginas.filter((p) => !p.startsWith("# Erro")).length;
-  return (
-    `Crawl de ${start.href}: ${ok} paginas lidas (limite ${maxPages}, dominio ${baseHost}).\n\n` +
-    paginas.join("\n\n========================================\n\n")
-  );
+  // Resumo agrupado por motivo: a IA precisa saber que o resultado e parcial.
+  let cabecalho =
+    `Crawl de ${start.href}: ${lidas} pagina(s) lida(s) (limite ${maxPages}, dominio ${baseHost}).`;
+  if (falhas.length > 0) {
+    const agrupado = new Map();
+    for (const f of falhas) agrupado.set(f.motivo, (agrupado.get(f.motivo) || 0) + 1);
+    const motivos = [...agrupado.entries()].map(([motivo, n]) => `${n} ${motivo}`).join(", ");
+    cabecalho +=
+      `\nRESULTADO PARCIAL: ${falhas.length} pagina(s) falharam — ${motivos}.` +
+      `\nAs paginas marcadas com "# Erro ao ler" abaixo nao foram lidas.`;
+  }
+  return cabecalho + "\n\n" + conteudos.join("\n\n========================================\n\n");
 }
 
 async function callTool(name, args) {
