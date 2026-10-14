@@ -244,6 +244,32 @@ código (`assertPublicHost` em `server.js`).
 | Variável | Padrão | O que faz |
 | --- | --- | --- |
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos. Só para desenvolvimento e testes locais (o `smoke-test` e os scripts apontam para `127.0.0.1`). **No Render ela fica desligada** — não defina essa variável em produção. |
+| `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. Veja *Rate limit* abaixo. |
+
+### Rate limit e `x-forwarded-for`
+
+O limite é de **60 requisições por minuto por cliente**. A chave do limite é o IP do
+socket (`req.socket.remoteAddress`), e **não** o `x-forwarded-for` — esse header é
+escrito pelo cliente e era usado antigamente como chave, o que permitia burlar o limite
+inteiro só rotacionando o valor dele.
+
+Como no Render o app fica atrás de um proxy, o IP real do cliente chega no
+`x-forwarded-for`. A variável `TRUST_PROXY_HOPS` diz em quantas entradas confiar,
+**contando da direita** (as da direita são anexadas pela infraestrutura; as da esquerda
+são forjáveis). Se a entrada escolhida não for um IP válido, o servidor cai para o IP do
+socket. No `render.yaml` ela já vem com `TRUST_PROXY_HOPS: 1`.
+
+**Como confirmar o valor:** com o valor certo, cada cliente tem o seu próprio contador.
+- Se **todo mundo** começa a receber `429` junto, o valor está **alto demais** (você está
+  confiando numa entrada forjável e todos caem no mesmo bucket) → reduza para `1`.
+- Se **ninguém** nunca recebe `429`, mesmo abusando, o valor está **baixo demais** (todos
+  os clientes compartilham o IP do proxy) → aumente para `1`.
+- Para inspecionar, suba localmente e faça uma chamada olhando o `x-forwarded-for` que
+  chega: `curl -H "x-forwarded-for: 1.2.3.4" ...` só é útil para testar, não para medir.
+
+O mapa do rate limit tem limpeza periódica das entradas expiradas (a cada 60 s) e um teto
+de 10.000 chaves, descartando as mais antigas — antes ele crescia para sempre, e dava
+para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferentes.
 
 ### Custos e cuidados no Render
 

@@ -20,3 +20,7 @@ services:
         generateValue: true
       # ATENCAO: NAO defina ALLOW_PRIVATE_HOSTS aqui. Ela desliga o bloqueio de
       # hosts privados/internos (SSRF) e serve apenas para dev/testes locais.
+      # O Render coloca um proxy na frente do app, entao o IP real do cliente
+      # chega no x-forwarded-for: confiamos em 1 entrada contando da direita.
+      - key: TRUST_PROXY_HOPS
+        value: "1"

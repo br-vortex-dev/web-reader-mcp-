@@ -1680,10 +1680,48 @@ async function startHttp() {
   // chamada em /mcp precisa do header: Authorization: Bearer <token>
   const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 
-  // Rate limiting simples: max 60 requisicoes por minuto por IP
+  // Rate limiting simples: max 60 requisicoes por minuto por cliente
   const RATE_LIMIT_WINDOW_MS = 60 * 1000;
   const RATE_LIMIT_MAX = 60;
+  const RATE_LIMIT_MAX_ENTRIES = 10000;
   const rateLimitMap = new Map();
+
+  // Quantas entradas do x-forwarded-for confiar, contando da DIREITA.
+  // 0 (padrao) = ignora o header e usa o IP do socket. No Render o app fica
+  // atras de um proxy, entao em producao o valor e 1 (ver render.yaml).
+  const TRUST_PROXY_HOPS = Math.max(0, Math.floor(Number(process.env.TRUST_PROXY_HOPS) || 0));
+
+  // O x-forwarded-for e forjavel pelo cliente: as entradas da ESQUERDA sao
+  // escritas por ele, as da DIREITA sao anexadas pela infraestrutura confiavel.
+  // Por isso contamos da direita, e so aceitamos se o valor for um IP valido —
+  // qualquer outra coisa cai para o IP do socket.
+  const clientIpOf = (req) => {
+    if (TRUST_PROXY_HOPS > 0) {
+      const parts = String(req.headers["x-forwarded-for"] || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const candidate = parts[parts.length - TRUST_PROXY_HOPS];
+      if (candidate) {
+        if (isIP(candidate)) return candidate;
+        const semPorta = candidate.replace(/:\d+$/, ""); // alguns proxies mandam "ip:porta"
+        if (isIP(semPorta)) return semPorta;
+      }
+    }
+    return req.socket.remoteAddress || "unknown";
+  };
+
+  // O mapa nao pode crescer para sempre: de tempos em tempos remove as entradas
+  // expiradas (unref para o timer nao segurar o processo de pé).
+  const rateLimitCleanup = setInterval(() => {
+    const cutoff = Date.now() - RATE_LIMIT_WINDOW_MS;
+    for (const [key, times] of rateLimitMap) {
+      const kept = times.filter((t) => t > cutoff);
+      if (kept.length === 0) rateLimitMap.delete(key);
+      else rateLimitMap.set(key, kept);
+    }
+  }, RATE_LIMIT_WINDOW_MS);
+  rateLimitCleanup.unref();
 
   const readBody = (req) =>
     new Promise((resolve, reject) => {
@@ -1748,8 +1786,8 @@ async function startHttp() {
       }
     }
 
-    // Rate limiting por IP
-    const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown";
+    // Rate limiting por cliente
+    const clientIp = clientIpOf(req);
     const now = Date.now();
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
     const requests = (rateLimitMap.get(clientIp) || []).filter((t) => t > windowStart);
@@ -1769,6 +1807,16 @@ async function startHttp() {
       return;
     }
     requests.push(now);
+    // Teto de chaves: descarta as mais antigas (o Map preserva a ordem de
+    // insercao) para chaves unicas nao esgotarem a memoria.
+    if (!rateLimitMap.has(clientIp) && rateLimitMap.size >= RATE_LIMIT_MAX_ENTRIES) {
+      const excedente = rateLimitMap.size - RATE_LIMIT_MAX_ENTRIES + 1;
+      let removidas = 0;
+      for (const key of rateLimitMap.keys()) {
+        rateLimitMap.delete(key);
+        if (++removidas >= excedente) break;
+      }
+    }
     rateLimitMap.set(clientIp, requests);
 
     if (req.method !== "POST") {
