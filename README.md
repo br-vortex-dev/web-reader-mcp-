@@ -317,6 +317,14 @@ Uma variável só de teste, usada pela suíte: `TEST_SERVER_PATH`, que aponta os
 testes para outra cópia do `server.js` (serve para provar que os testes falham
 numa versão antiga).
 
+**Cache e titularidade.** Um `MCP_AUTH_TOKEN` por deploy significa **um titular**:
+todo cliente que consegue chamar o serviço tem a mesma credencial, então não há
+fronteira entre "clientes" para isolar — e o cache só guarda **conteúdo público
+da web**, que qualquer cliente poderia buscar por conta própria. O cache é
+compartilhado dentro da instância por design. Isolar o cache por cliente
+exigiria um *roster* de tokens (várias credenciais aceitas no mesmo processo) —
+isso é feature nova, não correção, e não está implementado.
+
 ### Capacidade e carga
 
 O teto deste serviço é **CPU de um núcleo**: ~310 req/s por núcleo, porque cada
