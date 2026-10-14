@@ -492,6 +492,19 @@ function tokenize(html) {
       i = lt + 1;
       continue;
     }
+    // BUG-2: <![CDATA[...]]> — o conteudo eh texto literal. Antes o
+    // tokenizer tratava "<!" como declaracao e parava no PRIMEIRO ">" de
+    // dentro (ex.: "<![CDATA[<a href="x"> ...]]>" quebrava no ">" do
+    // href): sobrava markup pela metade e o "]]>" vazava como texto
+    // visivel em feeds RSS. Agora a CDATA inteira vira um token de texto
+    // cru (raw), sem decodificar entidades.
+    if (html.startsWith("<![CDATA[", lt)) {
+      const end = html.indexOf("]]>", lt + 9);
+      const inner = end === -1 ? html.slice(lt + 9) : html.slice(lt + 9, end);
+      tokens.push({ type: "text", value: inner, raw: true });
+      i = end === -1 ? html.length : end + 3;
+      continue;
+    }
     if (nextChar === "!" || nextChar === "?") {
       const end = findTagEnd(html, lt);
       i = end === -1 ? html.length : end + 1;
@@ -598,7 +611,8 @@ function htmlToMarkdown(html, baseUrl) {
 
     if (token.type === "text") {
       if (skipDepth > 0) continue;
-      const decoded = decodeEntities(token.value);
+      // token.raw (CDATA): conteudo literal, entidades NAO se decodificam.
+      const decoded = token.raw ? token.value : decodeEntities(token.value);
       emit(preDepth > 0 ? decoded : decoded.replace(/\s+/g, " "));
       continue;
     }
