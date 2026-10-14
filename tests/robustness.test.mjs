@@ -117,6 +117,33 @@ test("poe teto no Retry-After para nao ficar preso", { timeout: 90000 }, async (
   assert.ok(segundos >= 9, `deveria esperar o teto de 10s, esperou ${segundos.toFixed(1)}s`);
 });
 
+/* --------------------- request-line malformada -> 400 ------------------ */
+// "GET http://[invalid HTTP/1.1" fazia new URL lancar dentro do handler
+// async: rejeicao nao tratada, conexao morta sem resposta, processo vivo
+// em estado desconhecido. Contrato atual: 400 limpo + servidor no ar.
+
+test("request-line malformada devolve 400 e o servidor continua no ar", { timeout: 60000 }, async () => {
+  const net = await import("node:net");
+  const resposta = await new Promise((resolve) => {
+    const s = net.connect(Number(new URL(mcp.base).port), "127.0.0.1", () => {
+      s.write("GET http://[invalid HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    });
+    let buf = "";
+    s.on("data", (d) => { buf += d.toString(); });
+    s.on("close", () => resolve(buf));
+    s.on("error", () => resolve(buf));
+    setTimeout(() => resolve(buf), 5000);
+  });
+  assert.match(resposta, /^HTTP\/1\.[01] 400/, `esperava 400 na resposta, veio: ${JSON.stringify(resposta.slice(0, 80))}`);
+  assert.match(resposta, /Request-line invalida/);
+  // sem rejeicao nao tratada no stderr
+  const stderr = mcp.stderr();
+  assert.doesNotMatch(stderr, /rejeicao nao tratada|excecao nao tratada/, `lixo no stderr:\n${stderr.slice(-400)}`);
+  // e o servidor segue atendendo
+  const health = await fetch(`${mcp.base}/health`);
+  assert.equal(health.status, 200, "o servidor deveria continuar no ar");
+});
+
 /* --------------------------- encerramento limpo ------------------------ */
 
 test(

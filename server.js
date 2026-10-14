@@ -2482,7 +2482,21 @@ async function startHttp() {
     });
 
   const server = http.createServer(async (req, res) => {
-    const path = new URL(req.url || "/", "http://localhost").pathname;
+    // Request-line malformada (ex.: "GET http://[invalid HTTP/1.1") fazia o
+    // new URL lancar AQUI, dentro do handler async: virava rejeicao nao
+    // tratada, a conexao era derrubada sem resposta e o processo seguia em
+    // estado desconhecido (provado: qualquer cliente consegue gerar isso).
+    // Agora o caminho responde 400 e a execucao continua normalmente.
+    let path;
+    try {
+      path = new URL(req.url || "/", "http://localhost").pathname;
+    } catch {
+      res.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
+      res.end(
+        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request-line invalida." } })
+      );
+      return;
+    }
 
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
@@ -2679,6 +2693,9 @@ async function startHttp() {
   // Deixa o Node responder rapido quando o cliente some no meio.
   server.maxRequestsPerSocket = 0; // 0 = sem teto de requisicoes por conexao
   if (MAX_CONNECTIONS > 0) server.maxConnections = MAX_CONNECTIONS;
+  // Referencia para o encerramento por erro fatal: sem ela, o handler de
+  // uncaughtException/unhandledRejection nao tem servidor para fechar.
+  servidorHttp = server;
 
   server.listen(port, () => {
     console.error(
@@ -2737,11 +2754,38 @@ const FORCE_HTTP = process.argv.includes("--http");
 const FORCE_STDIO = process.argv.includes("--stdio");
 const HTTP_MODE = FORCE_HTTP || (!FORCE_STDIO && !!process.env.PORT);
 
+// Excecao/rejeicao nao tratada = estado desconhecido (memoria pode estar
+// inconsistente, requisicao pode ter ficado pela metade). A politica e
+// LOGAR e MORRER: o Render (ou qualquer supervisor) reinicia a instancia
+// limpa. Antes so logava e seguia — o processo continuava servindo depois
+// de um defeito que ninguem viu. O prazo de 5 s deixa as requisicoes em
+// andamento terminarem antes do exit.
+// A referencia ao servidor HTTP chega por startHttp (stdio nao tem).
+let servidorHttp = null;
+function encerrarPorErro(motivo) {
+  console.error(`[${SERVER_NAME}] ${motivo} - encerrando o processo (codigo 1).`);
+  const sair = () => process.exit(1);
+  if (servidorHttp) {
+    const prazo = setTimeout(sair, 5000);
+    prazo.unref();
+    try {
+      servidorHttp.close(() => sair());
+      if (typeof servidorHttp.closeIdleConnections === "function") servidorHttp.closeIdleConnections();
+      return;
+    } catch {
+      // close() lancando: sem saida limpa possivel, sai agora.
+    }
+  }
+  sair();
+}
+
 process.on("uncaughtException", (err) => {
   console.error(`[${SERVER_NAME}] excecao nao tratada:`, err);
+  encerrarPorErro("excecao nao tratada");
 });
 process.on("unhandledRejection", (err) => {
   console.error(`[${SERVER_NAME}] rejeicao nao tratada:`, err);
+  encerrarPorErro("rejeicao nao tratada");
 });
 
 if (HTTP_MODE) {
