@@ -14,7 +14,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 | `read_page(url)`            | Lê uma página e devolve título, meta descrição e o conteúdo em markdown                 |
 | `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)                  |
 | `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL                  |
-| `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript (Playwright, instalação opcional)                 |
+| `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript extraindo os dados embutidos no HTML (sem navegador) |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
@@ -26,19 +26,25 @@ Servidor **MCP feito do zero** para ler páginas web.
 npm test
 ```
 
-Roda três arquivos em `tests/`:
+Roda oito arquivos em `tests/` (60 testes, ~25 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
 | `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos) e rate limit (não burlável por `x-forwarded-for`) |
+| `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração |
+| `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
+| `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
+| `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |
+| `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 
 Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
 servidor de fixture local com as páginas de teste. Os testes que precisam do
 fixture usam `ALLOW_PRIVATE_HOSTS=1`; os testes de bloqueio rodam com ele
 **desligado**, como em produção. Os de `integration.test.mjs` se **pulam
-sozinhos** quando não há internet.
+sozinhos** quando não há internet, e o de SIGTERM se pula no Windows (que não
+entrega o sinal a processo filho — o Render é Linux).
 
 Para apontar a suíte para outra cópia do servidor (útil para conferir que os
 testes realmente falham numa versão antiga):
@@ -88,19 +94,17 @@ Estrutura que deve estar na pasta antes do push:
 
 ```
 web-reader-mcp/
-├── server.js          <- o servidor MCP
+├── server.js          <- o servidor MCP (single-file, de proposito)
 ├── package.json
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
+├── .gitignore
 ├── README.md
 ├── tests/             <- testes automatizados (node:test, sem dependencias)
-└── scripts/
-    ├── smoke-test.mjs
-    ├── demo-multiple.mjs
-    └── benchmark.mjs
+└── scripts/           <- clientes MCP manuais (smoke-test, benchmark, debug)
 ```
 
-(se um dia instalar o Playwright, crie um `.gitignore` com `node_modules/` antes
-do `git add .`, senao ele sobe a pasta inteira do Playwright pro GitHub)
+O `.gitignore` já cobre `node_modules/`, `.env`, logs e arquivos de editor. Se um
+dia instalar o Playwright para algum experimento, ele não vai subir por engano.
 
 ### 1. Criar o repositorio no GitHub
 
@@ -176,8 +180,11 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Start Command: `node server.js`
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
-4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar  
-   `web-reader-mcp v1.0.0 OK`.
+4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
+   `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 67108864 bytes (max 100 entradas, ttl 10 min)`.
+   A versão vem da constante `SERVER_VERSION` no `server.js`, e o `/health` também
+   informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
+   o cache em produção.
 
 ### Conectar o MCP remoto
 
@@ -271,10 +278,28 @@ Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
 conexão, porque o `fetch` do Node não permite fixar o IP de destino. Está documentada no
 código (`assertPublicHost` em `server.js`).
 
+### Variáveis de ambiente
+
+Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção). No
+`render.yaml` já vêm configuradas as duas que importam.
+
 | Variável | Padrão | O que faz |
 | --- | --- | --- |
-| `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos. Só para desenvolvimento e testes locais (o `smoke-test` e os scripts apontam para `127.0.0.1`). **No Render ela fica desligada** — não defina essa variável em produção. |
-| `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. Veja *Rate limit* abaixo. |
+| `MCP_AUTH_TOKEN` | *(vazio)* | Token do header `Authorization: Bearer <token>`. **Vazio = `/mcp` aberto para qualquer um**, e o servidor avisa isso no boot. No Render o `render.yaml` usa `generateValue: true`, então o valor é gerado e fica só no dashboard. |
+| `PORT` | `3000` | Porta do modo HTTP. O Render define sozinha; a presença dela é o que escolhe o modo HTTP (sem `PORT` → stdio). |
+| `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
+| `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
+| `CACHE_MAX_BYTES` | `67108864` (64 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
+| `CACHE_TTL_MS` | `600000` (10 min) | Validade de cada entrada do cache. |
+| `MAX_RESPONSE_BYTES` | `10485760` (10 MB) | Teto de download por requisição, lido em streaming com corte. |
+| `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
+| `FETCH_CONCURRENCY` | `6` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
+| `API_MAX_CANDIDATES` | `3` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
+| `API_TOTAL_BUDGET_MS` | `10000` (10 s) | Orçamento total dessa busca de APIs internas. |
+
+Uma variável só de teste, usada pela suíte: `TEST_SERVER_PATH`, que aponta os
+testes para outra cópia do `server.js` (serve para provar que os testes falham
+numa versão antiga).
 
 ### Rate limit e `x-forwarded-for`
 
@@ -305,28 +330,69 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
 
 - **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).  
   Pra produto, use o plano pago (evita dormir e dá mais RAM).
-- **30 URLs por chamada**, lotes de 6: pesquisa rápida sem estourar memória.
-- **`read_dynamic_page` (Playwright) no Render**: só no plano pago, build com  
-  `npx playwright install --with-deps chromium` (o free não tem RAM pra Chromium).  
-  Em Cloudflare Workers/Pages **não roda de jeito nenhum** (serverless, sem processo).
+- **30 URLs por chamada**, em lotes de 6 (`FETCH_CONCURRENCY`): pesquisa rápida
+  sem estourar memória.
+- **Orçamento de memória no plano free (512 MB)** — os tetos foram escolhidos
+  para caber com folga:
+  - cache: `CACHE_MAX_BYTES` (64 MB) — é o teto real; a contagem de 100 entradas
+    é o segundo teto.
+  - download por requisição: `MAX_RESPONSE_BYTES` (10 MB), lido em **streaming**
+    com corte (não carrega a resposta inteira antes de conferir).
+  - pico simultâneo: 6 requisições em paralelo × 10 MB = 60 MB transitórios.
+  - Se subir `FETCH_CONCURRENCY` ou `MAX_RESPONSE_BYTES`, refaça essa conta.
+- **Sem navegador, por escolha**: `read_dynamic_page` não usa Playwright nem
+  Chromium (o plano free não tem RAM para isso, e o deploy continua sem build).
+  Ela extrai os dados que o site já embute no HTML — ver a seção abaixo.
 - **Cloudflare x Render são coisas diferentes**: a Cloudflare hospeda **seu site**;  
   o Render hospeda **o MCP**. Não precisa migrar nada — o site continua na  
   Cloudflare e só faz POST pro Render.
 
-## read_dynamic_page (opcional)
+## read_dynamic_page (sem navegador)
 
-Para páginas cujo conteúdo só aparece depois de executar JavaScript (SPAs, infinite scroll):
+Para páginas cujo conteúdo só aparece depois de executar JavaScript (SPAs,
+infinite scroll). **Não há Playwright nem Chromium** — o projeto continua com
+zero dependências e sem build.
 
-```bash
-cd "C:\Users\Administrator\Desktop\FORA lula\web-reader-mcp"
-npm install playwright
-npx playwright install chromium
-```
+O que ela faz: extrai os dados que o site já embute no HTML e converte em
+markdown — `__NEXT_DATA__` (Next.js), `__NUXT__` (Nuxt), `window.__INITIAL_STATE__`
+e similares, `JSON-LD` e APIs internas citadas no próprio HTML. Se não achar nada,
+devolve o conteúdo estático com um aviso explicando isso.
 
-Sem isso, a ferramenta responde com um erro explicando como instalar — as outras três funcionam normalmente.
+Essa mesma extração roda automaticamente dentro do `read_page` quando o conteúdo
+extraído vem curto (menos de 300 caracteres) e a página parece dinâmica.
+
+### Busca automática de APIs internas (com orçamento)
+
+Quando o `read_page` dispara essa extração, ele também tenta as rotas `/api/...`,
+`/graphql`, `/data/...` e `/wp-json/...` citadas no HTML da página:
+
+- **no máximo `API_MAX_CANDIDATES`** (padrão 3) candidatos;
+- **orçamento total de `API_TOTAL_BUDGET_MS`** (padrão 10 s), depois disso devolve
+  o que já obteve e segue, sem erro;
+- só o **mesmo domínio** da página (e passando pela guarda SSRF);
+- deduplicados e priorizados: caminho com cara de dados (`json`, `graphql`, `api`)
+  ganha pontos, asset estático (`.png`, `.css`, `.js`, `.woff`) perde e não ocupa vaga.
+
+## Como as falhas aparecem na saída
+
+A saída é consumida por uma IA, então **uma falha nunca pode parecer "página
+vazia"**. O contrato é:
+
+| Situação | O que a ferramenta devolve |
+| --- | --- |
+| `read_page` / `extract_links` / `read_dynamic_page` com URL bloqueada, DNS, timeout ou HTTP ruim | `isError: true` com a mensagem do motivo |
+| `crawl_site` com a **URL inicial** ruim | `isError: true` — `Nao foi possivel iniciar o crawl em <url>: <motivo>` |
+| `crawl_site` com falha **no meio** do crawl | continua e devolve o que leu, com `RESULTADO PARCIAL: N pagina(s) falharam — 2 com HTTP 404, 1 com timeout`, e cada página ruim marcada com `# Erro ao ler <url>` |
+| `read_multiple_pages` com falha em alguma URL | a chamada **não** é erro (o isolamento por URL é proposital); o resumo traz `N paginas OK` e cada falha vem marcada com `# Erro ao ler <url>` |
+| `discover_urls` sem sitemap e sem links internos | mensagem explicando isso (não é erro) |
 
 ## Limitações conhecidas
 
 - Páginas atrás de login não funcionam (o fetch é anônimo).
-- O conteúdo é truncado em 5000 caracteres por padrão (ajustável via `maxChars`).
+- O conteúdo é truncado em **8000 caracteres** por padrão (ajustável via `maxChars`).
 - Sites com proteção anti-bot muito agressiva podem barrar a requisição.
+- **DNS rebinding:** sobra uma janela entre resolver o nome (para checar se é
+  endereço interno) e conectar, porque o `fetch` do Node não deixa fixar o IP de
+  destino. Fechar isso exigiria abrir o socket na mão ou usar dependência.
+- Só o que o site embute no HTML é extraído: JavaScript que monta o conteúdo
+  depois do carregamento (client-side puro) não aparece.
