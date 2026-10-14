@@ -67,9 +67,10 @@ test("a guarda vale para todos os caminhos de saida, nao so read_page", { timeou
     const r = await mcpBloqueando.call(nome, args);
     assert.match(r.text, /Host bloqueado: endereco privado\/interno/, `${nome} deveria bloquear: ${r.text}`);
   }
-  // crawl_site isola o erro por pagina e devolve como conteudo.
+  // crawl_site: a URL inicial bloqueada e ERRO (nao "0 paginas lidas"), para a
+  // IA nao confundir site bloqueado com site vazio.
   const crawl = await mcpBloqueando.call("crawl_site", { url: privada, maxPages: 2, timeoutMs: 3000 });
-  assert.match(crawl.text, /0 paginas lidas/, `crawl_site deveria ler 0 paginas: ${crawl.text}`);
+  assert.equal(crawl.isError, true, `crawl_site deveria ser erro: ${crawl.text}`);
   assert.match(crawl.text, /Host bloqueado: endereco privado\/interno/, `crawl_site deveria citar o bloqueio: ${crawl.text}`);
 });
 
