@@ -27,7 +27,18 @@ const DEFAULT_TIMEOUT_MS = 25000;
 const DEFAULT_MAX_CHARS = 8000;
 const HARD_MAX_CHARS = 50000;
 const MAX_PAGES_PER_CALL = 30;
-const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB max por página
+// Teto de download por requisicao. Configuravel, mas o padrao de 10 MB e o que
+// garante ler paginas grandes legitimas (Wikipedia, documentacao longa).
+const MAX_RESPONSE_BYTES = Math.max(
+  64 * 1024,
+  Math.floor(Number(process.env.MAX_RESPONSE_BYTES) || 10 * 1024 * 1024)
+);
+// Teto de memoria simultanea: quantas paginas sao baixadas em paralelo por
+// read_multiple_pages e crawl_site. 6 * 10 MB e o pico transitorio previsivel.
+const FETCH_CONCURRENCY = Math.max(
+  1,
+  Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 6))
+);
 
 // User-agents alternativos para sites que bloqueiam o primeiro
 const ALT_USER_AGENTS = [
@@ -750,6 +761,36 @@ async function fetchNoRedirect(url, headers, signal) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Le o corpo em STREAMING e corta ao passar do teto: antes o arrayBuffer()
+// carregava a resposta inteira na memoria para so depois conferir o tamanho,
+// entao o teto nao protegia de nada.
+async function readBodyWithLimit(res, maxBytes) {
+  const body = res.body;
+  if (!body) return Buffer.alloc(0);
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new Error(`Resposta muito grande (acima de ${maxBytes} bytes, maximo ${MAX_RESPONSE_BYTES})`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    // Solta a conexao e para de ler o resto do corpo.
+    try {
+      await reader.cancel();
+    } catch {
+      // corpo ja encerrado
+    }
+  }
+  return Buffer.concat(chunks, total);
+}
+
 async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -777,11 +818,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
         err.status = res.status;
         throw err;
       }
-      const buffer = await res.arrayBuffer();
-      // Proteção contra respostas gigantes (OOM)
-      if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-        throw new Error(`Resposta muito grande (${buffer.byteLength} bytes, máximo ${MAX_RESPONSE_BYTES})`);
-      }
+      const buffer = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
       const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
       return {
         text,
@@ -845,9 +882,70 @@ async function decodeBuffer(buffer, contentType) {
 
 // Cache em memoria (LRU + TTL): evita rebaixar a mesma pagina e reduz
 // bloqueios por requisicao repetida. Some no restart (stateless no Render).
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_TTL_MS = Math.max(
+  1000,
+  Math.floor(Number(process.env.CACHE_TTL_MS) || 10 * 60 * 1000)
+);
 const CACHE_MAX_ENTRIES = 100;
+// Teto em BYTES, alem do teto de contagem: sem ele, 100 entradas de ate
+// MAX_RESPONSE_BYTES davam ~1 GB potencial num plano de 512 MB.
+const CACHE_MAX_BYTES = Math.max(
+  1024,
+  Math.floor(Number(process.env.CACHE_MAX_BYTES) || 64 * 1024 * 1024)
+);
+// Uma entrada sozinha maior que este limite nao entra no cache: nao vale
+// expulsar o cache inteiro por causa de uma pagina gigante. E o menor entre
+// 1/4 do teto e metade do limite de download — com os valores padrao (64 MB e
+// 10 MB) so o segundo termo pega, senao a regra seria inalcancavel.
+const CACHE_MAX_ENTRY_BYTES = Math.min(
+  Math.floor(CACHE_MAX_BYTES / 4),
+  Math.floor(MAX_RESPONSE_BYTES / 2)
+);
 const pageCache = new Map();
+let pageCacheBytes = 0;
+
+const payloadBytes = (payload) =>
+  Buffer.byteLength(payload.text || "", "utf8") + Buffer.byteLength(payload.finalUrl || "", "utf8");
+
+// Toda remocao passa por aqui, senao a contagem em bytes deriva.
+function cacheDelete(key) {
+  const entry = pageCache.get(key);
+  if (!entry) return;
+  pageCacheBytes -= entry.bytes;
+  pageCache.delete(key);
+  if (pageCacheBytes < 0) pageCacheBytes = 0;
+}
+
+function cacheSet(key, entry) {
+  cacheDelete(key); // sobrescrever a mesma chave nao pode contar duas vezes
+  pageCache.set(key, entry);
+  pageCacheBytes += entry.bytes;
+  // Despeja os menos recentemente usados ate caber nos DOIS tetos.
+  while (pageCache.size > 1 && (pageCache.size > CACHE_MAX_ENTRIES || pageCacheBytes > CACHE_MAX_BYTES)) {
+    const maisAntiga = pageCache.keys().next().value;
+    if (maisAntiga === key) break;
+    cacheDelete(maisAntiga);
+  }
+}
+
+// Entradas expiradas seguram bytes ate serem tocadas: varre de tempos em tempos.
+const cacheCleanup = setInterval(() => {
+  const cutoff = Date.now() - CACHE_TTL_MS;
+  for (const [key, entry] of pageCache) {
+    if (entry.at < cutoff) cacheDelete(key);
+  }
+}, CACHE_TTL_MS);
+cacheCleanup.unref();
+
+function cacheStats() {
+  return {
+    entries: pageCache.size,
+    bytes: pageCacheBytes,
+    maxBytes: CACHE_MAX_BYTES,
+    maxEntries: CACHE_MAX_ENTRIES,
+    ttlMs: CACHE_TTL_MS,
+  };
+}
 
 async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   // Valida ANTES de olhar o cache: uma URL bloqueada nunca pode ser servida
@@ -856,15 +954,17 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   await assertPublicHost(url);
   const hit = pageCache.get(url);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    // LRU touch: reordena sem mexer no total de bytes.
     pageCache.delete(url);
     pageCache.set(url, hit);
     return hit.payload;
   }
+  if (hit) cacheDelete(url); // expirada: libera os bytes na hora
   const payload = await fetchTextWithFallback(url, { timeoutMs });
-  pageCache.set(url, { at: Date.now(), payload });
-  if (pageCache.size > CACHE_MAX_ENTRIES) {
-    const oldestKey = pageCache.keys().next().value;
-    pageCache.delete(oldestKey);
+  const bytes = payloadBytes(payload);
+  // Grande demais para o cache: devolve normal, so nao guarda.
+  if (bytes <= CACHE_MAX_ENTRY_BYTES) {
+    cacheSet(url, { at: Date.now(), payload, bytes });
   }
   return payload;
 }
@@ -1213,7 +1313,7 @@ async function toolReadMultiplePages(args) {
 
   // Leitura em lotes paralelos (rapido, sem floodar os sites). A ordem de
   // saida segue a ordem das URLs de entrada, para a IA mapear facilmente.
-  const CONCURRENCY = 6;
+  const CONCURRENCY = FETCH_CONCURRENCY;
   const results = new Array(urls.length);
   for (let start = 0; start < urls.length; start += CONCURRENCY) {
     const lote = urls.slice(start, start + CONCURRENCY);
@@ -1350,7 +1450,7 @@ async function toolCrawlSite(args) {
   const visited = new Set();
   const queue = [start.href];
   const paginas = [];
-  const CONCURRENCY = 6;
+  const CONCURRENCY = FETCH_CONCURRENCY;
 
   while (queue.length > 0 && paginas.length < maxPages) {
     const lote = [];
@@ -1754,8 +1854,13 @@ async function startHttp() {
     }
 
     if (path === "/health" || path === "/") {
+      const cache = cacheStats();
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      res.end(`web-reader-mcp v${SERVER_VERSION} OK`);
+      res.end(
+        `web-reader-mcp v${SERVER_VERSION} OK | cache: ${cache.entries} entradas, ` +
+          `${cache.bytes} bytes / ${cache.maxBytes} bytes ` +
+          `(max ${cache.maxEntries} entradas, ttl ${Math.round(cache.ttlMs / 60000)} min)`
+      );
       return;
     }
 

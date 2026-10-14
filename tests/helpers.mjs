@@ -66,8 +66,28 @@ export const FIXTURE_HTML = `<!DOCTYPE html><html><head><title>Fixture Parser</t
 //   /redirect-to-private        -> 302 para http://127.0.0.1:<porta>/pagina
 //   /redirect-to-file           -> 302 para file:///etc/passwd
 export async function startFixture() {
+  // Contador de requisicoes por id: deixa visivel de FORA se a resposta veio do
+  // cache (mesmo contador) ou foi baixada de novo (contador maior).
+  const hits = new Map();
+
   const server = http.createServer((req, res) => {
     const path = String(req.url || "/");
+
+    // /page/<id>?kb=N -> pagina de ~N KB com o contador de requisicoes no texto.
+    if (path.startsWith("/page/")) {
+      const url = new URL(path, "http://local");
+      const id = url.pathname.slice("/page/".length);
+      const kb = Number(url.searchParams.get("kb")) || 1;
+      const n = (hits.get(id) || 0) + 1;
+      hits.set(id, n);
+      const recheio = "x".repeat(Math.max(0, kb * 1024 - 400));
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!DOCTYPE html><html><head><title>Pagina ${id}</title></head><body>` +
+          `<h1>Pagina ${id}</h1><p>REQ-${id}-${n}</p><p>${recheio}</p></body></html>`
+      );
+      return;
+    }
 
     if (path.startsWith("/chain/")) {
       const n = Number(path.slice("/chain/".length));
@@ -175,6 +195,15 @@ export async function startMcp(env = {}) {
 }
 
 /* ------------------------------ utilidades ------------------------------ */
+
+// Le o uso do cache no /health: { entries, bytes, maxBytes }.
+export async function cacheInfo(mcp) {
+  const res = await fetch(`${mcp.base}/health`);
+  const text = await res.text();
+  const m = text.match(/cache:\s*(\d+)\s*entradas,\s*(\d+)\s*bytes\s*\/\s*(\d+)\s*bytes/);
+  if (!m) throw new Error(`nao consegui ler o cache do /health: ${text}`);
+  return { entries: Number(m[1]), bytes: Number(m[2]), maxBytes: Number(m[3]), raw: text };
+}
 
 // Extrai os blocos de codigo cercados do markdown.
 export function blocosDeCodigo(markdown) {
