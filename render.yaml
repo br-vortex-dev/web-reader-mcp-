@@ -5,7 +5,7 @@ services:
     # Para produto, troque free por starter (~US$ 7/mes): evita o cold start
     # de ~50s e da RAM para o read_dynamic_page (Playwright).
     plan: free
-    buildCommand: echo "sem dependencias para instalar"
+    buildCommand: echo "sem dependencias para instalar - v2"
     # Para liberar read_dynamic_page (Playwright) no Render:
     #   plan: starter
     #   buildCommand: npm install playwright && npx playwright install --with-deps chromium

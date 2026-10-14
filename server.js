@@ -23,6 +23,7 @@ const DEFAULT_TIMEOUT_MS = 25000;
 const DEFAULT_MAX_CHARS = 8000;
 const HARD_MAX_CHARS = 50000;
 const MAX_PAGES_PER_CALL = 30;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB max por página
 
 // User-agents alternativos para sites que bloqueiam o primeiro
 const ALT_USER_AGENTS = [
@@ -466,6 +467,10 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
         throw err;
       }
       const buffer = await res.arrayBuffer();
+      // Proteção contra respostas gigantes (OOM)
+      if (buffer.byteLength > MAX_RESPONSE_BYTES) {
+        throw new Error(`Resposta muito grande (${buffer.byteLength} bytes, máximo ${MAX_RESPONSE_BYTES})`);
+      }
       const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
       return {
         text,
@@ -622,13 +627,13 @@ async function extractEmbeddedData(html, baseUrl, timeoutMs) {
   // __NEXT_DATA__ (Next.js)
   const nextData = extractJsonById(html, "__NEXT_DATA__");
   if (nextData) sources.push({ nome: "__NEXT_DATA__", dados: nextData });
-  // __NUXT__ (Nuxt.js)
+  // __NUXT__ (Nuxt.js) — sem eval, só primitivos
   const nuxtMatch = html.match(/window\.__NUXT__\s*=\s*([\s\S]*?);?\s*<\/script>/i);
   if (nuxtMatch) {
-    try {
-      const nuxtData = eval(`(${nuxtMatch[1]})`);
+    const nuxtData = extractPrimitives(nuxtMatch[1]);
+    if (Object.keys(nuxtData).length > 0) {
       sources.push({ nome: "__NUXT__", dados: nuxtData });
-    } catch { /* ignora */ }
+    }
   }
   // window.__INITIAL_STATE__ ou similar
   const windowState = extractWindowState(html);
@@ -712,35 +717,64 @@ function extractWindowState(html) {
   return null;
 }
 
+// Extrai primitivos de um bloco JS (sem eval). Usado para __NUXT__ e similares.
+function extractPrimitives(jsCode) {
+  const result = {};
+  const re = /(\w+)\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|null|true|false|-?\d+(?:\.\d+)?)/g;
+  let m;
+  while ((m = re.exec(jsCode)) !== null) {
+    const key = m[1];
+    let value = m[2];
+    if (value.startsWith('"') || value.startsWith("'")) {
+      value = value.slice(1, -1).replace(/\\(.)/g, "$1");
+    } else if (value === "null") value = null;
+    else if (value === "true") value = true;
+    else if (value === "false") value = false;
+    else value = Number(value);
+    result[key] = value;
+  }
+  return result;
+}
+
 // Converte um objeto JSON extraido em markdown legível.
-function jsonToMarkdown(data, depth = 0) {
+// Proteção contra recursão circular e profundidade excessiva.
+function jsonToMarkdown(data, depth = 0, seen = new Set()) {
   if (data === null || data === undefined) return "";
   if (typeof data === "string") return data;
   if (typeof data === "number" || typeof data === "boolean") return String(data);
-  if (Array.isArray(data)) {
-    return data.map((item) => `- ${jsonToMarkdown(item, depth + 1)}`).join("\n");
-  }
+  if (depth > 10) return "(profundidade máxima atingida)";
   if (typeof data === "object") {
-    const lines = [];
-    for (const [key, value] of Object.entries(data)) {
-      if (value === null || value === undefined) continue;
-      const formatted = jsonToMarkdown(value, depth + 1);
-      if (!formatted) continue;
-      if (typeof value === "object" && !Array.isArray(value)) {
-        lines.push(`${"  ".repeat(depth)}- **${key}**:`);
-        lines.push(formatted);
-      } else {
-        lines.push(`${"  ".repeat(depth)}- **${key}**: ${formatted}`);
+    if (seen.has(data)) return "(referência circular)";
+    seen.add(data);
+    try {
+      if (Array.isArray(data)) {
+        return data.map((item) => `- ${jsonToMarkdown(item, depth + 1, seen)}`).join("\n");
       }
+      const lines = [];
+      for (const [key, value] of Object.entries(data)) {
+        if (value === null || value === undefined) continue;
+        const formatted = jsonToMarkdown(value, depth + 1, seen);
+        if (!formatted) continue;
+        if (typeof value === "object" && !Array.isArray(value)) {
+          lines.push(`${"  ".repeat(depth)}- **${key}**:`);
+          lines.push(formatted);
+        } else {
+          lines.push(`${"  ".repeat(depth)}- **${key}**: ${formatted}`);
+        }
+      }
+      return lines.join("\n");
+    } finally {
+      seen.delete(data);
     }
-    return lines.join("\n");
   }
   return "";
 }
 
 // Tenta achar APIs internas comuns em sites dinâmicos.
+// Proteção SSRF: só segue URLs do mesmo domínio da página base.
 async function tryInternalApi(html, baseUrl, timeoutMs) {
   const origin = new URL(baseUrl).origin;
+  const baseHost = hostOf(baseUrl);
   const apiPatterns = [
     /["'](\/api\/[^"']+)["']/g,
     /["'](\/graphql[^"']*)["']/g,
@@ -759,6 +793,8 @@ async function tryInternalApi(html, baseUrl, timeoutMs) {
   for (const path of candidates) {
     try {
       const url = path.startsWith("http") ? path : `${origin}${path}`;
+      // SSRF protection: só acessa URLs do mesmo domínio
+      if (hostOf(url) !== baseHost) continue;
       const { text, contentType } = await fetchTextCached(url, { timeoutMs });
       if (contentType && /json/.test(contentType)) {
         results.push({ url, data: text.slice(0, 5000) });
@@ -792,63 +828,13 @@ async function toolReadDynamicPage(args) {
     });
   }
 
-  // Pagina dinamica: tenta extrair dados embutidos.
-  const sources = [];
+  // Pagina dinamica: tenta extrair dados embutidos (reutiliza a mesma lógica
+  // que o read_page ja usa quando o conteudo vem curto).
+  const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
 
-  // 1. __NEXT_DATA__ (Next.js)
-  const nextData = extractJsonById(html, "__NEXT_DATA__");
-  if (nextData) {
-    sources.push({ nome: "__NEXT_DATA__ (Next.js)", dados: nextData });
-  }
-
-  // 2. __NUXT__ (Nuxt.js)
-  const nuxtMatch = html.match(/window\.__NUXT__\s*=\s*([\s\S]*?);?\s*<\/script>/i);
-  if (nuxtMatch) {
-    try {
-      // Nuxt usa uma funcao JS, nao JSON puro. Tenta eval segura.
-      const nuxtData = eval(`(${nuxtMatch[1]})`);
-      sources.push({ nome: "__NUXT__ (Nuxt.js)", dados: nuxtData });
-    } catch {
-      // se falha, ignora
-    }
-  }
-
-  // 3. window.__INITIAL_STATE__ ou similar
-  const windowState = extractWindowState(html);
-  if (windowState) {
-    sources.push({ nome: "window.__INITIAL_STATE__", dados: windowState });
-  }
-
-  // 4. JSON-LD
-  const jsonLd = extractJsonLd(html);
-  if (jsonLd.length > 0) {
-    sources.push({ nome: "JSON-LD (application/ld+json)", dados: jsonLd });
-  }
-
-  // 5. Tenta APIs internas
-  const apiResults = await tryInternalApi(html, finalUrl, timeoutMs);
-  for (const api of apiResults) {
-    sources.push({ nome: `API interna: ${api.url}`, dados: api.data });
-  }
-
-  // Se achou dados, converte em markdown.
-  if (sources.length > 0) {
-    const parts = [];
-    parts.push(`# ${meta.title || "(sem titulo)"}`);
-    parts.push(`URL: ${finalUrl}`);
-    parts.push(`Pagina dinamica detectada — conteudo extraido de ${sources.length} fonte(s) embutida(s):`);
-    parts.push("");
-    for (const source of sources) {
-      parts.push(`## Fonte: ${source.nome}`);
-      const md = jsonToMarkdown(source.dados);
-      if (md) {
-        parts.push(md);
-      } else {
-        parts.push("(dados em formato nao convertivel)");
-      }
-      parts.push("");
-    }
-    const fullText = parts.join("\n");
+  // Se achou dados, usa eles; senao, cai no conteudo estatico com aviso.
+  if (dynamicMarkdown) {
+    const fullText = `# ${meta.title || "(sem titulo)"}\nURL: ${finalUrl}\nPagina dinamica — dados extraidos do HTML embutido:\n\n${dynamicMarkdown}`;
     const { text, truncated } = truncate(fullText, maxChars);
     return formatReadResult({
       finalUrl,
