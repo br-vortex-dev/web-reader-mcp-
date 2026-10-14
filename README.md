@@ -20,8 +20,37 @@ Servidor **MCP feito do zero** para ler páginas web.
 
 ## Como testar
 
+### Testes automatizados (`node:test`, sem dependências)
+
 ```bash
-node scripts/smoke-test.mjs
+npm test
+```
+
+Roda três arquivos em `tests/`:
+
+| Arquivo | O que cobre |
+| --- | --- |
+| `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
+| `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos) e rate limit (não burlável por `x-forwarded-for`) |
+| `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
+
+Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
+servidor de fixture local com as páginas de teste. Os testes que precisam do
+fixture usam `ALLOW_PRIVATE_HOSTS=1`; os testes de bloqueio rodam com ele
+**desligado**, como em produção. Os de `integration.test.mjs` se **pulam
+sozinhos** quando não há internet.
+
+Para apontar a suíte para outra cópia do servidor (útil para conferir que os
+testes realmente falham numa versão antiga):
+
+```bash
+TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
+```
+
+### Teste ponta a ponta
+
+```bash
+npm run test:e2e
 ```
 
 Roda um cliente MCP mínimo que conecta no servidor, lista as ferramentas e exercita todas elas.
@@ -63,6 +92,7 @@ web-reader-mcp/
 ├── package.json
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
 ├── README.md
+├── tests/             <- testes automatizados (node:test, sem dependencias)
 └── scripts/
     ├── smoke-test.mjs
     ├── demo-multiple.mjs
