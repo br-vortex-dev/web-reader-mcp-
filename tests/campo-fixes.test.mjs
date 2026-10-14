@@ -12,6 +12,8 @@
 //   BUG-7 aria-hidden nao vaza pro texto                 -> "BUG-7: ..."
 //   BUG-7 (regressao) <img aria-hidden> void nao engole  -> "BUG-7: <img aria-hidden..."
 //   BUG-8 linha de codigo em <pre> nao explode           -> "BUG-8: ..."
+//   BUG-9 <script/> self-closing nao engole os links     -> "BUG-9: ..."
+//   BUG-10 crawl_site em texto puro nao quebra           -> "BUG-10: ..."
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
@@ -177,4 +179,48 @@ test("BUG-8: linha de codigo em <pre> nao explode em branco", async () => {
   const bloco = blocosDeCodigo(r.text).find((b) => b.includes("function Soma"));
   assert.ok(bloco, `bloco nao encontrado: ${r.text}`);
   assert.equal(bloco, "function Soma() {\n  return 1 + 1;\n}\n");
+});
+
+// ------------------------------- BUG-9 --------------------------------- //
+// Achado na analise de codigo (14/10 a noite): a guarda de selfClosing que o
+// BUG-7 pos em htmlToMarkdown (tag void nao mexe no skipDepth) NAO existe no
+// extractLinks. Tag de skip self-closing (<script .../>, <svg/>) sobe o
+// skipDepth e nao gera token de fecho — o resto da pagina inteiro desaparece
+// da lista de links.
+test("BUG-9: <script .../> self-closing nao engole os links seguintes", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/skip-self` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /2 encontrados/, `links perdidos: ${r.text}`);
+  assert.match(r.text, /alvo-1/);
+  assert.match(r.text, /alvo-2/);
+});
+
+test("BUG-9: <svg .../> self-closing nao engole os links seguintes", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/skip-svg` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /2 encontrados/, `links perdidos: ${r.text}`);
+  assert.match(r.text, /alvo-1/);
+  assert.match(r.text, /alvo-2/);
+});
+
+// Controle: <script></script> fechado do jeito normal — sempre funcionou e
+// tem de continuar funcionando (protege a correcao de quebrar o caso comum).
+test("BUG-9 (controle): <script></script> fechado continua listando os links", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/skip-open` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /2 encontrados/, `links perdidos: ${r.text}`);
+  assert.match(r.text, /alvo-1/);
+  assert.match(r.text, /alvo-2/);
+});
+
+// ------------------------------- BUG-10 --------------------------------- //
+// crawlOnePage no ramo cru (texto puro/XML) devolvia { linksInternos }, mas
+// toolCrawlSite le .links — crawl em robots.txt ou sitemap quebrava com
+// TypeError "primeira.links is not iterable" vestido de erro de crawl.
+test("BUG-10: crawl_site comecando em texto puro nao quebra", async () => {
+  const r = await mcp.call("crawl_site", { url: `${fixture.url}/robots`, maxPages: 3 });
+  assert.equal(r.isError, false, r.text);
+  assert.doesNotMatch(r.text, /is not iterable/);
+  // o conteudo cru da pagina inicial tem de entrar no resultado
+  assert.match(r.text, /User-agent: \*/);
 });

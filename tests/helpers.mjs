@@ -356,7 +356,48 @@ export async function startFixture() {
       return;
     }
 
-    // BUG-2: CDATA dentro de HTML — o ]]> vazava como texto visivel.
+    // BUG-9: <script> SELF-CLOSING (<script .../>), saida comum de template
+  // XHTML. extractLinks nao tinha a guarda de selfClosing que o BUG-7 pos
+  // em htmlToMarkdown: skipDepth subia e nunca descia, e TODOS os links
+  // depois do script desapareciam (extract_links, discover_urls e o
+  // crawl_site compartilham o extractLinks).
+  if (path === "/skip-self") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      '<!DOCTYPE html><html><head><title>Self Closing</title><script src="/app.js"/></head><body>' +
+        "<h1>Pagina</h1><p>texto antes dos links</p>" +
+        '<p><a href="/alvo-1">Alvo um</a></p><p><a href="/alvo-2">Alvo dois</a></p>' +
+        "</body></html>"
+    );
+    return;
+  }
+
+  // Controle do BUG-9: o mesmo <script>, fechado do jeito normal. Os links
+  // depois dele TEM de aparecer — esse caso sempre funcionou.
+  if (path === "/skip-open") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      '<!DOCTYPE html><html><head><title>Script Fechado</title><script src="/app.js"></script></head><body>' +
+        "<h1>Pagina</h1><p>texto antes dos links</p>" +
+        '<p><a href="/alvo-1">Alvo um</a></p><p><a href="/alvo-2">Alvo dois</a></p>' +
+        "</body></html>"
+    );
+    return;
+  }
+
+  // BUG-9, variante <svg/>: icone inline self-closing, mesma armadilha.
+  if (path === "/skip-svg") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      '<!DOCTYPE html><html><head><title>Svg Self</title></head><body>' +
+        '<svg width="16" height="16" aria-hidden="true"/><h1>Pagina</h1>' +
+        '<p><a href="/alvo-1">Alvo um</a></p><p><a href="/alvo-2">Alvo dois</a></p>' +
+        "</body></html>"
+    );
+    return;
+  }
+
+  // BUG-2: CDATA dentro de HTML — o ]]> vazava como texto visivel.
     if (path === "/cdata") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(
