@@ -874,7 +874,11 @@ function extractLinks(html, baseUrl) {
 
     if (token.type === "open") {
       if (isSkipped) {
-        skipDepth++;
+        // BUG-9: tag self-closing (<script .../>, <svg/>) NAO gera token de
+        // fecho. Contar skipDepth aqui prendia o resto da pagina em modo
+        // skip para sempre — mesma armadilha do BUG-7, que so existia no
+        // htmlToMarkdown. Void/self-closing nao mexe no contador.
+        if (!token.selfClosing) skipDepth++;
         continue;
       }
       if (skipDepth > 0) continue;
