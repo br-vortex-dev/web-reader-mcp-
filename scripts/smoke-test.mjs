@@ -177,14 +177,6 @@ async function main() {
   check(!cs1.isError && /Crawl de/.test(csText), "crawl_site executou o crawl");
   show(`crawl_site(Node.js, 3 paginas, ${crawlSeconds}s)`, csText, 400);
 
-  const d1 = await rpc("tools/call", {
-    name: "read_dynamic_page",
-    arguments: { url: "https://example.com", maxChars: 200 },
-  });
-  const td1 = (d1.content || []).map((c) => c.text).join("\n");
-  check(Boolean(d1.isError) && /Playwright/.test(td1), "read_dynamic_page degrada com erro claro (Playwright ausente)");
-  show("read_dynamic_page (esperado: erro instruindo instalar Playwright)", td1, 400);
-
   const e1 = await rpc("tools/call", {
     name: "read_page",
     arguments: { url: "nao-e-uma-url" },

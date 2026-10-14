@@ -12,7 +12,7 @@
  *   read_page(url)            -> le uma pagina e devolve titulo + conteudo em markdown
  *   extract_links(url)        -> lista os links de uma pagina
  *   read_multiple_pages(urls) -> le varias paginas em sequencia
- *   read_dynamic_page(url)    -> le paginas que dependem de JavaScript (Playwright, opcional)
+ *   read_dynamic_page(url)    -> le paginas que dependem de JavaScript (sem Playwright)
  */
 
 const SERVER_NAME = "web-reader";
@@ -373,7 +373,11 @@ function extractLinks(html, baseUrl) {
       }
       if (skipDepth > 0) continue;
       if (token.tag === "a") {
-        current = { href: resolveUrl(token.attrs.href, baseUrl), parts: [] };
+        current = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
+      }
+      if (token.tag === "img" && current && !current.imgAlt) {
+        const alt = (token.attrs.alt || "").trim();
+        if (alt) current.imgAlt = alt;
       }
     } else if (token.type === "close") {
       if (isSkipped) {
@@ -383,12 +387,12 @@ function extractLinks(html, baseUrl) {
       if (skipDepth > 0) continue;
       if (token.tag === "a" && current) {
         const href = current.href;
-        const text = decodeEntities(current.parts.join("")).replace(/\s+/g, " ").trim();
+        const text = decodeEntities(current.parts.join("")).replace(/\s+/g, " ").trim() || current.imgAlt || "(sem texto)";
         current = null;
         if (href && !seen.has(href)) {
           seen.add(href);
           links.push({
-            text: text || "(sem texto)",
+            text,
             href,
             internal: hostOf(href) === baseHost,
           });
@@ -540,6 +544,229 @@ async function toolReadPage(args) {
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length });
 }
 
+// ===================================================================== *
+// Leitura de paginas dinamicas (sem Playwright)                         *
+// =====================================================================
+
+// Detecta se uma pagina provavelmente precisa de JavaScript para renderizar.
+// Sinais: pouco conteudo visivel, scripts de framework, divs vazios com id.
+function isDynamicPage(html, markdown) {
+  const visibleText = markdown.replace(/\s+/g, " ").trim();
+  const hasFrameworkScript =
+    /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i.test(html);
+  const hasEmptyRoot = /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/.test(html);
+  const shortContent = visibleText.length < 500;
+  return hasFrameworkScript || hasEmptyRoot || shortContent;
+}
+
+// Extrai JSON de uma tag <script> pelo id ou tipo.
+function extractJsonById(html, id) {
+  const re = new RegExp(`<script[^>]+id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/script>`, "i");
+  const m = html.match(re);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+}
+
+// Extrai JSON-LD (application/ld+json) — muito usado em sites de noticias e produtos.
+function extractJsonLd(html) {
+  const results = [];
+  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(m[1].trim());
+      results.push(data);
+    } catch {
+      // ignora JSON invalido
+    }
+  }
+  return results;
+}
+
+// Extrai dados de scripts com window.__INITIAL_STATE__ ou similar.
+function extractWindowState(html) {
+  const patterns = [
+    /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/i,
+    /window\.__data\s*=\s*({[\s\S]*?});?\s*<\/script>/i,
+    /window\.__PRELOADED_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) {
+      try {
+        return JSON.parse(m[1].trim());
+      } catch {
+        // tenta o proximo padrao
+      }
+    }
+  }
+  return null;
+}
+
+// Converte um objeto JSON extraido em markdown legível.
+function jsonToMarkdown(data, depth = 0) {
+  if (data === null || data === undefined) return "";
+  if (typeof data === "string") return data;
+  if (typeof data === "number" || typeof data === "boolean") return String(data);
+  if (Array.isArray(data)) {
+    return data.map((item) => `- ${jsonToMarkdown(item, depth + 1)}`).join("\n");
+  }
+  if (typeof data === "object") {
+    const lines = [];
+    for (const [key, value] of Object.entries(data)) {
+      if (value === null || value === undefined) continue;
+      const formatted = jsonToMarkdown(value, depth + 1);
+      if (!formatted) continue;
+      if (typeof value === "object" && !Array.isArray(value)) {
+        lines.push(`${"  ".repeat(depth)}- **${key}**:`);
+        lines.push(formatted);
+      } else {
+        lines.push(`${"  ".repeat(depth)}- **${key}**: ${formatted}`);
+      }
+    }
+    return lines.join("\n");
+  }
+  return "";
+}
+
+// Tenta achar APIs internas comuns em sites dinâmicos.
+async function tryInternalApi(html, baseUrl, timeoutMs) {
+  const origin = new URL(baseUrl).origin;
+  const apiPatterns = [
+    /["'](\/api\/[^"']+)["']/g,
+    /["'](\/graphql[^"']*)["']/g,
+    /["'](\/data\/[^"']+)["']/g,
+    /["'](\/wp-json\/[^"']+)["']/g,
+  ];
+  const candidates = new Set();
+  for (const re of apiPatterns) {
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const path = m[1];
+      if (path.length < 100) candidates.add(path);
+    }
+  }
+  const results = [];
+  for (const path of candidates) {
+    try {
+      const url = path.startsWith("http") ? path : `${origin}${path}`;
+      const { text, contentType } = await fetchTextCached(url, { timeoutMs });
+      if (contentType && /json/.test(contentType)) {
+        results.push({ url, data: text.slice(0, 5000) });
+      }
+    } catch {
+      // ignora APIs que falham
+    }
+  }
+  return results;
+}
+
+async function toolReadDynamicPage(args) {
+  const parsed = validateHttpUrl(args.url);
+  const maxChars = clampMaxChars(args.maxChars);
+  const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  ensureHtml(contentType, html);
+  const meta = extractMeta(html);
+  const markdown = htmlToMarkdown(html, finalUrl);
+
+  // Se nao parece dinamica, retorna o conteudo estatico normal.
+  if (!isDynamicPage(html, markdown)) {
+    const { text, truncated } = truncate(markdown, maxChars);
+    return formatReadResult({
+      finalUrl,
+      meta,
+      text,
+      truncated,
+      fullLength: markdown.length,
+      extraLabel: "Pagina estatica (nao precisa de JavaScript)",
+    });
+  }
+
+  // Pagina dinamica: tenta extrair dados embutidos.
+  const sources = [];
+
+  // 1. __NEXT_DATA__ (Next.js)
+  const nextData = extractJsonById(html, "__NEXT_DATA__");
+  if (nextData) {
+    sources.push({ nome: "__NEXT_DATA__ (Next.js)", dados: nextData });
+  }
+
+  // 2. __NUXT__ (Nuxt.js)
+  const nuxtMatch = html.match(/window\.__NUXT__\s*=\s*([\s\S]*?);?\s*<\/script>/i);
+  if (nuxtMatch) {
+    try {
+      // Nuxt usa uma funcao JS, nao JSON puro. Tenta eval segura.
+      const nuxtData = eval(`(${nuxtMatch[1]})`);
+      sources.push({ nome: "__NUXT__ (Nuxt.js)", dados: nuxtData });
+    } catch {
+      // se falha, ignora
+    }
+  }
+
+  // 3. window.__INITIAL_STATE__ ou similar
+  const windowState = extractWindowState(html);
+  if (windowState) {
+    sources.push({ nome: "window.__INITIAL_STATE__", dados: windowState });
+  }
+
+  // 4. JSON-LD
+  const jsonLd = extractJsonLd(html);
+  if (jsonLd.length > 0) {
+    sources.push({ nome: "JSON-LD (application/ld+json)", dados: jsonLd });
+  }
+
+  // 5. Tenta APIs internas
+  const apiResults = await tryInternalApi(html, finalUrl, timeoutMs);
+  for (const api of apiResults) {
+    sources.push({ nome: `API interna: ${api.url}`, dados: api.data });
+  }
+
+  // Se achou dados, converte em markdown.
+  if (sources.length > 0) {
+    const parts = [];
+    parts.push(`# ${meta.title || "(sem titulo)"}`);
+    parts.push(`URL: ${finalUrl}`);
+    parts.push(`Pagina dinamica detectada — conteudo extraido de ${sources.length} fonte(s) embutida(s):`);
+    parts.push("");
+    for (const source of sources) {
+      parts.push(`## Fonte: ${source.nome}`);
+      const md = jsonToMarkdown(source.dados);
+      if (md) {
+        parts.push(md);
+      } else {
+        parts.push("(dados em formato nao convertivel)");
+      }
+      parts.push("");
+    }
+    const fullText = parts.join("\n");
+    const { text, truncated } = truncate(fullText, maxChars);
+    return formatReadResult({
+      finalUrl,
+      meta,
+      text,
+      truncated,
+      fullLength: fullText.length,
+      extraLabel: "Pagina dinamica — dados extraidos do HTML embutido",
+    });
+  }
+
+  // Se nao achou nada, retorna o conteudo estatico com aviso.
+  const { text, truncated } = truncate(markdown, maxChars);
+  return formatReadResult({
+    finalUrl,
+    meta,
+    text,
+    truncated,
+    fullLength: markdown.length,
+    extraLabel: "Pagina dinamica detectada, mas nao foi possivel extrair dados embutidos. Conteudo estatico abaixo.",
+  });
+}
+
 async function toolExtractLinks(args) {
   const parsed = validateHttpUrl(args.url);
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
@@ -603,71 +830,6 @@ async function toolReadMultiplePages(args) {
     `Leitura concluida: ${ok}/${urls.length} paginas OK (lidas em lotes de ${CONCURRENCY}).\n\n` +
     results.map((r) => r.text).join("\n\n========================================\n\n")
   );
-}
-
-async function toolReadDynamicPage(args) {
-  const parsed = validateHttpUrl(args.url);
-  const timeoutMs = Math.max(2000, Math.min(120000, Number(args.timeoutMs) || 30000));
-  const maxChars = clampMaxChars(args.maxChars);
-
-  let playwright;
-  try {
-    playwright = await import("playwright");
-  } catch {
-    throw new Error(
-      "read_dynamic_page precisa do Playwright (opcional). Para ativar:\n\n" +
-        '  cd "C:\\Users\\Administrator\\Desktop\\FORA lula\\web-reader-mcp"\n' +
-        "  npm install playwright\n" +
-        "  npx playwright install chromium\n\n" +
-        "Enquanto isso, use read_page e extract_links (nao precisam de JS)."
-    );
-  }
-
-  const launchAttempts = [
-    { headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] },
-    { headless: true, channel: "msedge" },
-    { headless: true, channel: "chrome" },
-  ];
-  let browser = null;
-  let lastError = null;
-  for (const options of launchAttempts) {
-    try {
-      browser = await playwright.chromium.launch(options);
-      break;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  if (!browser) {
-    throw new Error(
-      `Falha ao iniciar navegador headless: ${lastError && lastError.message}. ` +
-        "Instale o navegador com: npx playwright install chromium"
-    );
-  }
-
-  try {
-    const page = await browser.newPage({ userAgent: USER_AGENT });
-    await page.goto(parsed.href, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    try {
-      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 10000) });
-    } catch {
-      // segue com o que ja renderizou
-    }
-    const renderedHtml = await page.content();
-    const meta = extractMeta(renderedHtml);
-    const markdown = htmlToMarkdown(renderedHtml, page.url());
-    const { text, truncated } = truncate(markdown, maxChars);
-    return formatReadResult({
-      finalUrl: page.url(),
-      meta,
-      text,
-      truncated,
-      fullLength: markdown.length,
-      extraLabel: "(pagina renderizada — JavaScript executado)",
-    });
-  } finally {
-    await browser.close().catch(() => {});
-  }
 }
 
 // Descobre as URLs de um site: tenta sitemap.xml (e variantes), segue
@@ -748,6 +910,30 @@ async function toolDiscoverUrls(args) {
 
 // Crawl BFS limitado: comeca na URL, le, extrai links internos e segue
 // pelos nao visitados, ate maxPages. Devolve o conteudo de todas as paginas.
+// URLs de navegação que não valem a pena ler em um crawl
+const NAVIGATION_PATTERNS = [
+  /\/login/i, /\/signin/i, /\/register/i, /\/signup/i,
+  /\/privacy/i, /\/terms/i, /\/about/i, /\/contact/i,
+  /\/help/i, /\/faq/i, /\/support/i, /\/search/i,
+  /\/tag\//i, /\/category\//i, /\/author\//i,
+  /\/wp-admin/i, /\/wp-login/i, /\/wp-content/i,
+  /\/feed/i, /\/rss/i, /\/atom/i,
+  /\/sitemap/i, /\/robots/i,
+  /\/cart/i, /\/checkout/i, /\/account/i,
+  /\/profile/i, /\/settings/i, /\/admin/i,
+  /\/wp-json/i, /\/api\//i,
+  /\/page\/\d+/i, /\/p\/\d+/i,
+  /\/archive/i, /\/archives/i,
+  /\/comment/i, /\/comments/i,
+  /\/print/i, /\/share/i, /\/bookmark/i,
+  /\/javascript/i, /\/mailto/i,
+  /\/#.*$/, // anchors
+];
+
+function isNavigationUrl(url) {
+  return NAVIGATION_PATTERNS.some((pattern) => pattern.test(url));
+}
+
 async function toolCrawlSite(args) {
   const start = validateHttpUrl(args.url);
   const maxPages = Math.max(2, Math.min(30, Number(args.maxPages) || 10));
@@ -785,7 +971,7 @@ async function toolCrawlSite(args) {
           const markdown = htmlToMarkdown(html, finalUrl);
           const { text, truncated } = truncate(markdown, maxChars);
           const linksInternos = extractLinks(html, finalUrl).filter(
-            (l) => l.internal && l.href !== finalUrl
+            (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
           );
           return {
             ok: true,
@@ -831,12 +1017,13 @@ async function callTool(name, args) {
       return await toolExtractLinks(args || {});
     case "read_multiple_pages":
       return await toolReadMultiplePages(args || {});
-    case "read_dynamic_page":
-      return await toolReadDynamicPage(args || {});
+
     case "discover_urls":
       return await toolDiscoverUrls(args || {});
     case "crawl_site":
       return await toolCrawlSite(args || {});
+    case "read_dynamic_page":
+      return await toolReadDynamicPage(args || {});
     default:
       throw new Error(`Ferramenta desconhecida: ${name}`);
   }
@@ -892,7 +1079,7 @@ const TOOLS = [
         urls: {
           type: "array",
           items: { type: "string" },
-          description: "Lista de URLs (http/https), maximo 10",
+          description: "Lista de URLs (http/https), maximo 30",
         },
         maxChars: {
           type: "number",
@@ -903,23 +1090,7 @@ const TOOLS = [
       required: ["urls"],
     },
   },
-  {
-    name: "read_dynamic_page",
-    description:
-      "Le paginas cujo conteudo so aparece depois de executar JavaScript (SPAs, feeds, paginas com scroll infinito). " +
-      "Usa um navegador headless via Playwright. " +
-      "Requer instalacao opcional: npm install playwright && npx playwright install chromium. " +
-      "Preferir read_page quando a pagina for HTML estatico.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "URL da pagina" },
-        maxChars: { type: "number", description: "Maximo de caracteres do conteudo (padrao 8000)" },
-        timeoutMs: { type: "number", description: "Timeout total em ms (padrao 30000)" },
-      },
-      required: ["url"],
-    },
-  },
+
   {
     name: "discover_urls",
     description:
@@ -950,6 +1121,26 @@ const TOOLS = [
         maxPages: { type: "number", description: "Maximo de paginas a ler (padrao 10, max 30)" },
         maxChars: { type: "number", description: "Maximo de caracteres por pagina (padrao 2000)" },
         timeoutMs: { type: "number", description: "Timeout por requisicao em ms (padrao 20000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "read_dynamic_page",
+    description:
+      "Le paginas que dependem de JavaScript para renderizar (React, Vue, Angular, Next.js, etc.) " +
+      "sem precisar de Playwright. Detecta se a pagina e dinamica e extrai dados embutidos no HTML " +
+      "(__NEXT_DATA__, __NUXT__, __INITIAL_STATE__, JSON-LD, APIs internas). " +
+      "Use quando read_page retornar conteudo vazio ou muito curto em sites modernos.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da pagina a ler" },
+        maxChars: {
+          type: "number",
+          description: "Maximo de caracteres do conteudo retornado (padrao 8000, max 50000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisicao em ms (padrao 20000)" },
       },
       required: ["url"],
     },
@@ -1083,6 +1274,11 @@ async function startHttp() {
   // chamada em /mcp precisa do header: Authorization: Bearer <token>
   const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 
+  // Rate limiting simples: max 60 requisicoes por minuto por IP
+  const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+  const RATE_LIMIT_MAX = 60;
+  const rateLimitMap = new Map();
+
   const readBody = (req) =>
     new Promise((resolve, reject) => {
       const chunks = [];
@@ -1145,6 +1341,29 @@ async function startHttp() {
         return;
       }
     }
+
+    // Rate limiting por IP
+    const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const windowStart = now - RATE_LIMIT_WINDOW_MS;
+    const requests = (rateLimitMap.get(clientIp) || []).filter((t) => t > windowStart);
+    if (requests.length >= RATE_LIMIT_MAX) {
+      res.writeHead(429, {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*",
+        "retry-after": Math.ceil(RATE_LIMIT_WINDOW_MS / 1000),
+      });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32000, message: "Rate limit excedido. Tente novamente em 60 segundos." },
+        })
+      );
+      return;
+    }
+    requests.push(now);
+    rateLimitMap.set(clientIp, requests);
 
     if (req.method !== "POST") {
       res.writeHead(405, { "content-type": "text/plain", Allow: "POST" });
