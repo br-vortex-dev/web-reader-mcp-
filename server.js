@@ -373,6 +373,16 @@ const SKIP_TAGS = new Set([
   "head", "select", "button",
 ]);
 
+// Tags de bloco que, DENTRO de <pre>, nao podem emitir quebra de linha: a
+// formatacao do codigo vem das quebras do proprio fonte. Pagina que
+// embrulha cada linha de codigo no proprio elemento (estilo react.dev)
+// explodia o bloco em linhas em branco.
+const PRE_SILENCE_TAGS = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "p", "div", "section", "article", "main", "figure", "figcaption",
+  "details", "summary", "ul", "ol", "dl", "blockquote", "li",
+]);
+
 const NAMED_ENTITIES = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
   iexcl: "\u00a1", cent: "\u00a2", pound: "\u00a3", curren: "\u00a4",
