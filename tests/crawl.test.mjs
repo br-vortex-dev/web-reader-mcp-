@@ -98,6 +98,29 @@ test("crawl sem falhas nao fala em resultado parcial", { timeout: 60000 }, async
   assert.doesNotMatch(r.text, /RESULTADO PARCIAL/);
 });
 
+/* --------------------- filtro de navegacao por segmento ---------------- */
+// Os padroes de navegacao casavam contra a URL INTEIRA: /\/about/i filtrava
+// /blog/about-cookies e a pagina de blog desaparecia do crawl.
+
+test("filtro de navegacao casa por segmento, nao por substring da URL", { timeout: 60000 }, async () => {
+  const r = await mcpLocal.call("crawl_site", {
+    url: `${fixture.url}/nav/start`,
+    maxPages: 6,
+    maxChars: 300,
+    timeoutMs: 5000,
+  });
+  assert.equal(r.isError, false, r.text);
+  // segmento puro = descartado (nem entra na fila, nao gera falha)
+  assert.doesNotMatch(r.text, /MARCADO-ABOUT-PURO/);
+  // substring em segmento maior = TEM de ser lida
+  assert.match(r.text, /MARCADO-ABOUT-COOKIES/, `about-cookies sumiu: ${r.text}`);
+  // paginas normais e paginacao: /arquivo entra, /arquivo/page/2 nao
+  assert.match(r.text, /MARCADO-ARQUIVO/);
+  // 3 lidas (start, about-cookies, arquivo), nenhuma falha
+  assert.match(r.text, /3 pagina\(s\) lida\(s\)/, r.text.slice(0, 200));
+  assert.doesNotMatch(r.text, /RESULTADO PARCIAL/);
+});
+
 /* --------------------- read_multiple_pages (nao mudou) ------------------ */
 
 test("read_multiple_pages rotula cada falha individual sem derrubar a chamada", { timeout: 60000 }, async () => {

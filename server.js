@@ -1964,28 +1964,38 @@ async function toolDiscoverUrls(args) {
 
 // Crawl BFS limitado: comeca na URL, le, extrai links internos e segue
 // pelos nao visitados, ate maxPages. Devolve o conteudo de todas as paginas.
-// URLs de navegação que não valem a pena ler em um crawl
-const NAVIGATION_PATTERNS = [
-  /\/login/i, /\/signin/i, /\/register/i, /\/signup/i,
-  /\/privacy/i, /\/terms/i, /\/about/i, /\/contact/i,
-  /\/help/i, /\/faq/i, /\/support/i, /\/search/i,
-  /\/tag\//i, /\/category\//i, /\/author\//i,
-  /\/wp-admin/i, /\/wp-login/i, /\/wp-content/i,
-  /\/feed/i, /\/rss/i, /\/atom/i,
-  /\/sitemap/i, /\/robots/i,
-  /\/cart/i, /\/checkout/i, /\/account/i,
-  /\/profile/i, /\/settings/i, /\/admin/i,
-  /\/wp-json/i, /\/api\//i,
-  /\/page\/\d+/i, /\/p\/\d+/i,
-  /\/archive/i, /\/archives/i,
-  /\/comment/i, /\/comments/i,
-  /\/print/i, /\/share/i, /\/bookmark/i,
-  /\/javascript/i, /\/mailto/i,
-  /\/#.*$/, // anchors
-];
+// URLs de navegação que não valem a pena ler em um crawl.
+// Casam contra SEGMENTOS DO PATHNAME, nao contra a URL inteira: com
+// pattern solto, /blog/about-cookies (segmento "about-cookies") era
+// filtrado por /\/about/i — a pagina de blog desaparecia do crawl.
+const NAVIGATION_SEGMENTS = new Set([
+  "login", "signin", "signup", "register", "logout",
+  "privacy", "terms", "about", "contact", "help", "faq", "support",
+  "search", "cart", "checkout", "account", "profile", "settings", "admin",
+  "wp-admin", "wp-login", "wp-content", "wp-json",
+  "feed", "rss", "atom", "sitemap", "robots",
+  "archive", "archives", "print", "share", "bookmark",
+  "javascript", "mailto", "tag", "category", "author", "api",
+  "comment", "comments",
+]);
 
 function isNavigationUrl(url) {
-  return NAVIGATION_PATTERNS.some((pattern) => pattern.test(url));
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const segmentos = parsed.pathname.split("/").filter(Boolean);
+  // paginacao: /page/2, /blog/page/3, /p/42
+  for (let i = 0; i < segmentos.length; i++) {
+    const s = segmentos[i].toLowerCase();
+    if ((s === "page" || s === "p") && /^\d+$/.test(segmentos[i + 1] || "")) return true;
+  }
+  if (segmentos.some((s) => NAVIGATION_SEGMENTS.has(decodeURIComponent(s).toLowerCase()))) return true;
+  // ancora (#...) nao existe do lado do servidor: alguns extratores devolvem
+  // o href com #. Manter o descarte como antes.
+  return url.includes("#");
 }
 
 // Classifica a falha de uma leitura para o resumo do crawl. Sem isso a IA ve

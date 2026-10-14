@@ -159,6 +159,38 @@ export async function startFixture() {
       return;
     }
 
+    // Filtro de navegacao do crawl: os padroes casam por SEGMENTO do
+    // pathname. /nav/about (segmento "about" puro) tem de ser descartado;
+    // /blog/about-cookies (so contem a substring) NAO pode ser.
+    if (path === "/nav/start") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Nav</title></head><body><h1>Inicio nav</h1>" +
+          '<p><a href="/nav/about">about puro</a></p>' +
+          '<p><a href="/blog/about-cookies">about cookies</a></p>' +
+          '<p><a href="/nav/login">login</a></p>' +
+          '<p><a href="/arquivo">arquivo</a></p>' +
+          '<p><a href="/arquivo/page/2">paginacao</a></p>' +
+          "</body></html>"
+      );
+      return;
+    }
+    if (path === "/nav/about") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end('<!DOCTYPE html><html><head><title>About</title></head><body><h1>MARCADO-ABOUT-PURO</h1></body></html>');
+      return;
+    }
+    if (path === "/blog/about-cookies") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end('<!DOCTYPE html><html><head><title>Cookies</title></head><body><h1>MARCADO-ABOUT-COOKIES</h1></body></html>');
+      return;
+    }
+    if (path === "/arquivo") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end('<!DOCTYPE html><html><head><title>Arquivo</title></head><body><h1>MARCADO-ARQUIVO</h1></body></html>');
+      return;
+    }
+
     // /dinamica -> pagina curta com dados embutidos (__NEXT_DATA__): dispara o
     // caminho de read_dynamic_page que montava o cabecalho duas vezes.
     if (path === "/dinamica") {
