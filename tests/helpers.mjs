@@ -71,6 +71,8 @@ export async function startFixture() {
   // Contador de requisicoes por id: deixa visivel de FORA se a resposta veio do
   // cache (mesmo contador) ou foi baixada de novo (contador maior).
   const hits = new Map();
+  // Candidatos "/api/..." que o servidor realmente buscou (ordem de chegada).
+  const probes = [];
 
   const server = http.createServer((req, res) => {
     const path = String(req.url || "/");
@@ -125,6 +127,34 @@ export async function startFixture() {
       return;
     }
 
+    // /api/pagina?cands=/a|/b -> pagina curta (markdown < 300 chars) cujo script
+    // cita os candidatos. Dispara o extractEmbeddedData do read_page.
+    if (path.startsWith("/api/pagina")) {
+      const u = new URL(path, "http://local");
+      const cands = (u.searchParams.get("cands") || "/api/probe/um").split("|").filter(Boolean);
+      const scripts = cands.map((c) => `fetch(${JSON.stringify(c)});`).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!DOCTYPE html><html><head><title>Api</title></head><body>` +
+          `<div id="root"></div><script>${scripts}</script></body></html>`
+      );
+      return;
+    }
+
+    // /api/probe/<nome> -> registra a chamada e devolve JSON.
+    if (path.startsWith("/api/probe/")) {
+      const nome = path.slice("/api/probe/".length);
+      probes.push(nome);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ nome, valor: 42 }));
+      return;
+    }
+
+    // /api/trava -> aceita a conexao e nunca responde (forca timeout).
+    if (path.startsWith("/api/trava")) {
+      return;
+    }
+
     if (path.startsWith("/chain/")) {
       const n = Number(path.slice("/chain/".length));
       if (Number.isFinite(n) && n > 0) {
@@ -155,6 +185,10 @@ export async function startFixture() {
   return {
     url: `http://127.0.0.1:${port}`,
     port,
+    probes,
+    clearProbes: () => {
+      probes.length = 0;
+    },
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

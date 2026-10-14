@@ -39,6 +39,11 @@ const FETCH_CONCURRENCY = Math.max(
   1,
   Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 6))
 );
+// Orcamento da busca automatica de "APIs internas" que o read_page dispara
+// sozinho quando o conteudo vem curto. Sem teto, uma pagina com muitos
+// "/api/..." que nao respondem prendia a chamada por minutos.
+const API_MAX_CANDIDATES = Math.max(0, Math.floor(Number(process.env.API_MAX_CANDIDATES || 3)));
+const API_TOTAL_BUDGET_MS = Math.max(500, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 10000));
 
 // User-agents alternativos para sites que bloqueiam o primeiro
 const ALT_USER_AGENTS = [
@@ -791,11 +796,21 @@ async function readBodyWithLimit(res, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
-async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = {}) {
+async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Permite que um orcamento externo (ex.: a busca de APIs internas) cancele
+    // a requisicao no meio, sem esperar o timeout cheio.
+    const abortarDeFora = () => controller.abort();
+    if (externo) {
+      if (externo.aborted) {
+        clearTimeout(timer);
+        throw new Error("Requisicao cancelada (orcamento esgotado).");
+      }
+      externo.addEventListener("abort", abortarDeFora, { once: true });
+    }
     const userAgent = attempt === 0 ? USER_AGENT : ALT_USER_AGENTS[(attempt - 1) % ALT_USER_AGENTS.length];
     try {
       const headers = {
@@ -832,6 +847,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
       await sleep(400 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
+      if (externo) externo.removeEventListener("abort", abortarDeFora);
     }
   }
   throw lastError;
@@ -947,7 +963,7 @@ function cacheStats() {
   };
 }
 
-async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   // Valida ANTES de olhar o cache: uma URL bloqueada nunca pode ser servida
   // (nem popular) o cache. Vale para todos os caminhos: read_page, crawl,
   // sitemap, extract_links e extractEmbeddedData.
@@ -960,7 +976,7 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     return hit.payload;
   }
   if (hit) cacheDelete(url); // expirada: libera os bytes na hora
-  const payload = await fetchTextWithFallback(url, { timeoutMs });
+  const payload = await fetchTextWithFallback(url, { timeoutMs, signal, retries });
   const bytes = payloadBytes(payload);
   // Grande demais para o cache: devolve normal, so nao guarda.
   if (bytes <= CACHE_MAX_ENTRY_BYTES) {
@@ -1185,10 +1201,30 @@ function jsonToMarkdown(data, depth = 0, seen = new Set()) {
   return "";
 }
 
-// Tenta achar APIs internas comuns em sites dinâmicos.
-// Proteção SSRF: só segue URLs do mesmo domínio da página base.
+// Pontua o candidato para escolher os mais provaveis de serem dados de verdade.
+// Endpoint de dados costuma ter "json"/"graphql"/"api" no caminho; asset
+// estatico (imagem, css, fonte) nunca e.
+function scoreApiCandidate(url) {
+  const u = new URL(url);
+  const caminho = u.pathname.toLowerCase();
+  if (/\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|woff2?|ttf|eot|mp4|webm|pdf|zip)$/.test(caminho)) return -5;
+  let score = 0;
+  if (caminho.includes("graphql")) score += 4;
+  if (caminho.includes("json")) score += 3;
+  if (caminho.startsWith("/api/")) score += 3;
+  if (caminho.startsWith("/wp-json/")) score += 3;
+  if (caminho.startsWith("/data/")) score += 2;
+  if (u.search) score += 1; // endpoint de dados costuma ter query
+  return score;
+}
+
+// Tenta achar APIs internas comuns em sites dinamicos.
+// - so o MESMO host da pagina (alem da guarda SSRF, que roda dentro do fetch)
+// - dedupe pela URL ja resolvida
+// - no maximo API_MAX_CANDIDATES, com API_TOTAL_BUDGET_MS de orcamento TOTAL
+// Se o orcamento estourar, devolve o que ja conseguiu e segue sem erro.
 async function tryInternalApi(html, baseUrl, timeoutMs) {
-  const origin = new URL(baseUrl).origin;
+  if (API_MAX_CANDIDATES === 0) return [];
   const baseHost = hostOf(baseUrl);
   const apiPatterns = [
     /["'](\/api\/[^"']+)["']/g,
@@ -1196,27 +1232,56 @@ async function tryInternalApi(html, baseUrl, timeoutMs) {
     /["'](\/data\/[^"']+)["']/g,
     /["'](\/wp-json\/[^"']+)["']/g,
   ];
-  const candidates = new Set();
+
+  const vistos = new Set();
+  const candidatos = [];
   for (const re of apiPatterns) {
     let m;
     while ((m = re.exec(html)) !== null) {
-      const path = m[1];
-      if (path.length < 100) candidates.add(path);
+      const bruto = m[1];
+      if (bruto.length >= 100) continue;
+      let url;
+      try {
+        url = new URL(bruto, baseUrl).href; // resolve relativo e absoluto
+      } catch {
+        continue;
+      }
+      if (vistos.has(url)) continue; // dedupe
+      vistos.add(url);
+      if (hostOf(url) !== baseHost) continue; // nao sai do dominio da pagina
+      candidatos.push({ url, score: scoreApiCandidate(url) });
     }
   }
+  if (candidatos.length === 0) return [];
+
+  // Mais provaveis primeiro; empate mantem a ordem de aparicao no HTML.
+  candidatos.sort((a, b) => b.score - a.score);
+  const alvos = candidatos.slice(0, API_MAX_CANDIDATES);
+
+  const controller = new AbortController();
+  const orcamento = setTimeout(() => controller.abort(), API_TOTAL_BUDGET_MS);
+  const prazo = Date.now() + API_TOTAL_BUDGET_MS;
   const results = [];
-  for (const path of candidates) {
-    try {
-      const url = path.startsWith("http") ? path : `${origin}${path}`;
-      // SSRF protection: só acessa URLs do mesmo domínio
-      if (hostOf(url) !== baseHost) continue;
-      const { text, contentType } = await fetchTextCached(url, { timeoutMs });
-      if (contentType && /json/.test(contentType)) {
-        results.push({ url, data: text.slice(0, 5000) });
+  try {
+    for (const alvo of alvos) {
+      if (controller.signal.aborted || Date.now() >= prazo) break; // orcamento esgotado
+      try {
+        const restante = Math.max(1000, Math.min(timeoutMs, prazo - Date.now()));
+        // retries: 0 porque o orcamento manda mais que a insistencia aqui.
+        const { text, contentType } = await fetchTextCached(alvo.url, {
+          timeoutMs: restante,
+          signal: controller.signal,
+          retries: 0,
+        });
+        if (contentType && /json/.test(contentType)) {
+          results.push({ url: alvo.url, data: text.slice(0, 5000) });
+        }
+      } catch {
+        // candidato que falha ou e cortado pelo orcamento: segue com o que tem
       }
-    } catch {
-      // ignora APIs que falham
     }
+  } finally {
+    clearTimeout(orcamento);
   }
   return results;
 }
