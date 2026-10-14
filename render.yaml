@@ -18,3 +18,5 @@ services:
       # Sem ele, qualquer pessoa na internet pode usar seu MCP.
       - key: MCP_AUTH_TOKEN
         generateValue: true
+      # ATENCAO: NAO defina ALLOW_PRIVATE_HOSTS aqui. Ela desliga o bloqueio de
+      # hosts privados/internos (SSRF) e serve apenas para dev/testes locais.

@@ -215,6 +215,36 @@ Com isso, o MCP só aceita chamadas com o header `Authorization: Bearer <token>`
 (sem token → HTTP 401). **Nunca chame o MCP direto do browser** (aí o token vazaria) —  
 sempre pelo seu backend, server-side.
 
+### Proteção contra SSRF (leitura da web pública)
+
+Este MCP existe para ler a **web pública**, então **não existe allowlist de domínios** —
+qualquer site público é acessível. O que é bloqueado é apenas **endereço privado ou
+interno**, que não faz parte da web:
+
+- IPv4: `0.0.0.0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`, `169.254/16` (inclui o
+  metadata `169.254.169.254`), `172.16/12`, `192.168/16`, `224/4` (multicast) e acima.
+- IPv6: `::1`, `::`, `fe80::/10`, `fc00::/7`, `ff00::/8` e IPv4 mapeado/NAT64/6to4
+  (nesses casos o IPv4 embutido é validado, e não o IPv6 inteiro).
+
+Redirects continuam funcionando normalmente (`http→https`, `www`, encurtadores), até
+**5 saltos**, com o destino de **cada salto** revalidado. A checagem roda no fetch de
+baixo nível, então vale para todas as ferramentas: `read_page`, `extract_links`,
+`read_multiple_pages`, `discover_urls`, `crawl_site`, `read_dynamic_page` e para a
+extração automática de dados embutidos (que busca "APIs internas" citadas na página).
+A validação acontece **antes** de consultar o cache, então uma URL bloqueada nunca é
+servida do cache.
+
+Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
+`Host bloqueado: endereco privado/interno (127.0.0.1)`.
+
+**Limitação conhecida:** sobra uma janela de DNS rebinding entre a resolução do nome e a
+conexão, porque o `fetch` do Node não permite fixar o IP de destino. Está documentada no
+código (`assertPublicHost` em `server.js`).
+
+| Variável | Padrão | O que faz |
+| --- | --- | --- |
+| `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos. Só para desenvolvimento e testes locais (o `smoke-test` e os scripts apontam para `127.0.0.1`). **No Render ela fica desligada** — não defina essa variável em produção. |
+
 ### Custos e cuidados no Render
 
 - **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).  

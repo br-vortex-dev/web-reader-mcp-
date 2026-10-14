@@ -15,6 +15,10 @@
  *   read_dynamic_page(url)    -> le paginas que dependem de JavaScript (sem Playwright)
  */
 
+// Apenas built-ins do Node (o projeto continua com zero dependencias).
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
 const SERVER_NAME = "web-reader";
 const SERVER_VERSION = "1.1.0";
 const USER_AGENT =
@@ -434,6 +438,186 @@ function validateHttpUrl(url) {
   return parsed;
 }
 
+/* ===================================================================== *
+ * Guarda SSRF                                                           *
+ *                                                                       *
+ * Este produto existe para ler a web PUBLICA, entao nao existe allowlist *
+ * de dominios: o que bloqueamos e apenas endereco privado/interno, que   *
+ * nao faz parte da web. Redirects (http->https, www, encurtadores) sao   *
+ * parte da web normal e continuam sendo seguidos, ate 5 saltos, com o    *
+ * destino de CADA salto revalidado.                                     *
+ * ===================================================================== */
+
+// Desliga o bloqueio. So para desenvolvimento e testes locais (o smoke-test
+// e os scripts apontam para 127.0.0.1). Em producao (Render) fica DESLIGADA.
+const ALLOW_PRIVATE_HOSTS = process.env.ALLOW_PRIVATE_HOSTS === "1";
+
+if (ALLOW_PRIVATE_HOSTS) {
+  console.error(
+    `[${SERVER_NAME}] AVISO: ALLOW_PRIVATE_HOSTS=1 — o bloqueio de hosts privados/internos esta DESLIGADO (uso apenas local).`
+  );
+}
+
+// IPv4 privado/reservado: 0/8, 10/8, 100.64/10 (CGNAT), 127/8, 169.254/16
+// (link-local, inclui o 169.254.169.254 de metadata), 172.16/12, 192.168/16,
+// 224/4 (multicast) e 240/4 (reservado).
+function isBlockedIpv4(ip) {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function hextetsToIpv4(hi, lo) {
+  const h = parseInt(hi, 16);
+  const l = parseInt(lo, 16);
+  if (!Number.isInteger(h) || !Number.isInteger(l)) return null;
+  return `${h >> 8}.${h & 0xff}.${l >> 8}.${l & 0xff}`;
+}
+
+// Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), NAT64 (64:ff9b::) e
+// 6to4 (2002::/16). O requisito e validar o IPv4 de dentro, e nao bloquear
+// o IPv6 cegamente.
+function embeddedIpv4(ip) {
+  const lower = ip.toLowerCase();
+  const dotted = lower.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted) return dotted[1];
+  let m = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (m) return hextetsToIpv4(m[1], m[2]);
+  m = lower.match(/^64:ff9b::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (m) return hextetsToIpv4(m[1], m[2]);
+  m = lower.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
+  if (m) return hextetsToIpv4(m[1], m[2]);
+  return null;
+}
+
+// IPv6 interno: :: e ::1, fe80::/10 (link-local), fc00::/7 (ULA) e ff00::/8
+// (multicast). O IPv4 embutido tem prioridade: valida ele, nao o IPv6 inteiro.
+function isBlockedIpv6(ip) {
+  const lower = ip.toLowerCase().split("%")[0]; // remove zone id (fe80::1%eth0)
+  if (lower === "::" || lower === "::1") return true;
+  const embedded = embeddedIpv4(lower);
+  if (embedded) return isBlockedIpv4(embedded);
+  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10
+  const first = lower.split(":")[0];
+  if (first.length >= 2) {
+    const b0 = parseInt(first.padStart(4, "0").slice(0, 2), 16);
+    if ((b0 & 0xfe) === 0xfc) return true; // fc00::/7
+    if (b0 === 0xff) return true; // ff00::/8
+  }
+  return false;
+}
+
+// Devolve o proprio endereco quando ele deve ser bloqueado, ou null.
+function blockedAddress(address) {
+  const family = isIP(address);
+  if (family === 4) return isBlockedIpv4(address) ? address : null;
+  if (family === 6) return isBlockedIpv6(address) ? address : null;
+  return address; // formato desconhecido: nao arrisca
+}
+
+// Cache curto das validacoes de host, so para nao repetir o lookup de DNS a
+// cada requisicao (o cache de paginas valida antes de responder).
+const HOST_CHECK_TTL_MS = 60 * 1000;
+const HOST_CHECK_MAX_ENTRIES = 500;
+const hostCheckCache = new Map();
+
+// Resolve o host e recusa endereco privado/interno. Chamada ANTES de cada
+// requisicao de saida, inclusive a cada salto de redirect.
+//
+// LIMITACAO CONHECIDA (DNS rebinding): entre o lookup daqui e a conexao feita
+// pelo fetch sobra uma janela em que o DNS poderia apontar para outro IP.
+// Fechar essa janela exigiria fixar o IP de destino na conexao, o que o fetch
+// do Node nao permite — e resolver na mao significaria abandonar o fetch ou
+// adicionar dependencia. Fica documentado, nao resolvido.
+async function assertPublicHost(url) {
+  if (ALLOW_PRIVATE_HOSTS) return;
+
+  let hostname;
+  try {
+    hostname = new URL(String(url)).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    throw new Error(`URL invalida: ${url}`);
+  }
+
+  const cached = hostCheckCache.get(hostname);
+  if (cached && Date.now() - cached.at < HOST_CHECK_TTL_MS) {
+    if (cached.blocked) throw new Error(`Host bloqueado: endereco privado/interno (${cached.blocked})`);
+    return;
+  }
+
+  let addresses;
+  if (isIP(hostname)) {
+    addresses = [hostname];
+  } else {
+    try {
+      addresses = (await lookup(hostname, { all: true })).map((entry) => entry.address);
+    } catch {
+      throw new Error(`Nao foi possivel resolver o host: ${hostname}`);
+    }
+  }
+  if (addresses.length === 0) throw new Error(`Nao foi possivel resolver o host: ${hostname}`);
+
+  for (const address of addresses) {
+    const blocked = blockedAddress(address);
+    if (blocked) {
+      hostCheckCache.set(hostname, { at: Date.now(), blocked });
+      if (hostCheckCache.size > HOST_CHECK_MAX_ENTRIES) {
+        hostCheckCache.delete(hostCheckCache.keys().next().value);
+      }
+      // Mensagem curta e sem detalhes da rede interna, so o suficiente para a IA entender.
+      throw new Error(`Host bloqueado: endereco privado/interno (${blocked})`);
+    }
+  }
+  hostCheckCache.set(hostname, { at: Date.now(), blocked: null });
+  if (hostCheckCache.size > HOST_CHECK_MAX_ENTRIES) {
+    hostCheckCache.delete(hostCheckCache.keys().next().value);
+  }
+}
+
+const MAX_REDIRECTS = 5;
+
+// GET seguindo redirects a mao (redirect: "manual"), validando o destino de
+// cada salto. Sem isso, uma URL publica que devolva 302 para 127.0.0.1 faria
+// o servidor buscar a rede interna.
+async function fetchNoRedirect(url, headers, signal) {
+  let currentUrl = url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertPublicHost(currentUrl);
+    const res = await fetch(currentUrl, { method: "GET", headers, redirect: "manual", signal });
+    const isRedirect = res.status >= 300 && res.status < 400;
+    const location = isRedirect ? res.headers.get("location") : null;
+    if (!isRedirect || !location) return { res, finalUrl: currentUrl };
+
+    // Descarta o corpo do salto para liberar o socket.
+    try {
+      await res.arrayBuffer();
+    } catch {
+      // corpo do redirect irrelevante
+    }
+    if (hop === MAX_REDIRECTS) {
+      throw new Error(`Redirects em excesso (mais de ${MAX_REDIRECTS} saltos) ao acessar ${url}`);
+    }
+    let next;
+    try {
+      next = new URL(location, currentUrl); // resolve Location relativo
+    } catch {
+      throw new Error(`Redirect com Location invalido em ${currentUrl}`);
+    }
+    if (next.protocol !== "http:" && next.protocol !== "https:") {
+      throw new Error(`Redirect para protocolo nao suportado (${next.protocol}) em ${currentUrl}`);
+    }
+    currentUrl = next.href;
+  }
+  throw new Error(`Redirects em excesso (mais de ${MAX_REDIRECTS} saltos) ao acessar ${url}`);
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = {}) {
@@ -443,24 +627,21 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const userAgent = attempt === 0 ? USER_AGENT : ALT_USER_AGENTS[(attempt - 1) % ALT_USER_AGENTS.length];
     try {
-      const res = await fetch(url, {
-        method: "GET",
-        headers: {
-          "User-Agent": userAgent,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-          "Accept-Encoding": "gzip, deflate, br",
-          "Cache-Control": "no-cache",
-          Pragma: "no-cache",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
-        },
-        redirect: "follow",
-        signal: controller.signal,
-      });
+      const headers = {
+        "User-Agent": userAgent,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+      };
+      // fetchNoRedirect valida o host de cada salto antes de conectar.
+      const { res, finalUrl } = await fetchNoRedirect(url, headers, controller.signal);
       if (!res.ok) {
         const err = new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim() + ` ao acessar ${url}`);
         err.status = res.status;
@@ -474,7 +655,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2 } = 
       const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
       return {
         text,
-        finalUrl: res.url || url,
+        finalUrl,
         contentType: (res.headers.get("content-type") || "").toLowerCase(),
       };
     } catch (err) {
@@ -539,6 +720,10 @@ const CACHE_MAX_ENTRIES = 100;
 const pageCache = new Map();
 
 async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  // Valida ANTES de olhar o cache: uma URL bloqueada nunca pode ser servida
+  // (nem popular) o cache. Vale para todos os caminhos: read_page, crawl,
+  // sitemap, extract_links e extractEmbeddedData.
+  await assertPublicHost(url);
   const hit = pageCache.get(url);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     pageCache.delete(url);
