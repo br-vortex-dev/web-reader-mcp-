@@ -10,6 +10,7 @@
 //   BUG-4 erro de rede expoe a causa                     -> "BUG-4: ..."
 //   BUG-6 403 definitivo nao eh retentado                -> "BUG-6: ..."
 //   BUG-7 aria-hidden nao vaza pro texto                 -> "BUG-7: ..."
+//   BUG-7 (regressao) <img aria-hidden> void nao engole  -> "BUG-7: <img aria-hidden..."
 //   BUG-8 linha de codigo em <pre> nao explode           -> "BUG-8: ..."
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -149,6 +150,21 @@ test("BUG-7: aria-hidden nao vaza pro texto (estilo GitHub)", async () => {
   // o codigo de verdade continua
   assert.match(r.text, /const a = 1;/);
   assert.match(r.text, /const b = 2;/);
+});
+
+// Regressao da propria correcao, pega na Wikipedia (pt.wikipedia.org/wiki/
+// Node.js): <img aria-hidden="true"> do logo eh tag VOID — nao tem fecho.
+// Contar skipDepth sem contar o fecho travou o contador acima de zero e o
+// artigo INTEIRO desapareceu (sobrou so o JSON-LD, 914 caracteres).
+test("BUG-7: <img aria-hidden> (tag void) nao engole o resto da pagina", async () => {
+  const r = await mcp.call("read_page", { url: `${fixture.url}/aria-void`, maxChars: 5000 });
+  assert.equal(r.isError, false, r.text);
+  // o que vem DEPOIS do logo decorativo tem de sobreviver
+  assert.match(r.text, /Manual do produto/);
+  assert.match(r.text, /Primeiro paragrafo depois do logo/);
+  assert.match(r.text, /Segundo paragrafo/);
+  // com o bug o markdown ficava VAZIO (0 caracteres) — so o logo existia
+  assert.match(r.text, /Conteudo: [1-9]\d* caracteres/);
 });
 
 // ------------------------------- BUG-8 --------------------------------- //

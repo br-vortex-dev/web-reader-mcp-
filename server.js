@@ -373,16 +373,6 @@ const SKIP_TAGS = new Set([
   "head", "select", "button",
 ]);
 
-// Tags de bloco que, DENTRO de <pre>, nao podem emitir quebra de linha: a
-// formatacao do codigo vem das quebras do proprio fonte. Pagina que
-// embrulha cada linha de codigo no proprio elemento (estilo react.dev)
-// explodia o bloco em linhas em branco.
-const PRE_SILENCE_TAGS = new Set([
-  "h1", "h2", "h3", "h4", "h5", "h6",
-  "p", "div", "section", "article", "main", "figure", "figcaption",
-  "details", "summary", "ul", "ol", "dl", "blockquote", "li",
-]);
-
 const NAMED_ENTITIES = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
   iexcl: "\u00a1", cent: "\u00a2", pound: "\u00a3", curren: "\u00a4",
@@ -579,6 +569,8 @@ function htmlToMarkdown(html, baseUrl) {
   let preDepth = 0;
   const openStack = [];
   const aStack = [];
+  // BUG-7: tags abertas com aria-hidden="true" — o close precisa saber.
+  const ariaHiddenStack = [];
 
   // --- tabela: conteudo acumulado em buffer e emitido no fim, para sair GFM valido ---
   let tableDepth = 0;
@@ -628,8 +620,17 @@ function htmlToMarkdown(html, baseUrl) {
     }
 
     if (token.type === "open") {
-      if (isSkipped) {
+      // BUG-7: aria-hidden="true" e decoracao de tela (numeros de linha do
+      // GitHub, estatistica duplicada). Nao e conteudo para quem le.
+      const escondido = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
+      if (isSkipped || escondido) {
+        // Tag void/self-closing nao tem subarvore: so comeca, nunca termina.
+        // Contar skipDepth aqui travaria o contador acima de zero e engolia
+        // o RESTO da pagina — foi o que aconteceu com o <img aria-hidden>
+        // do logo da Wikipedia: o artigo inteiro sumia.
+        if (token.selfClosing) continue;
         skipDepth++;
+        if (escondido) ariaHiddenStack.push(token.tag);
         continue;
       }
       if (skipDepth > 0) continue;
@@ -711,6 +712,15 @@ function htmlToMarkdown(html, baseUrl) {
     }
 
     // token.type === "close"
+    // BUG-7: fechou a subarvore aria-hidden. Tem de vir ANTES do cheque de
+    // isSkipped: um <nav aria-hidden="true"> fecharia por isSkipped e deixaria
+    // entrada orfa na pilha, encurtando o resto da pagina.
+    const idxHidden = ariaHiddenStack.lastIndexOf(token.tag);
+    if (idxHidden !== -1) {
+      ariaHiddenStack.length = idxHidden;
+      if (skipDepth > 0) skipDepth--;
+      continue;
+    }
     if (isSkipped) {
       if (skipDepth > 0) skipDepth--;
       continue;

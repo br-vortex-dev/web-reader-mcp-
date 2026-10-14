@@ -340,6 +340,22 @@ export async function startFixture() {
       return;
     }
 
+    // BUG-7 (regressao da propria correcao): <img aria-hidden="true"> decorativo
+    // (tag VOID) fez skipDepth travar acima de zero e engoliu o resto da
+    // pagina — aconteceu de verdade com o logo da Wikipedia.
+    if (path === "/aria-void") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Logo e artigo</title></head><body>" +
+          '<img src="/logo.png" alt="" aria-hidden="true">' +
+          "<h1>Manual do produto</h1>" +
+          "<p>Primeiro paragrafo depois do logo decorativo, com texto bastante.</p>" +
+          "<p>Segundo paragrafo, ainda mais texto para passar da marca de 300.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
     // BUG-2: CDATA dentro de HTML — o ]]> vazava como texto visivel.
     if (path === "/cdata") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
