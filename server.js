@@ -1412,7 +1412,14 @@ async function toolReadPage(args) {
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
-  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length });
+  // BUG-5: pagina sem NENHUM texto estatico (SPA pura) saia como
+  // "Conteudo: 0 caracteres" com cara de sucesso, sem pista nenhuma.
+  // Agora o rotulo diz o que tentar.
+  const extraLabel =
+    markdown.trim().length === 0
+      ? "Aviso: 0 caracteres de conteudo estatico — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page."
+      : undefined;
+  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length, extraLabel });
 }
 
 // Extrai dados embutidos de páginas dinâmicas e converte em markdown.
