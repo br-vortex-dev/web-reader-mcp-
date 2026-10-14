@@ -8,7 +8,8 @@
 // Uso: node --test tests/...
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startFixture, startMcp } from "./helpers.mjs";
+import { spawn } from "node:child_process";
+import { startFixture, startMcp, freePort, SERVER_PATH, TOKEN } from "./helpers.mjs";
 
 let fixture;
 let mcpBloqueando; // padrao de producao
@@ -136,4 +137,78 @@ test("read_multiple_pages rotula cada falha individual sem derrubar a chamada", 
   const marcadores = r.text.match(/# Erro ao ler /g) || [];
   assert.equal(marcadores.length, 3, `cada falha deveria estar rotulada: ${r.text}`);
   assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+});
+
+/* ------------- dedupe + teto de saida somada (read_multiple) ----------- */
+// A mesma URL repetida 3x virava 3 fetches e 3 copias do texto; e nao havia
+// teto para a soma das secoes (30 URLs x 50k = 1,5M caracteres).
+
+test("read_multiple_pages deduplica URLs repetidas", { timeout: 90000 }, async () => {
+  const r = await mcpLocal.call("read_multiple_pages", {
+    urls: [
+      `${fixture.url}/page/dedupe`,
+      `${fixture.url}/`,
+      `${fixture.url}/page/dedupe`,
+      `${fixture.url}/page/dedupe`,
+    ],
+    maxChars: 4000,
+  });
+  assert.equal(r.isError, false, r.text);
+
+  // 1 fetch so para a URL repetida: o fixture conta REQ-<id>-<n> no texto
+  assert.equal((r.text.match(/REQ-dedupe-1/g) || []).length, 1, `conteudo repetido: ${r.text.slice(0, 400)}`);
+  assert.doesNotMatch(r.text, /REQ-dedupe-2/);
+  // as repeticoes viram marcador curto, nao o texto inteiro
+  assert.equal((r.text.match(/URL repetida/g) || []).length, 2);
+  // cabecalho conta 2 unicas de 4 pedidas
+  assert.match(r.text, /Leitura concluida: 2\/2 paginas OK/);
+  assert.match(r.text, /2 URL\(s\) repetida\(s\)/);
+});
+
+test("read_multiple_pages respeita o teto de saida total", { timeout: 90000 }, async () => {
+  // MULTI_MAX_TOTAL_CHARS configuravel: com o valor baixo, o corte tem de
+  // aparecer com a marcagem de truncamento e as secoes seguintes, omitidas.
+  const port2 = await freePort();
+  const filho2 = spawn(process.execPath, [SERVER_PATH, "--http"], {
+    env: {
+      ...process.env,
+      PORT: String(port2),
+      MCP_AUTH_TOKEN: TOKEN,
+      ALLOW_PRIVATE_HOSTS: "1",
+      TRUST_PROXY_HOPS: "0",
+      MULTI_MAX_TOTAL_CHARS: "3000",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  filho2.stderr.on("data", () => {});
+  for (let i = 0; i < 80; i++) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${port2}/health`)).ok) break;
+    } catch {
+      // subindo
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const call2 = async (name, args) => {
+    const res = await fetch(`http://127.0.0.1:${port2}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const json = await res.json();
+    return { isError: Boolean(json?.result?.isError), text: json?.result?.content?.[0]?.text || "" };
+  };
+  try {
+    // 3 paginas de ~4 KB cada: o teto de 3000 corta a 1a e omite as outras
+    const r = await call2("read_multiple_pages", {
+      urls: [`${fixture.url}/page/g1?kb=4`, `${fixture.url}/page/g2?kb=4`, `${fixture.url}/page/g3?kb=4`],
+      maxChars: 50000,
+    });
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.text, /conteudo truncado/, `corte nao apareceu: ${r.text.slice(0, 300)}`);
+    assert.match(r.text, /omitid/i, `aviso de omissao nao apareceu: ${r.text.slice(0, 300)}`);
+    assert.doesNotMatch(r.text, /REQ-g3-1/, "a terceira pagina deveria estar omitida");
+  } finally {
+    filho2.kill();
+  }
 });

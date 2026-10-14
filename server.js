@@ -1847,6 +1847,17 @@ async function readOnePage(url, maxChars, timeoutMs) {
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length });
 }
 
+// Teto de saida SOMADA de read_multiple_pages. Sem isso, 30 URLs x 50k
+// chars = 1,5M caracteres de uma vez — ninguem (IA ou humano) le isso, e o
+// content-type JSON de resposta da ferramenta estoura o corpo da resposta.
+// O padrao e 10x o teto individual duro (500k chars), configuravel. O piso
+// de 2000 garante pelo menos uma pagina minima — e nao engole um valor
+// pequeno de proposito (teste de regressao usa 3000).
+const MULTI_MAX_TOTAL_CHARS = Math.max(
+  2000,
+  Math.floor(Number(process.env.MULTI_MAX_TOTAL_CHARS) || 10 * HARD_MAX_CHARS)
+);
+
 async function toolReadMultiplePages(args) {
   const urls = Array.isArray(args.urls) ? args.urls.map((u) => String(u)) : [];
   if (urls.length === 0) throw new Error("Informe uma lista de URLs no parametro 'urls'.");
@@ -1859,12 +1870,25 @@ async function toolReadMultiplePages(args) {
   const maxChars = clampMaxChars(args.maxChars ?? 4000);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
 
+  // Dedupe preservando a ordem: a mesma URL repetida 3x vira UM fetch
+  // (e uma secao no resultado). Antes cada repeticao baixava de novo e
+  // repetia o texto inteiro, gastando o teto de saida a toa.
+  const unicas = [];
+  const indice = new Map();
+  for (const u of urls) {
+    if (!indice.has(u)) {
+      indice.set(u, unicas.length);
+      unicas.push(u);
+    }
+  }
+  const duplicadas = urls.length - unicas.length;
+
   // Leitura em lotes paralelos (rapido, sem floodar os sites). A ordem de
   // saida segue a ordem das URLs de entrada, para a IA mapear facilmente.
   const CONCURRENCY = FETCH_CONCURRENCY;
-  const results = new Array(urls.length);
-  for (let start = 0; start < urls.length; start += CONCURRENCY) {
-    const lote = urls.slice(start, start + CONCURRENCY);
+  const lidos = new Array(unicas.length);
+  for (let start = 0; start < unicas.length; start += CONCURRENCY) {
+    const lote = unicas.slice(start, start + CONCURRENCY);
     const settled = await Promise.all(
       lote.map(async (url) => {
         try {
@@ -1875,14 +1899,45 @@ async function toolReadMultiplePages(args) {
       })
     );
     settled.forEach((resultado, i) => {
-      results[start + i] = resultado;
+      lidos[start + i] = resultado;
     });
   }
 
-  const ok = results.filter((r) => r.ok).length;
+  // Teto de saida SOMADA: caminha na ordem de entrada e corta a secao que
+  // estourar; as seguintes sao omitidas com aviso. O corte reusa truncate,
+  // entao a marcagem de "[...]" e a mesma do resto do servidor.
+  const secoes = [];
+  let total = 0;
+  let omitidas = 0;
+  urls.forEach((u, pos) => {
+    const primeiraVez = pos === urls.indexOf(u);
+    if (!primeiraVez) {
+      secoes.push(`(URL repetida — mesma leitura da secao ${urls.indexOf(u) + 1} acima)`);
+      return;
+    }
+    const r = lidos[indice.get(u)];
+    if (total >= MULTI_MAX_TOTAL_CHARS) {
+      omitidas++;
+      secoes.push(`(omitida: teto de saida de ${MULTI_MAX_TOTAL_CHARS} caracteres ja foi alcancado)`);
+      return;
+    }
+    const restante = MULTI_MAX_TOTAL_CHARS - total;
+    const texto = r.text.length > restante ? truncate(r.text, restante).text : r.text;
+    total += texto.length;
+    secoes.push(texto);
+  });
+
+  const ok = urls.filter((u, pos) => pos === urls.indexOf(u) && lidos[indice.get(u)].ok).length;
+  const resumo = [
+    `Leitura concluida: ${ok}/${unicas.length} paginas OK (lidas em lotes de ${CONCURRENCY}).`,
+    duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez so.` : "",
+    omitidas > 0 ? ` ${omitidas} secao(oes) omitida(s) por teto de saida total.` : "",
+    "",
+  ].join("");
   return (
-    `Leitura concluida: ${ok}/${urls.length} paginas OK (lidas em lotes de ${CONCURRENCY}).\n\n` +
-    results.map((r) => r.text).join("\n\n========================================\n\n")
+    resumo +
+    "\n" +
+    secoes.join("\n\n========================================\n\n")
   );
 }
 
