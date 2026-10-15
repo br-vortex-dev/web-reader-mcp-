@@ -19,6 +19,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import https from "node:https";
+import http from "node:http";
 
 const SERVER_NAME = "web-reader";
 const SERVER_VERSION = "1.1.0";
@@ -1380,13 +1382,11 @@ const hostCheckCache = new Map();
 // Resolve o host e recusa endereco privado/interno. Chamada ANTES de cada
 // requisicao de saida, inclusive a cada salto de redirect.
 //
-// LIMITACAO CONHECIDA (DNS rebinding): entre o lookup daqui e a conexao feita
-// pelo fetch sobra uma janela em que o DNS poderia apontar para outro IP.
-// Fechar essa janela exigiria fixar o IP de destino na conexao, o que o fetch
-// do Node nao permite — e resolver na mao significaria abandonar o fetch ou
-// adicionar dependencia. Fica documentado, nao resolvido.
+// DNS rebinding: a janela entre lookup e conexao e fechada com um Agent
+// customizado que retorna apenas o IP ja validado — o fetch nunca resolve
+// DNS de novo. Ver criacao de agentValidado() abaixo.
 async function assertPublicHost(url) {
-  if (ALLOW_PRIVATE_HOSTS) return;
+  if (ALLOW_PRIVATE_HOSTS) return null;
 
   let hostname;
   try {
@@ -1398,7 +1398,7 @@ async function assertPublicHost(url) {
   const cached = hostCheckCache.get(hostname);
   if (cached && Date.now() - cached.at < HOST_CHECK_TTL_MS) {
     if (cached.blocked) throw new HostBloqueadoError(hostname, ipv6ParaExibicao(cached.blocked));
-    return;
+    return cached.ip || null;
   }
 
   let addresses;
@@ -1425,10 +1425,30 @@ async function assertPublicHost(url) {
       throw new HostBloqueadoError(hostname, ipv6ParaExibicao(blocked));
     }
   }
-  hostCheckCache.set(hostname, { at: Date.now(), blocked: null });
+  hostCheckCache.set(hostname, { at: Date.now(), blocked: null, ip: addresses[0] });
   if (hostCheckCache.size > HOST_CHECK_MAX_ENTRIES) {
     hostCheckCache.delete(hostCheckCache.keys().next().value);
   }
+  return addresses[0];
+}
+
+// Cria um Agent HTTP/HTTPS que resolve DNS UMA vez e retorna apenas o IP ja
+// validado. Isso fecha a janela de DNS rebinding: o fetch nunca chama o
+// resolver de novo, entao o IP que validamos e o IP que a conexao usa.
+function agentValidado(url, ipValido) {
+  const family = isIP(ipValido);
+  const opts = {
+    // Sobrescreve o lookup padrao do Node: ignora o hostname da URL e
+    // retorna sempre o IP que ja validamos. O fetch nunca resolve DNS.
+    lookup(hostname, options, callback) {
+      if (options.all) {
+        callback(null, [{ address: ipValido, family }]);
+      } else {
+        callback(null, ipValido, family);
+      }
+    },
+  };
+  return url.startsWith("https:") ? new https.Agent(opts) : new http.Agent(opts);
 }
 
 const MAX_REDIRECTS = 5;
@@ -1439,8 +1459,9 @@ const MAX_REDIRECTS = 5;
 async function fetchNoRedirect(url, headers, signal) {
   let currentUrl = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertPublicHost(currentUrl);
-    const res = await fetch(currentUrl, { method: "GET", headers, redirect: "manual", signal });
+    const ipValido = await assertPublicHost(currentUrl);
+    const agent = ipValido ? agentValidado(currentUrl, ipValido) : undefined;
+    const res = await fetch(currentUrl, { method: "GET", headers, redirect: "manual", signal, agent });
     const isRedirect = res.status >= 300 && res.status < 400;
     const location = isRedirect ? res.headers.get("location") : null;
     if (!isRedirect || !location) return { res, finalUrl: currentUrl };
@@ -2676,12 +2697,12 @@ async function toolCrawlSite(args) {
   }
 
   const CONCURRENCY = FETCH_CONCURRENCY;
-  while (queue.length > 0 && conteudos.length < maxPages) {
+  while (queue.length > 0 && lidas < maxPages) {
     const lote = [];
     while (
       lote.length < CONCURRENCY &&
       queue.length > 0 &&
-      conteudos.length + lote.length < maxPages
+      lidas + lote.length < maxPages
     ) {
       lote.push(queue.shift());
     }

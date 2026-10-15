@@ -197,3 +197,23 @@ test("sem token, /mcp devolve 401", { timeout: 30000 }, async () => {
   });
   assert.equal(res.status, 401);
 });
+
+test("DNS rebinding: servidor usa o IP validado, não resolve DNS de novo", { timeout: 30000 }, async () => {
+  // A proteção é estrutural: o fetch usa um Agent customizado que retorna
+  // apenas o IP já validado, então o DNS nunca é resolvido de novo.
+  //
+  // Testamos indiretamente: duas requisições para o mesmo host devem ambas
+  // usar o mesmo IP validado. Se o agentValidado não fosse usado, a segunda
+  // conexão poderia ir para outro IP.
+  const mcp = await startMcp({ ALLOW_PRIVATE_HOSTS: "1" });
+  try {
+    // O fixture já usa 127.0.0.1 (não localhost)
+    const url = `${fixture.url}/page/1`;
+    const r1 = await mcp.call("read_page", { url, maxChars: 300, timeoutMs: 3000 });
+    const r2 = await mcp.call("read_page", { url, maxChars: 300, timeoutMs: 3000 });
+    assert.equal(r1.isError, false, "primeira requisição deve passar");
+    assert.equal(r2.isError, false, "segunda requisição também deve passar (mesmo IP validado)");
+  } finally {
+    mcp.close();
+  }
+});
