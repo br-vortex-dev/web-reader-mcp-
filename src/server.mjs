@@ -15,6 +15,11 @@ import {
   HTTP_KEEPALIVE_TIMEOUT_MS,
   MAX_CONNECTIONS,
   ALLOW_PRIVATE_HOSTS,
+  MAX_INFLIGHT_REQUESTS,
+  MAX_WAITING_REQUESTS,
+  MAX_WAIT_MS,
+  OUTBOUND_MAX_CONCURRENCY,
+  OUTBOUND_MAX_QUEUE,
 } from "./config.mjs";
 import { admissaoHttp, limiteSaida, orcamentoSaida, cacheStats } from "./fetch.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
@@ -339,7 +344,7 @@ export async function startHttp() {
     } catch {
       res.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
       res.end(
-        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request-line inválida." } })
+        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request-line invalida." } })
       );
       return;
     }
@@ -369,15 +374,15 @@ export async function startHttp() {
         `web-reader-mcp v${SERVER_VERSION} OK | cache: ${cache.entries} entradas, `,
         `${cache.bytes} bytes / ${cache.maxBytes} bytes `,
         `(max ${cache.maxEntries} entradas, ttl ${Math.round(cache.ttlMs / 60000)} min) | `,
-        `requisições: ${req_.ativas} ativas, ${req_.naFila} na fila `,
-        `(max ${req_.limite}/${req_.filaMax}, recusadas ${req_.recusadas}) | `,
+        `requisicoes: ${req_.ativos} ativas, ${req_.naFila} na fila `,
+        `(max ${req_.limite}/${req_.filaMax}, recusadas ${req_.recusados}) | `,
         `downloads: ${out.ativos} ativos, ${out.naFila} na fila `,
-        `(max ${out.limite}/${out.filaMax}, recusadas ${out.recusadas}) | `,
-        `memória de download: ${Math.round(orcamentoSaida.stats.usado / 1024 / 1024)} MB de `,
+        `(max ${out.limite}/${out.filaMax}, recusados ${out.recusados}) | `,
+        `memoria de download: ${Math.round(orcamentoSaida.stats.usado / 1024 / 1024)} MB de `,
         `${Math.round(orcamentoSaida.stats.orcamentoBytes / 1024 / 1024)} MB `,
         `(pico ${Math.round(orcamentoSaida.stats.picoUsado / 1024 / 1024)} MB, `,
         `${orcamentoSaida.stats.naFila} na fila, recusados ${orcamentoSaida.stats.recusados}) | `,
-        `conexões: ${conexoes} | `,
+        `conexoes: ${conexoes} | `,
         `rss: ${Math.round(mem.rss / 1024 / 1024)} MB`,
       ].join("");
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -538,7 +543,8 @@ export async function startHttp() {
   const encerrar = (sinal) => {
     if (encerrando) return;
     encerrando = true;
-    console.error(`[${SERVER_NAME]} ${sinal} recebido — encerrando (aguardando até 5s)...`);
+    let limpando = null;
+    console.error(`[${SERVER_NAME}] ${sinal} recebido — encerrando (aguardando até 5s)...`);
     const prazo = setTimeout(() => {
       clearInterval(limpando);
       console.error(`[${SERVER_NAME}] prazo de encerramento esgotado, saindo.`);
@@ -546,7 +552,6 @@ export async function startHttp() {
     }, 5000);
     prazo.unref();
 
-    let limpando = null;
     if (typeof server.closeIdleConnections === "function") {
       server.closeIdleConnections();
       limpando = setInterval(() => server.closeIdleConnections(), 100);

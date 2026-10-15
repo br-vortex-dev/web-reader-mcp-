@@ -345,7 +345,7 @@ export async function toolReadPage(args) {
   const { text, truncated } = truncate(markdown, maxChars);
   const extraLabel =
     markdown.trim().length === 0
-      ? "Aviso: 0 caracteres de conteúdo estático — a página provavelmente é renderizada por JavaScript. Tente read_dynamic_page."
+      ? "Aviso: 0 caracteres de conteudo estatico — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page."
       : undefined;
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length, extraLabel });
 }
@@ -432,9 +432,9 @@ export async function toolReadMultiplePages(args) {
 
   const ok = urls.filter((u, pos) => pos === urls.indexOf(u) && lidos[indice.get(u)].ok).length;
   const resumo = [
-    `Leitura concluída: ${ok}/${unicas.length} páginas OK (lidas em lotes de ${CONCURRENCY}).`,
-    duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez só.` : "",
-    omitidas > 0 ? ` ${omitidas} seção(ões) omitida(s) por teto de saída total.` : "",
+    `Leitura concluida: ${ok}/${unicas.length} paginas OK (lidas em lotes de ${CONCURRENCY}).`,
+    duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez so.` : "",
+    omitidas > 0 ? ` ${omitidas} secao(oes) omitida(s) por teto de saida total.` : "",
     "",
   ].join("");
   return (
@@ -488,7 +488,7 @@ export async function toolReadDynamicPage(args) {
       text,
       truncated,
       fullLength: markdown.length,
-      extraLabel: "Página estática (não precisa de JavaScript)",
+      extraLabel: "Pagina estatica (nao precisa de JavaScript)",
     });
   }
 
@@ -503,7 +503,7 @@ export async function toolReadDynamicPage(args) {
       text,
       truncated,
       fullLength: markdown.length,
-      extraLabel: "Conteúdo estático do HTML usado (dados embutidos não substituíram — markdown completo)",
+      extraLabel: "Conteudo estatico do HTML usado (dados embutidos nao substituiram — markdown completo)",
     });
   }
 
@@ -517,7 +517,7 @@ export async function toolReadDynamicPage(args) {
       text,
       truncated,
       fullLength: dynamicMarkdown.length,
-      extraLabel: "Página dinâmica — dados extraídos do HTML embutido",
+      extraLabel: "Pagina dinamica — dados extraidos do HTML embutido",
     });
   }
 
@@ -711,14 +711,14 @@ export async function toolCrawlSite(args) {
   }
 
   let cabecalho =
-    `Crawl de ${start.href}: ${lidas} página(s) lida(s) (limite ${maxPages}, domínio ${baseHost}).`;
+    `Crawl de ${start.href}: ${lidas} pagina(s) lida(s) (limite ${maxPages}, dominio ${baseHost}).`;
   if (falhas.length > 0) {
     const agrupado = new Map();
     for (const f of falhas) agrupado.set(f.motivo, (agrupado.get(f.motivo) || 0) + 1);
     const motivos = [...agrupado.entries()].map(([motivo, n]) => `${n} ${motivo}`).join(", ");
     cabecalho +=
-      `\nRESULTADO PARCIAL: ${falhas.length} página(s) falharam — ${motivos}.` +
-      `\nAs páginas marcadas com "# Erro ao ler" abaixo não foram lidas.`;
+      `\nRESULTADO PARCIAL: ${falhas.length} pagina(s) falharam — ${motivos}.` +
+      `\nAs paginas marcadas com "# Erro ao ler" abaixo nao foram lidas.`;
   }
   return cabecalho + "\n\n" + conteudos.join("\n\n========================================\n\n");
 }

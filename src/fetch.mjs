@@ -20,6 +20,8 @@ import {
   MAX_WAIT_MS,
   MAX_INFLIGHT_REQUESTS,
   MAX_WAITING_REQUESTS,
+  DEFAULT_MAX_CHARS,
+  HARD_MAX_CHARS,
 } from "./config.mjs";
 import { criarLimitador, criarLimitadorDeBytes, CacheLRU } from "./utils.mjs";
 import { assertPublicHost, agentValidado, checarRobots } from "./security.mjs";
@@ -262,12 +264,32 @@ export function validateHttpUrl(url) {
 
 /**
  * GET seguindo redirects à mão, validando o destino de cada salto.
+ * Otimização: reutiliza o IP/agent entre hops do mesmo host para evitar revalidação e reconexão.
  */
 async function fetchNoRedirect(url, headers, signal) {
   let currentUrl = url;
+  let ultimoHost = null;
+  let ultimoIp = null;
+  let ultimoAgent = undefined;
+
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const ipValido = await assertPublicHost(currentUrl);
-    const agent = ipValido ? agentValidado(currentUrl, ipValido) : undefined;
+    let parsed;
+    try {
+      parsed = new URL(currentUrl);
+    } catch {
+      throw new RedirectError(`URL inválida em ${currentUrl}`, currentUrl);
+    }
+
+    const mesmoHost = ultimoHost === parsed.host;
+    const ipValido = mesmoHost ? ultimoIp : await assertPublicHost(currentUrl);
+
+    if (!mesmoHost) {
+      ultimoHost = parsed.host;
+      ultimoIp = ipValido;
+      ultimoAgent = ipValido ? agentValidado(currentUrl, ipValido) : undefined;
+    }
+    const agent = mesmoHost ? ultimoAgent : ipValido ? agentValidado(currentUrl, ipValido) : undefined;
+
     const res = await fetch(currentUrl, { method: "GET", headers, redirect: "manual", signal, agent });
     const isRedirect = res.status >= 300 && res.status < 400;
     const location = isRedirect ? res.headers.get("location") : null;
@@ -335,7 +357,7 @@ export function truncate(text, maxChars) {
   return {
     text:
       text.slice(0, maxChars) +
-      `\n\n[... conteúdo truncado em ${maxChars} caracteres. Peça o restante com maxChars maior, ou use extract_links para navegar ...]`,
+      `\n\n[... conteudo truncado em ${maxChars} caracteres. Peca o restante com maxChars maior, ou use extract_links para navegar ...]`,
     truncated: true,
   };
 }
@@ -348,11 +370,11 @@ export function formatReadResult({ finalUrl, meta, text, truncated, fullLength, 
   lines.push(`# ${meta.title || "(sem título)"}`);
   lines.push(`URL: ${finalUrl}`);
   if (extraLabel) lines.push(extraLabel);
-  if (meta.description) lines.push(`Descrição: ${meta.description}`);
+  if (meta.description) lines.push(`Descricao: ${meta.description}`);
   if (meta.author) lines.push(`Autor: ${meta.author}`);
   if (meta.published) lines.push(`Publicado: ${meta.published}`);
   lines.push(
-    `Conteúdo: ${fullLength} caracteres` +
+    `Conteudo: ${fullLength} caracteres` +
       (truncated ? ` (exibidos ${text.length})` : "")
   );
   lines.push("");
@@ -401,13 +423,34 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
 
 /**
  * Fetch com cache LRU + TTL. Valida segurança (SSRF + robots) ANTES de baixar.
+ * Stale-while-revalidate: entrada expirada dentro da janela de graça é servida
+ * imediatamente e atualizada em background (não bloqueia a resposta).
  */
 export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   const hit = pageCache.get(url);
-  if (hit) return hit;
+  if (hit) {
+    if (hit.stale) {
+      // Servir imediatamente e atualizar em background
+      const urlSegura = url;
+      const opts = { timeoutMs, signal, retries };
+      setImmediate(async () => {
+        try {
+          await assertPublicHost(urlSegura);
+          await checarRobots(urlSegura);
+          const fresh = await limiteSaida.executar(() =>
+            fetchTextWithFallback(urlSegura, opts)
+          );
+          const b = payloadBytes(fresh);
+          if (b <= CACHE_MAX_ENTRY_BYTES) pageCache.set(urlSegura, fresh, b);
+        } catch {
+          // falha na atualização em background — a entrada stale continua disponível
+        }
+      });
+    }
+    return hit.payload;
+  }
 
-  await assertPublicHost(url);
-  await checarRobots(url);
+  await Promise.all([assertPublicHost(url), checarRobots(url)]);
 
   const payload = await limiteSaida.executar(() =>
     fetchTextWithFallback(url, { timeoutMs, signal, retries })

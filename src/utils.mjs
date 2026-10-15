@@ -201,28 +201,52 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
 
 /**
  * Cache LRU + TTL com teto em bytes.
+ * Stale-while-revalidate: quando staleWhileRevalidate=true, entradas expiradas
+ * dentro de uma janela de graça (staleWindowMs) são servidas imediatamente e
+ * atualizadas em background. Sem isso, expirada = busca de novo (comportamento
+ * original dos testes).
  */
 export class CacheLRU {
-  constructor({ ttlMs, maxEntries, maxBytes, maxEntryBytes }) {
+  constructor({ ttlMs, maxEntries, maxBytes, maxEntryBytes, staleWindowMs = ttlMs * 2, staleWhileRevalidate = false }) {
     this.ttlMs = ttlMs;
     this.maxEntries = maxEntries;
     this.maxBytes = maxBytes;
     this.maxEntryBytes = maxEntryBytes;
+    this.staleWindowMs = staleWindowMs;
+    this.staleWhileRevalidate = staleWhileRevalidate;
     this.map = new Map();
     this.bytes = 0;
+    this.staleHits = 0;
   }
 
+  /**
+   * Retorna { payload, stale } — stale=true significa que a entrada está
+   * expirada mas dentro da janela de graça; o caller deve atualizar em background.
+   */
   get(key) {
     const entry = this.map.get(key);
     if (!entry) return undefined;
-    if (Date.now() - entry.at >= this.ttlMs) {
-      this.delete(key);
-      return undefined;
+
+    const age = Date.now() - entry.at;
+    const stale = age >= this.ttlMs;
+
+    if (stale) {
+      if (!this.staleWhileRevalidate || age >= this.staleWindowMs) {
+        // Muito antiga ou sem stale-while-revalidate — remove e deixa buscar de novo
+        this.delete(key);
+        return undefined;
+      }
+      // Stale-while-revalidate: serve imediatamente e atualiza em background
+      this.staleHits++;
+      this.map.delete(key);
+      this.map.set(key, entry);
+      return { payload: entry.payload, stale: true };
     }
+
     // LRU touch: reordena sem mexer no total de bytes.
     this.map.delete(key);
     this.map.set(key, entry);
-    return entry.payload;
+    return { payload: entry.payload, stale: false };
   }
 
   set(key, payload, bytes) {
@@ -256,11 +280,12 @@ export class CacheLRU {
       maxBytes: this.maxBytes,
       maxEntries: this.maxEntries,
       ttlMs: this.ttlMs,
+      staleHits: this.staleHits,
     };
   }
 
   cleanup() {
-    const cutoff = Date.now() - this.ttlMs;
+    const cutoff = Date.now() - this.staleWindowMs;
     for (const [key, entry] of this.map) {
       if (entry.at < cutoff) this.delete(key);
     }

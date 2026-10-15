@@ -1,156 +1,154 @@
 #!/usr/bin/env node
 /**
- * benchmark-performance.mjs — mede latência do web-reader-mcp em modo HTTP.
+ * benchmark-performance.mjs — mede a latência de leitura nos sites reais.
  *
- * Sobe o servidor em porta livre, espera /health, e depois mede:
- *   - Cold fetch: primeira visita a cada URL (cache vazio)
- *   - Warm fetch: segunda visita a cada URL (cache quente)
- *   - Concorrencia: N requisições simultâneas a URLs diferentes
+ * Sobe o servidor MCP em modo HTTP numa porta livre, espera ele responder,
+ * e mede a latência de leitura de sites reais.
  *
  * Uso: node scripts/benchmark-performance.mjs
  */
 
 import { spawn } from "node:child_process";
-import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
-const PORT = 5848;
-const BASE = `http://localhost:${PORT}`;
-const LOG_PREFIX = "[benchmark]";
+const PORT = 4599;
+const BASE_URL = `http://127.0.0.1:${PORT}`;
+const MCP_URL = `${BASE_URL}/mcp`;
 
+// Sites para testar — mix de pesados e leves
 const SITES = [
-  { nome: "example.com", url: "https://example.com" },
-  { nome: "github.com", url: "https://github.com" },
-  { nome: "nodejs.org", url: "https://nodejs.org/en" },
-  { nome: "pt.wikipedia.org", url: "https://pt.wikipedia.org/wiki/Web_crawler" },
-  { nome: "httpbin.org", url: "https://httpbin.org/html" },
-  { nome: "mozilla.org", url: "https://developer.mozilla.org/en-US/" },
-  { nome: "nodejs.org/docs", url: "https://nodejs.org/api/documentation.html" },
-  { nome: "pt.wikipedia.org/wiki/HTTP", url: "https://pt.wikipedia.org/wiki/Hypertext_Transfer_Protocol" },
+  "https://example.com/",
+  "https://httpbin.org/html",
+  "https://developer.mozilla.org/pt-BR/docs/Web/JavaScript/Reference/Global_Objects/Array/filter",
+  "https://nodejs.org/sitemap.xml",
+  "https://www.google.com/robots.txt",
 ];
 
-const proc = spawn(`"${process.execPath}" server.js --http`, {
-  cwd: process.cwd(),
-  env: { ...process.env, PORT: String(PORT) },
-  stdio: ["ignore", "pipe", "pipe"],
-  shell: true,
-});
+let passed = 0;
+let failed = 0;
 
-let logBuf = "";
-proc.stdout.on("data", (d) => (logBuf += d));
-proc.stderr.on("data", (d) => (logBuf += d));
-
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let data = "";
-      res.on("data", (d) => (data += d));
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
-    }).on("error", reject);
-  });
+function log(msg) {
+  console.log(`[benchmark] ${msg}`);
 }
 
-function httpPost(url, body) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = http.request(
-      { hostname: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "content-type": "application/json" } },
-      (res) => {
-        let data = "";
-        res.on("data", (d) => (data += d));
-        res.on("end", () => resolve({ status: res.statusCode, body: data }));
-      }
-    );
-    req.on("error", reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-async function waitHealth() {
-  for (let i = 0; i < 40; i++) {
+async function waitForServer(port, maxWaitMs = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
     try {
-      const r = await httpGet(`${BASE}/health`);
-      if (r.status === 200) return r.body;
-    } catch { /* ainda não subiu */ }
-    await sleep(250);
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      if (res.ok) return true;
+    } catch {
+      // servidor ainda não subiu
+    }
+    await sleep(500);
   }
-  throw new Error(`servidor não subiu na porta ${PORT}`);
+  return false;
 }
 
-async function mcpCall(name, args) {
-  const r = await httpPost(`${BASE}/mcp`, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }));
-  const data = JSON.parse(r.body);
-  if (data.error) throw new Error(data.error.message);
-  const text = data.result?.content?.[0]?.text || "";
-  return { status: r.status, text, raw: data };
+async function callMcp(method, params, id = 1) {
+  const res = await fetch(MCP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params,
+    }),
+  });
+  return res.json();
 }
 
-function fmt(ms) {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+async function readPage(url, maxChars = 3000) {
+  return callMcp("tools/call", {
+    name: "read_page",
+    arguments: { url, maxChars },
+  });
+}
+
+async function measureLatency(fn, label, iterations = 3) {
+  const times = [];
+  for (let i = 0; i < iterations; i++) {
+    const start = Date.now();
+    await fn();
+    const elapsed = Date.now() - start;
+    times.push(elapsed);
+    log(`${label} #${i + 1}: ${elapsed}ms`);
+  }
+  const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+  const min = Math.min(...times);
+  const max = Math.max(...times);
+  log(`${label} — média: ${avg}ms, min: ${min}ms, max: ${max}ms`);
+  return { avg, min, max };
 }
 
 async function main() {
-  console.log(`${LOG_PREFIX} esperando servidor subir...`);
-  const health = await waitHealth();
-  console.log(`${LOG_PREFIX} /health OK:`, JSON.stringify(health).slice(0, 200));
+  log("subindo servidor...");
 
-  // === COLD FETCH ===
-  console.log(`\n${LOG_PREFIX} === COLD FETCH (cache vazio) ===`);
-  const coldTimes = [];
-  for (const s of SITES) {
-    const t0 = Date.now();
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const child = spawn("node", ["server.js", "--http", "--port", String(PORT)], {
+    cwd: join(__dirname, ".."),
+    env: { ...process.env, PORT: String(PORT) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  child.stdout.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) log(`[server] ${text}`);
+  });
+  child.stderr.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) log(`[server:err] ${text}`);
+  });
+
+  try {
+    const ok = await waitForServer(PORT);
+    if (!ok) {
+      log("FALHA FATAL: servidor não subiu na porta " + PORT);
+      child.kill();
+      process.exit(1);
+    }
+
+    log("servidor OK. medindo latência...\n");
+
+    const results = {};
+
+    for (const site of SITES) {
+      log(`=== ${site} ===`);
+      const stat = await measureLatency(() => readPage(site), site, 3);
+      results[site] = stat;
+      log("");
+    }
+
+    log("=== RESUMO ===");
+    let totalAvg = 0;
+    let count = 0;
+    for (const [site, stat] of Object.entries(results)) {
+      log(`${site} — ${stat.avg}ms`);
+      totalAvg += stat.avg;
+      count++;
+    }
+    log(`\nMédia geral: ${Math.round(totalAvg / count)}ms`);
+
+    passed = count;
+    failed = 0;
+  } finally {
+    child.kill("SIGTERM");
+    await sleep(500);
     try {
-      const r = await mcpCall("read_page", { url: s.url, maxOutputChars: 500 });
-      const ms = Date.now() - t0;
-      coldTimes.push(ms);
-      console.log(`${LOG_PREFIX} ${s.nome.padEnd(25)} ${fmt(ms).padStart(8)} — ${r.text.length} chars`);
-    } catch (e) {
-      const ms = Date.now() - t0;
-      coldTimes.push(ms);
-      console.log(`${LOG_PREFIX} ${s.nome.padEnd(25)} ${fmt(ms).padStart(8)} — ERRO: ${e.message}`);
+      child.kill("SIGKILL");
+    } catch {
+      // processo já morreu
     }
   }
 
-  // === WARM FETCH ===
-  console.log(`\n${LOG_PREFIX} === WARM FETCH (cache quente) ===`);
-  const warmTimes = [];
-  for (const s of SITES) {
-    const t0 = Date.now();
-    try {
-      const r = await mcpCall("read_page", { url: s.url, maxOutputChars: 500 });
-      const ms = Date.now() - t0;
-      warmTimes.push(ms);
-      console.log(`${LOG_PREFIX} ${s.nome.padEnd(25)} ${fmt(ms).padStart(8)} — ${r.text.length} chars`);
-    } catch (e) {
-      const ms = Date.now() - t0;
-      warmTimes.push(ms);
-      console.log(`${LOG_PREFIX} ${s.nome.padEnd(25)} ${fmt(ms).padStart(8)} — ERRO: ${e.message}`);
-    }
-  }
-
-  // === RESUMO ===
-  const coldAvg = coldTimes.reduce((a, b) => a + b, 0) / coldTimes.length;
-  const warmAvg = warmTimes.reduce((a, b) => a + b, 0) / warmTimes.length;
-  const coldMax = Math.max(...coldTimes);
-  const warmMax = Math.max(...warmTimes);
-  const speedup = warmAvg > 0 ? (coldAvg / warmAvg).toFixed(1) : "N/A";
-
-  console.log(`\n${LOG_PREFIX} === RESUMO ===`);
-  console.log(`${LOG_PREFIX} Cold: avg ${fmt(coldAvg)}, max ${fmt(coldMax)}`);
-  console.log(`${LOG_PREFIX} Warm: avg ${fmt(warmAvg)}, max ${fmt(warmMax)}`);
-  console.log(`${LOG_PREFIX} Speedup (cold/warm): ${speedup}x`);
-
-  console.log(`\n${LOG_PREFIX} teste de campo encerrado.`);
-  proc.kill("SIGTERM");
-  await sleep(500);
+  log(`\nBenchmark completo: ${passed} sites medidos.`);
   process.exit(0);
 }
 
-main().catch((e) => {
-  console.error(`${LOG_PREFIX} FALHA FATAL:`, e.message);
-  console.error(logBuf);
-  proc.kill("SIGKILL");
+main().catch((err) => {
+  log("ERRO: " + (err.stack || err.message || String(err)));
   process.exit(1);
 });
