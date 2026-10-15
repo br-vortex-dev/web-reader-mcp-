@@ -1190,7 +1190,7 @@ function erroComCausa(err) {
   return melhorado;
 }
 
-async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo } = {}) {
+async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
@@ -1228,7 +1228,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
         err.retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
         throw err;
       }
-      const buffer = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      const buffer = await readBodyWithLimit(res, maxBytes);
       const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
       return {
         text,
@@ -1371,11 +1371,191 @@ function cacheStats() {
   };
 }
 
+/* ------------------------------- robots.txt ------------------------------ */
+
+// Respeito ao robots.txt. Este servico e, entre outras coisas, um crawler
+// (discover_urls e crawl_site seguem links sozinhos), e a web tem uma
+// convencao para crawler: o robots.txt. Ignorar robots.txt faz o site alvo
+// bloquear o cliente - o contrario de "ler a web publica". A checagem roda
+// dentro de fetchTextCached, no mesmo ponto da guarda de SSRF, entao vale
+// para todas as ferramentas (read_page, extract_links, read_multiple_pages,
+// read_dynamic_page, discover_urls, crawl_site) e para a busca de APIs
+// embutidas.
+//
+// Regra do jogo:
+//   - <origem>/robots.txt e buscado UMA vez por origem, com TTL. Nao entra
+//     no pageCache: e metadado de crawling, nao conteudo de pagina;
+//   - vale o grupo "User-agent: *". O User-Agent das requisicoes gira entre
+//     varios valores, entao grupo por nome seria instavel de pedido para
+//     pedido - o "*" e o que um crawler generico segue;
+//   - entre Allow e Disallow vence a regra mais longa que casar (padrao do
+//     Google), com "*" e "$" como curingas;
+//   - "Disallow:" de valor vazio nao bloqueia nada (equivale a permitir);
+//   - robots.txt inacessivel (erro de rede, 4xx, 5xx, corpo grande demais)
+//     = fail-open: sem regra para cumprir, nada a bloquear. A falha tambem
+//     fica em cache (TTL curto) para nao martelar o host;
+//   - ROBOTS_RESPECT=0 desliga tudo (escape hatch).
+const ROBOTS_RESPECT = process.env.ROBOTS_RESPECT !== "0";
+const ROBOTS_TTL_MS = Math.max(1000, Math.floor(Number(process.env.ROBOTS_TTL_MS) || CACHE_TTL_MS));
+const ROBOTS_TIMEOUT_MS = Math.max(
+  1000,
+  Math.min(30000, Math.floor(Number(process.env.ROBOTS_TIMEOUT_MS) || 10000))
+);
+// TTL da falha: curto de proposito. Um robots.txt que nao respondeu agora
+// pode voltar a responder daqui a um minuto.
+const ROBOTS_NEGATIVE_TTL_MS = 60000;
+const ROBOTS_MAX_BYTES = 512 * 1024;
+const ROBOTS_MAX_ORIGINS = 1000;
+
+// origem -> { at, grupos|null }. grupos=null significa fail-open (nao deu
+// para ler o robots.txt); grupos=[] significa "leu, nao tinha grupo *".
+const robotsCache = new Map();
+// Busca em voo por origem: 20 requisicoes simultaneas a um host novo nao
+// podem virar 20 fetches do mesmo robots.txt.
+const robotsEmVoo = new Map();
+
+// Grupo = linhas de User-agent seguidas (ou nao) de Allow/Disallow. Uma
+// linha User-agent DEPOIS de regras comeca um grupo novo; sitemap,
+// crawl-delay e companhia sao ignorados.
+function robotsGruposDoTexto(texto) {
+  const grupos = [];
+  let grupo = null;
+  let ultimoCampo = "";
+  for (const bruta of texto.split(/\r?\n/)) {
+    const linha = bruta.replace(/#.*/, "").trim();
+    if (!linha) continue;
+    const i = linha.indexOf(":");
+    if (i < 0) continue;
+    const campo = linha.slice(0, i).trim().toLowerCase();
+    const valor = linha.slice(i + 1).trim();
+    if (campo === "user-agent") {
+      if (!grupo || ultimoCampo !== "user-agent") {
+        grupo = { agentes: [], regras: [] };
+        grupos.push(grupo);
+      }
+      grupo.agentes.push(valor.toLowerCase());
+    } else if (campo === "allow" || campo === "disallow") {
+      if (grupo && valor) grupo.regras.push({ tipo: campo, valor });
+    }
+    ultimoCampo = campo;
+  }
+  return grupos;
+}
+
+function robotsRegrasAplicaveis(grupos) {
+  const grupo = grupos.find((g) => g.agentes.includes("*"));
+  return grupo ? grupo.regras : null;
+}
+
+// Padrao do robots para regex, com cache: os padroes vem de sites remotos,
+// e recompilar a cada requisicao seria trabalho repetido a toa.
+const robotsRegexCache = new Map();
+function robotsPadraoParaRegex(padrao) {
+  const cache = robotsRegexCache.get(padrao);
+  if (cache) return cache;
+  const terminaCifrao = padrao.endsWith("$");
+  const corpo = terminaCifrao ? padrao.slice(0, -1) : padrao;
+  let corpoRe = "";
+  for (const ch of corpo) {
+    if (ch === "*") corpoRe += "[\\s\\S]*";
+    else corpoRe += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  const re = new RegExp("^" + corpoRe + (terminaCifrao ? "$" : ""));
+  if (robotsRegexCache.size > 2000) robotsRegexCache.clear();
+  robotsRegexCache.set(padrao, re);
+  return re;
+}
+
+// Devolve { permite, regra }. Sem grupo * (ou grupo sem regras) nao ha nada
+// a respeitar. Empate de tamanho: Allow ganha (regra menos restritiva).
+function robotsPermite(regras, caminho) {
+  if (!regras || regras.length === 0) return { permite: true };
+  let vencedora = null;
+  for (const regra of regras) {
+    if (!robotsPadraoParaRegex(regra.valor).test(caminho)) continue;
+    if (
+      !vencedora ||
+      regra.valor.length > vencedora.valor.length ||
+      (regra.valor.length === vencedora.valor.length && regra.tipo === "allow")
+    ) {
+      vencedora = regra;
+    }
+  }
+  if (!vencedora) return { permite: true };
+  return { permite: vencedora.tipo === "allow", regra: vencedora.valor };
+}
+
+async function robotsDaOrigem(origem) {
+  const agora = Date.now();
+  const hit = robotsCache.get(origem);
+  if (hit && agora - hit.at < (hit.grupos ? ROBOTS_TTL_MS : ROBOTS_NEGATIVE_TTL_MS)) return hit;
+  const emVoo = robotsEmVoo.get(origem);
+  if (emVoo) return emVoo;
+
+  const busca = (async () => {
+    // Fail-open e o padrao: qualquer problema para ler o robots.txt
+    // devolve grupos=null, que la em checarRobots significa "permitido".
+    let entrada = { at: Date.now(), grupos: null };
+    try {
+      // Sem o fallback http->https de proposito: a decisao e sobre o sitio
+      // como ele foi pedido. O fetch ainda segue redirects do proprio
+      // robots.txt (revalidando cada salto, como qualquer fetch).
+      const payload = await fetchText(`${origem}/robots.txt`, {
+        timeoutMs: ROBOTS_TIMEOUT_MS,
+        retries: 0,
+        maxBytes: ROBOTS_MAX_BYTES,
+      });
+      entrada = { at: Date.now(), grupos: robotsGruposDoTexto(payload.text) };
+    } catch {
+      // inacessivel/4xx/5xx/grande demais: fica o fail-open
+    }
+    robotsEmVoo.delete(origem);
+    robotsCache.set(origem, entrada);
+    while (robotsCache.size > ROBOTS_MAX_ORIGINS) {
+      const maisAntiga = robotsCache.keys().next().value;
+      robotsCache.delete(maisAntiga);
+    }
+    return entrada;
+  })();
+  robotsEmVoo.set(origem, busca);
+  return busca;
+}
+
+async function checarRobots(url) {
+  if (!ROBOTS_RESPECT) return;
+  let alvo;
+  try {
+    alvo = new URL(url);
+  } catch {
+    return; // URL invalida: o fetch logo mais falha sozinho
+  }
+  if (alvo.protocol !== "http:" && alvo.protocol !== "https:") return;
+  const entrada = await robotsDaOrigem(`${alvo.protocol}//${alvo.host}`);
+  if (!entrada || !entrada.grupos) return; // fail-open
+  const decisao = robotsPermite(
+    robotsRegrasAplicaveis(entrada.grupos),
+    alvo.pathname + alvo.search
+  );
+  if (!decisao.permite) {
+    // Regra vencedora so bloqueia quando e Disallow (Allow implica permite).
+    const err = new Error(
+      `Bloqueado por robots.txt de ${alvo.host}: o caminho ${alvo.pathname} casa com ` +
+        `"Disallow: ${decisao.regra}". Defina ROBOTS_RESPECT=0 para ignorar o robots.txt.`
+    );
+    err.robots = true;
+    throw err;
+  }
+}
+
 async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   // Valida ANTES de olhar o cache: uma URL bloqueada nunca pode ser servida
   // (nem popular) o cache. Vale para todos os caminhos: read_page, crawl,
   // sitemap, extract_links e extractEmbeddedData.
   await assertPublicHost(url);
+  // O robots.txt entra no mesmo ponto (e pela mesma razao): URL proibida
+  // nao e servida do cache nem o popula. A verificacao e local (regex) e o
+  // robots.txt da origem fica cacheado com TTL.
+  await checarRobots(url);
   const hit = pageCache.get(url);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     // LRU touch: reordena sem mexer no total de bytes.

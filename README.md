@@ -282,6 +282,31 @@ Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
 conexão, porque o `fetch` do Node não permite fixar o IP de destino. Está documentada no
 código (`assertPublicHost` em `server.js`).
 
+### Respeito ao robots.txt
+
+Este MCP também é um **crawler** (`discover_urls` e `crawl_site` seguem links sozinhos), e a
+web tem uma convenção para crawler: o `robots.txt`. Ignorar o que o site pede faz o site
+bloquear o cliente — o contrário de ler a web pública em paz. Por isso:
+
+- o `<origem>/robots.txt` é buscado **uma vez por origem**, com TTL (não entra no cache de
+  páginas: é metadado de crawling, não conteúdo);
+- vale o grupo **`User-agent: *`** — o User-Agent das requisições gira entre vários valores,
+  então grupo por nome seria instável de pedido para pedido;
+- entre `Allow` e `Disallow` vence a **regra mais longa** que casar (padrão do Google), com
+  `*` e `$` como curingas; `Disallow:` vazio não bloqueia nada;
+- **robots.txt inacessível** (erro de rede, 4xx, 5xx, corpo grande demais) = **fail-open**:
+  sem regra para cumprir, nada a bloquear — e a falha fica em cache com TTL curto, para não
+  martelar o host;
+- a checagem roda no mesmo ponto da guarda de SSRF (dentro de `fetchTextCached`), então vale
+  para **todas as ferramentas**, e uma URL proibida nunca é servida do cache.
+
+URL bloqueada devolve erro curto e acionável, por exemplo:
+`Bloqueado por robots.txt de exemplo.com: o caminho /privado casa com "Disallow: /privado".
+Defina ROBOTS_RESPECT=0 para ignorar o robots.txt.`
+
+Para desligar tudo (desenvolvimento, ou quando o uso é explicitamente autorizado pelo site):
+`ROBOTS_RESPECT = 0`.
+
 ### Variáveis de ambiente
 
 Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção). No
@@ -295,6 +320,9 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
 | `CACHE_MAX_BYTES` | `67108864` (64 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
 | `CACHE_TTL_MS` | `600000` (10 min) | Validade de cada entrada do cache. |
+| `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
+| `ROBOTS_TTL_MS` | igual ao `CACHE_TTL_MS` | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (60 s, fixo). |
+| `ROBOTS_TIMEOUT_MS` | `10000` (10 s) | Timeout da busca do `robots.txt` (1 s–30 s). |
 | `MAX_RESPONSE_BYTES` | `10485760` (10 MB) | Teto de download por requisição, lido em streaming com corte. |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
 | `FETCH_CONCURRENCY` | `6` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |

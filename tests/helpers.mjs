@@ -67,7 +67,15 @@ export const FIXTURE_HTML = `<!DOCTYPE html><html><head><title>Fixture Parser</t
 //   /chain/N                    -> N redirects relativos e depois /pagina
 //   /redirect-to-private        -> 302 para http://127.0.0.1:<porta>/pagina
 //   /redirect-to-file           -> 302 para file:///etc/passwd
-export async function startFixture() {
+//   /robots.txt                 -> regras de robots do modo "regras" (padrao)
+//                                   ou HTTP 500 no modo "erro500"
+//   /privado/<qualquer>         -> MARCADO-PRIVADO   (Disallow: /privado)
+//   /privado/publico            -> MARCADO-PUBLICO   (Allow mais longa vence)
+//   /coisa/curinga              -> MARCADO-CURINGA   (Disallow: /*/curinga)
+//   /termo                      -> MARCADO-TERMO     (Disallow: /termo$)
+//   /termo-extra                -> MARCADO-TERMO-EXTRA (nao casa com /termo$)
+//   /livre                      -> MARCADO-LIVRE     (controle permitido)
+export async function startFixture({ robots = "regras" } = {}) {
   // Contador de requisicoes por id: deixa visivel de FORA se a resposta veio do
   // cache (mesmo contador) ou foi baixada de novo (contador maior).
   const hits = new Map();
@@ -439,6 +447,46 @@ export async function startFixture() {
       );
       return;
     }
+
+    // ---- fixtures do robots.txt ----
+
+    // /robots.txt: conta os hits (o servidor so pode buscar UMA vez por
+    // origem dentro do TTL) e serve as regras — ou falha, no modo "erro500"
+    // (fail-open: sem regra para cumprir, nada a bloquear).
+    if (path === "/robots.txt") {
+      contagem.set("/robots.txt", (contagem.get("/robots.txt") || 0) + 1);
+      if (robots === "erro500") {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("falhou");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end(
+        "User-agent: *\n" +
+          "Disallow: /privado\n" +
+          "Allow: /privado/publico\n" +
+          "Disallow: /*/curinga\n" +
+          "Disallow: /termo$\n"
+      );
+      return;
+    }
+
+    const paginaMarcador = (marcador) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!DOCTYPE html><html><head><title>${marcador}</title></head><body>` +
+          `<h1>${marcador}</h1><p>texto de enchimento para passar da marca de 300.</p></body></html>`
+      );
+    };
+
+    if (path.startsWith("/privado/")) {
+      if (path === "/privado/publico") return paginaMarcador("MARCADO-PUBLICO");
+      return paginaMarcador("MARCADO-PRIVADO");
+    }
+    if (path === "/coisa/curinga") return paginaMarcador("MARCADO-CURINGA");
+    if (path === "/termo") return paginaMarcador("MARCADO-TERMO");
+    if (path === "/termo-extra") return paginaMarcador("MARCADO-TERMO-EXTRA");
+    if (path === "/livre") return paginaMarcador("MARCADO-LIVRE");
 
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(FIXTURE_HTML);
