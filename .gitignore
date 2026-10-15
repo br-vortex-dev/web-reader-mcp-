@@ -25,3 +25,6 @@ demo-output.txt
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Evidencias brutas da rodada de campo (saidas de teste; nao sao produto)
+campo/raw/
