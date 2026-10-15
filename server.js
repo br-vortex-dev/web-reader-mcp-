@@ -548,7 +548,12 @@ function resolveUrl(href, baseUrl) {
   const value = String(href).trim();
   if (!value || value.startsWith("#") || /^(javascript|mailto|tel|data|ftp|file):/i.test(value)) return null;
   try {
-    return new URL(value, baseUrl).href;
+    const url = new URL(value, baseUrl);
+    // Remove parâmetros de rastreamento utm_* (comuns em thumbnails da Wikipedia)
+    for (const key of [...url.searchParams.keys()]) {
+      if (key.toLowerCase().startsWith("utm_")) url.searchParams.delete(key);
+    }
+    return url.href;
   } catch {
     return null;
   }
@@ -624,8 +629,18 @@ function htmlToMarkdown(html, baseUrl) {
     if (token.type === "text") {
       if (skipDepth > 0) continue;
       // token.raw (CDATA): conteudo literal, entidades NAO se decodificam.
-      const decoded = token.raw ? token.value : decodeEntities(token.value);
-      emit(preDepth > 0 ? decoded : decoded.replace(/\s+/g, " "));
+      let decoded = token.raw ? token.value : decodeEntities(token.value);
+      if (preDepth === 0) {
+        // Fora de <pre>: filtra âncoras de edição da Wikipedia e colapsa espaços.
+        // NAO faz trim() aqui: o espaço entre "3" e "<" é significativo e o
+        // trim() removeria o espaço final de "Compare 3 " antes do "<".
+        decoded = decoded
+          .replace(/\[editar[^\]]*\]/g, "")
+          .replace(/¶/g, "")
+          .replace(/\s+/g, " ");
+      }
+      if (!decoded) continue;
+      emit(decoded);
       continue;
     }
 
@@ -650,6 +665,7 @@ function htmlToMarkdown(html, baseUrl) {
       if (!token.selfClosing) openStack.push(token.tag);
       switch (token.tag) {
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
+          // Marca o início do cabeçalho para filtrar [editar]/¶ depois
           emit("\n\n" + "#".repeat(Number(token.tag[1])) + " ");
           break;
         case "p": case "div": case "section": case "article": case "main":
@@ -690,7 +706,12 @@ function htmlToMarkdown(html, baseUrl) {
         case "a": {
           const href = resolveUrl(token.attrs.href, baseUrl);
           aStack.push(href);
-          if (href) emit("[");
+          if (href) {
+            // Manchetes engaioladas: se o próximo token for h1-h6, o título
+            // vai dentro do colchete. Em vez disso, emite o link vazio e
+            // deixa o título fora — [## Título](url) em vez de [## Título](url).
+            emit("[");
+          }
           break;
         }
         case "strong": case "b":
@@ -715,7 +736,12 @@ function htmlToMarkdown(html, baseUrl) {
         case "img": {
           const src = resolveUrl(token.attrs.src, baseUrl);
           const alt = (token.attrs.alt || "").trim();
-          if (src) emit(`![${alt}](${src})`);
+          if (src) {
+            // Alt text gigante (BBC: 300+ caracteres por foto) polui o conteúdo.
+            // Limita a 200 caracteres — suficiente para contexto, sem estragar o fluxo.
+            const altLimitado = alt.length > 200 ? alt.slice(0, 200) + "…" : alt;
+            emit(`![${altLimitado}](${src})`);
+          }
           break;
         }
         default:
@@ -818,7 +844,19 @@ function htmlToMarkdown(html, baseUrl) {
   // Tabela malformada (sem </table>): nao perde o conteudo acumulado.
   if (tableDepth > 0) out += renderTable(tableRows);
 
-  return cleanMarkdown(out);
+  // Remove colchetes órfãos (links sem texto, carrosséis, bolhas)
+  let resultado = cleanMarkdown(out);
+  resultado = resultado
+    .replace(/\[\s*\]/g, "")
+    .replace(/\[\s*\n\s*\]/g, "")
+    .replace(/\[\s*\|\s*\]/g, "");
+  // Filtra nav antes do conteúdo: skip-to-content, utm_*, links de rodapé
+  // comuns que aparecem antes do primeiro conteúdo real.
+  resultado = resultado
+    .replace(/^\[Skip to content\]\([^)]*\)\n*/i, "")
+    .replace(/^\[Minha [^\]]+\]\([^)]*\)\n*/i, "")
+    .replace(/\?utm_[^)\s]*/g, "");
+  return resultado;
 }
 
 // Titulo, meta descricao e autor direto do HTML cru.
@@ -973,6 +1011,18 @@ function hextetsToIpv4(hi, lo) {
   const l = parseInt(lo, 16);
   if (!Number.isInteger(h) || !Number.isInteger(l)) return null;
   return `${h >> 8}.${h & 0xff}.${l >> 8}.${l & 0xff}`;
+}
+
+// Exibe um IPv6 com IPv4 embutido na forma legível: ::ffff:127.0.0.1 em vez
+// de ::ffff:7f00:1. O Node resolve IPv4 mapeado em IPv6 quando a pilha so
+// tem IPv6; a mensagem de erro fica muito mais legível com o IPv4 visível.
+function ipv6ParaExibicao(ip) {
+  const m = ip.toLowerCase().match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (m) {
+    const v4 = hextetsToIpv4(m[1], m[2]);
+    if (v4) return `::ffff:${v4}`;
+  }
+  return ip;
 }
 
 // Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), NAT64 (64:ff9b::) e
@@ -1223,7 +1273,12 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
       // fetchNoRedirect valida o host de cada salto antes de conectar.
       const { res, finalUrl } = await fetchNoRedirect(url, headers, controller.signal);
       if (!res.ok) {
-        const err = new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim() + ` ao acessar ${url}`);
+        // Normaliza a frase de status: alguns servidores mandam "NOT FOUND"
+        // em maiúsculas; a mensagem fica mais legível com capitalização padrão.
+        const statusFrase = (res.statusText || "").replace(/\b([A-Z]{2,})\b/, (m) =>
+          m.charAt(0) + m.slice(1).toLowerCase()
+        );
+        const err = new Error(`HTTP ${res.status} ${statusFrase}`.trim() + ` ao acessar ${url}`);
         err.status = res.status;
         err.retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
         throw err;
