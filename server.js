@@ -26,7 +26,7 @@ const SERVER_NAME = "web-reader";
 const SERVER_VERSION = "1.1.0";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const DEFAULT_TIMEOUT_MS = 25000;
+const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_CHARS = 8000;
 const HARD_MAX_CHARS = 50000;
 const MAX_PAGES_PER_CALL = 30;
@@ -325,13 +325,13 @@ const MAX_RESPONSE_BYTES = Math.max(
 // read_multiple_pages e crawl_site. 6 * 10 MB e o pico transitorio previsivel.
 const FETCH_CONCURRENCY = Math.max(
   1,
-  Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 6))
+  Math.min(64, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 12))
 );
 // Orcamento da busca automatica de "APIs internas" que o read_page dispara
 // sozinho quando o conteudo vem curto. Sem teto, uma pagina com muitos
 // "/api/..." que nao respondem prendia a chamada por minutos.
 const API_MAX_CANDIDATES = Math.max(0, Math.floor(Number(process.env.API_MAX_CANDIDATES || 3)));
-const API_TOTAL_BUDGET_MS = Math.max(500, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 10000));
+const API_TOTAL_BUDGET_MS = Math.max(500, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 5000));
 
 /* --------------------------------------------------------------------------
  * Controle de admissao e de saida
@@ -403,6 +403,14 @@ const MAX_CONNECTIONS = clampEnvZero(process.env.MAX_CONNECTIONS, 0, 0, 1000000)
 // esperando, shift() e splice() sao O(n) e o custo aparece justamente sob
 // carga. O tamanho e mantido por contador (nunca varrendo o array) e a remocao
 // por timeout e "preguicosa" (marca e pula na saida).
+/**
+ * Fila FIFO com indice de cabeca em vez de shift()/splice(): com milhares de
+ * esperando, shift() e splice() sao O(n) e o custo aparece justamente sob
+ * carga. O tamanho e mantido por contador (nunca varrendo o array) e a remocao
+ * por timeout e "preguicosa" (marca e pula na saida).
+ *
+ * @returns {{ tamanho: number, push: Function, peek: Function, shift: Function, cancelar: Function }} Fila
+ */
 function criarFila() {
   let itens = [];
   let cabeca = 0;
@@ -456,6 +464,16 @@ function criarFila() {
 // pequenas ao mesmo tempo e poucas grandes — que e o que a memoria precisa.
 // A reserva acontece uma unica vez, antes de ler o corpo, entao nunca ha
 // "segura e espera" (que poderia travar tudo).
+/**
+ * Limitador por BYTES em voo (semaforo ponderado, fila limitada).
+ * Diferente de um teto por numero de downloads, ele deixa passar muitas paginas
+ * pequenas ao mesmo tempo e poucas grandes — que e o que a memoria precisa.
+ * A reserva acontece uma unica vez, antes de ler, entao nunca ha
+ * "segura e espera" (que poderia travar tudo).
+ *
+ * @param {{ orcamentoBytes: number, filaMax: number, nome: string, esperaMaxMs?: number }} config - Configuracao
+ * @returns {{ adquirir: Function, liberar: Function, stats: Object }} Limitador
+ */
 function criarLimitadorDeBytes({ orcamentoBytes, filaMax, nome, esperaMaxMs = 0 }) {
   let usado = 0;
   const fila = criarFila();
@@ -532,6 +550,14 @@ function criarLimitadorDeBytes({ orcamentoBytes, filaMax, nome, esperaMaxMs = 0 
  * sem dependencias). Nao existe pool externo que ajude aqui: a capacidade e
  * deste processo, entao a fila tem que ser local e CURTA.
  * ------------------------------------------------------------------------ */
+/**
+ * Limitador de concorrencia com fila limitada (a "fila assincrona" possivel
+ * sem dependencias). Nao existe pool externo que ajude aqui: a capacidade e
+ * deste processo, entao a fila tem que ser local e CURTA.
+ *
+ * @param {{ limite: number, filaMax: number, nome: string, esperaMaxMs?: number }} config - Configuracao
+ * @returns {{ executar: Function, adquirir: Function, liberar: Function, stats: Object }} Limitador
+ */
 function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
   let ativos = 0;
   const fila = criarFila();
@@ -708,6 +734,13 @@ const NAMED_ENTITIES = {
   lrm: "\u200e", rlm: "\u200f", oplus: "\u2295", otimes: "\u2297",
 };
 
+/**
+ * Decodifica entidades HTML (&amp;, &lt;, &#123;, etc.) para texto puro.
+ * Mantem o texto original para entidades invalidas ou desconhecidas.
+ *
+ * @param {string} input - Texto com entidades HTML
+ * @returns {string} Texto com entidades decodificadas
+ */
 function decodeEntities(input) {
   if (!input || input.indexOf("&") === -1) return input;
   return input.replace(
@@ -731,6 +764,14 @@ function decodeEntities(input) {
 }
 
 // Acha o ">" que fecha a tag, respeitando atributos entre aspas (ex.: title="a > b").
+/**
+ * Encontra o ">" que fecha uma tag, respeitando atributos entre aspas
+ * (ex.: title="a > b").
+ *
+ * @param {string} html - HTML completo
+ * @param {number} start - Posicao inicial (do "<")
+ * @returns {number} Posicao do ">" ou -1 se nao encontrar
+ */
 function findTagEnd(html, start) {
   let quote = null;
   for (let j = start + 1; j < html.length; j++) {
@@ -746,6 +787,13 @@ function findTagEnd(html, start) {
   return -1;
 }
 
+/**
+ * Extrai atributos de uma tag HTML (ex.: href="...", class="...").
+ * Suporta aspas simples, duplas e sem aspas. Decodifica entidades HTML.
+ *
+ * @param {string} source - Conteudo da tag (ex: 'a href="x" class="y"')
+ * @returns {Object<string, string>} Atributos extraidos (lowercase keys)
+ */
 function parseAttrs(source) {
   const attrs = {};
   const re = /([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]*)))?/g;
@@ -758,6 +806,13 @@ function parseAttrs(source) {
 }
 
 // Divide o HTML em uma lista de tokens: {type:"open"|"close"|"text", tag?, attrs?, value?}
+/**
+ * Divide o HTML em uma lista de tokens: {type:"open"|"close"|"text", tag?, attrs?, value?}.
+ * Trata tags void, self-closing, CDATA, comentarios e declaracoes.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @returns {Array<{ type: string, tag?: string, attrs?: Object<string, string>, selfClosing?: boolean, value?: string, raw?: boolean }>} Tokens extraidos
+ */
 function tokenize(html) {
   const tokens = [];
   let i = 0;
@@ -828,6 +883,14 @@ function tokenize(html) {
   return tokens;
 }
 
+/**
+ * Resolve um href relativo para URL absoluta. Remove parametros de
+ * rastreamento utm_* (comuns em thumbnails da Wikipedia).
+ *
+ * @param {string} href - href do link
+ * @param {string} baseUrl - URL base da pagina
+ * @returns {string | null} URL absoluta ou null se invalida/ignorada
+ */
 function resolveUrl(href, baseUrl) {
   if (!href) return null;
   const value = String(href).trim();
@@ -862,7 +925,17 @@ function cleanMarkdown(text) {
   return cleaned.replace(/\u0000(\d+)\u0000/g, (_, index) => blocks[Number(index)]);
 }
 
-// Converte o HTML em markdown enxuto (titulos, listas, links, negrito, codigo, tabelas).
+/**
+ * Converte o HTML em markdown enxuto (titulos, listas, links, negrito, codigo,
+ * tabelas). Implementado sem dependencias: tokenizador proprio + regras de
+ * emissao. Trata tags void, skip (script/style/etc), tabelas GFM validas,
+ * deduplicacao de blocos de codigo e limpeza de artefatos comuns
+ * (skip-to-content, utm_*, colchetes orfaos).
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} baseUrl - URL base para resolver links relativos
+ * @returns {string} Markdown extraido
+ */
 function htmlToMarkdown(html, baseUrl) {
   let out = "";
   let skipDepth = 0;
@@ -1166,7 +1239,14 @@ function htmlToMarkdown(html, baseUrl) {
   return resultado;
 }
 
-// Titulo, meta descricao e autor direto do HTML cru.
+/**
+ * Extrai metadados do HTML cru: titulo, meta descricao, autor e data de
+ * publicacao. Usa regex simples (sem parser DOM) para ser rapido e sem
+ * dependencias. Prioriza og:title sobre <title> quando ambos existem.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @returns {{ title: string, description: string, author: string, published: string }} Metadados extraidos
+ */
 function extractMeta(html) {
   let title = "";
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -1197,8 +1277,12 @@ function extractMeta(html) {
   };
 }
 
-// Lista de links {text, href, internal} com URLs absolutas e sem duplicatas.
-// `internal` = mesmo dominio da pagina base (www e tratados como iguais).
+/**
+ * Extrai o hostname de uma URL, removendo "www." para comparacao.
+ *
+ * @param {string} urlOrHref - URL ou href
+ * @returns {string} Hostname normalizado (sem www) ou "" se invalido
+ */
 function hostOf(urlOrHref) {
   try {
     return new URL(urlOrHref).hostname.toLowerCase().replace(/^www\./, "");
@@ -1207,6 +1291,15 @@ function hostOf(urlOrHref) {
   }
 }
 
+/**
+ * Extrai todos os links de uma pagina HTML. Ignora links de tags
+ * skipped (script/style/etc). Usa alt text de imagens quando o link nao
+ * tem texto. Deduplica pelo href absoluto.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} baseUrl - URL base para resolver links relativos
+ * @returns {Array<{ text: string, href: string, internal: boolean }>} Links extraidos
+ */
 function extractLinks(html, baseUrl) {
   const links = [];
   const seen = new Set();
@@ -1264,6 +1357,15 @@ function extractLinks(html, baseUrl) {
  * HTTP + Ferramentas                                                    *
  * ===================================================================== */
 
+/**
+ * Valida se uma URL e valida e usa protocolo http/https. Lanca erro
+ * especifico para formato invalido ou protocolo nao suportado.
+ *
+ * @param {string} url - URL a ser validada
+ * @returns {URL} Objeto URL validado
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ * @throws {ProtocoloNaoSuportadoError} Se o protocolo nao for http/https
+ */
 function validateHttpUrl(url) {
   let parsed;
   try {
@@ -1300,6 +1402,13 @@ if (ALLOW_PRIVATE_HOSTS) {
 // IPv4 privado/reservado: 0/8, 10/8, 100.64/10 (CGNAT), 127/8, 169.254/16
 // (link-local, inclui o 169.254.169.254 de metadata), 172.16/12, 192.168/16,
 // 224/4 (multicast) e 240/4 (reservado).
+/**
+ * Verifica se um IPv4 e privado/reservado (0/8, 10/8, 100.64/10, 127/8,
+ * 169.254/16, 172.16/12, 192.168/16, 224/4, 240/4).
+ *
+ * @param {string} ip - Endereco IPv4
+ * @returns {boolean} true se for privado/reservado
+ */
 function isBlockedIpv4(ip) {
   const parts = ip.split(".").map(Number);
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
@@ -1313,6 +1422,14 @@ function isBlockedIpv4(ip) {
   return false;
 }
 
+/**
+ * Converte dois hextets (16 bits cada) para IPv4 legível.
+ * Usado para exibir IPv4 mapeado em IPv6 (::ffff:127.0.0.1).
+ *
+ * @param {string} hi - Primeiro hextet (hex)
+ * @param {string} lo - Segundo hextet (hex)
+ * @returns {string | null} IPv4 formatado ou null se invalido
+ */
 function hextetsToIpv4(hi, lo) {
   const h = parseInt(hi, 16);
   const l = parseInt(lo, 16);
@@ -1323,6 +1440,14 @@ function hextetsToIpv4(hi, lo) {
 // Exibe um IPv6 com IPv4 embutido na forma legível: ::ffff:127.0.0.1 em vez
 // de ::ffff:7f00:1. O Node resolve IPv4 mapeado em IPv6 quando a pilha so
 // tem IPv6; a mensagem de erro fica muito mais legível com o IPv4 visível.
+/**
+ * Exibe um IPv6 com IPv4 embutido na forma legível: ::ffff:127.0.0.1 em vez
+ * de ::ffff:7f00:1. O Node resolve IPv4 mapeado em IPv6 quando a pilha so
+ * tem IPv6; a mensagem de erro fica muito mais legível com o IPv4 visível.
+ *
+ * @param {string} ip - Endereco IPv6 (possivelmente com IPv4 mapeado)
+ * @returns {string} Endereco formatado para exibicao
+ */
 function ipv6ParaExibicao(ip) {
   const m = ip.toLowerCase().match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (m) {
@@ -1335,6 +1460,14 @@ function ipv6ParaExibicao(ip) {
 // Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), NAT64 (64:ff9b::) e
 // 6to4 (2002::/16). O requisito e validar o IPv4 de dentro, e nao bloquear
 // o IPv6 cegamente.
+/**
+ * Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), NAT64 (64:ff9b::) e
+ * 6to4 (2002::/16). O requisito e validar o IPv4 de dentro, e nao bloquear
+ * o IPv6 cegamente.
+ *
+ * @param {string} ip - Endereco IPv6
+ * @returns {string | null} IPv4 embutido ou null se nao houver
+ */
 function embeddedIpv4(ip) {
   const lower = ip.toLowerCase();
   const dotted = lower.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
@@ -1350,6 +1483,13 @@ function embeddedIpv4(ip) {
 
 // IPv6 interno: :: e ::1, fe80::/10 (link-local), fc00::/7 (ULA) e ff00::/8
 // (multicast). O IPv4 embutido tem prioridade: valida ele, nao o IPv6 inteiro.
+/**
+ * Verifica se um IPv6 e interno (:: e ::1, fe80::/10, fc00::/7, ff00::/8).
+ * O IPv4 embutido tem prioridade: valida ele, nao o IPv6 inteiro.
+ *
+ * @param {string} ip - Endereco IPv6
+ * @returns {boolean} true se for interno
+ */
 function isBlockedIpv6(ip) {
   const lower = ip.toLowerCase().split("%")[0]; // remove zone id (fe80::1%eth0)
   if (lower === "::" || lower === "::1") return true;
@@ -1366,6 +1506,13 @@ function isBlockedIpv6(ip) {
 }
 
 // Devolve o proprio endereco quando ele deve ser bloqueado, ou null.
+/**
+ * Devolve o próprio endereço quando ele deve ser bloqueado, ou null.
+ * Se o formato for desconhecido, bloqueia por segurança (não arrisca).
+ *
+ * @param {string} address - Endereco IP (v4 ou v6)
+ * @returns {string | null} Endereco bloqueado ou null
+ */
 function blockedAddress(address) {
   const family = isIP(address);
   if (family === 4) return isBlockedIpv4(address) ? address : null;
@@ -1375,7 +1522,7 @@ function blockedAddress(address) {
 
 // Cache curto das validacoes de host, so para nao repetir o lookup de DNS a
 // cada requisicao (o cache de paginas valida antes de responder).
-const HOST_CHECK_TTL_MS = 60 * 1000;
+const HOST_CHECK_TTL_MS = 5 * 60 * 1000; // 5 minutos
 const HOST_CHECK_MAX_ENTRIES = 500;
 const hostCheckCache = new Map();
 
@@ -1385,6 +1532,20 @@ const hostCheckCache = new Map();
 // DNS rebinding: a janela entre lookup e conexao e fechada com um Agent
 // customizado que retorna apenas o IP ja validado — o fetch nunca resolve
 // DNS de novo. Ver criacao de agentValidado() abaixo.
+/**
+ * Resolve o host e recusa endereco privado/interno. Chamada ANTES de cada
+ * requisicao de saida, inclusive a cada salto de redirect.
+ *
+ * DNS rebinding: a janela entre lookup e conexao e fechada com um Agent
+ * customizado que retorna apenas o IP ja validado — o fetch nunca resolve
+ * DNS de novo.
+ *
+ * @param {string} url - URL a ser validada
+ * @returns {Promise<string | null>} IP validado ou null (se ALLOW_PRIVATE_HOSTS)
+ * @throws {HostBloqueadoError} Se o endereco for privado/interno
+ * @throws {HostNaoResolvidoError} Se o host nao puder ser resolvido
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ */
 async function assertPublicHost(url) {
   if (ALLOW_PRIVATE_HOSTS) return null;
 
@@ -1438,6 +1599,16 @@ async function assertPublicHost(url) {
 const agentCache = new Map();
 const AGENT_CACHE_MAX = 256;
 
+/**
+ * Cria ou reutiliza um Agent HTTP/HTTPS para um IP validado. O Agent
+ * sobrescreve o lookup padrao do Node para retornar sempre o IP que ja
+ * validamos — o fetch nunca resolve DNS de novo (proteção contra DNS
+ * rebinding). Mantém cache de agents por IP para reutilizar conexões.
+ *
+ * @param {string} url - URL a ser acessada (para determinar http/https)
+ * @param {string} ipValido - IP validado a ser usado
+ * @returns {http.Agent | https.Agent} Agent configurado
+ */
 function agentValidado(url, ipValido) {
   const family = isIP(ipValido);
   const isHttps = url.startsWith("https:");
@@ -1455,10 +1626,10 @@ function agentValidado(url, ipValido) {
       }
     },
     // Aumenta o limite de sockets por host: o padrão do Node é 5, o que
-    // limita a concorrência ao mesmo host. Com 16, permitimos mais conexões
+    // limita a concorrência ao mesmo host. Com 32, permitimos mais conexões
     // paralelas sem esgotar file descriptors.
-    maxSockets: 16,
-    maxFreeSockets: 8,
+    maxSockets: 32,
+    maxFreeSockets: 16,
     keepAlive: true,
     keepAliveMsecs: 30000,
   };
@@ -1478,6 +1649,17 @@ const MAX_REDIRECTS = 5;
 // GET seguindo redirects a mao (redirect: "manual"), validando o destino de
 // cada salto. Sem isso, uma URL publica que devolva 302 para 127.0.0.1 faria
 // o servidor buscar a rede interna.
+/**
+ * GET seguindo redirects a mao (redirect: "manual"), validando o destino de
+ * cada salho. Sem isso, uma URL publica que devolva 302 para 127.0.0.1 faria
+ * o servidor buscar a rede interna.
+ *
+ * @param {string} url - URL inicial
+ * @param {Object<string, string>} headers - Headers da requisicao
+ * @param {AbortSignal} signal - Signal para cancelamento
+ * @returns {Promise<{ res: Response, finalUrl: string }>} Resposta e URL final
+ * @throws {RedirectError} Se exceder o limite de saltos
+ */
 async function fetchNoRedirect(url, headers, signal) {
   let currentUrl = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -1574,6 +1756,16 @@ async function readBodyWithLimit(res, maxBytes) {
 // caracteres que nao dizem NADA a quem le o erro. A causa real (DNS,
 // conexao recusada, certificado invalido) vive em err.cause, as vezes
 // dentro de um AggregateError (happy eyeballs: varios IPs tentados).
+/**
+ * Extrai a causa real de um erro de rede do Node (fetch failed, timeout, etc).
+ * A mensagem publica do fetch e so "fetch failed" — 18 caracteres que nao dizem
+ * NADA. A causa real (DNS, conexao recusada, certificado invalido) vive em
+ * err.cause, as vezes dentro de um AggregateError (happy eyeballs: varios IPs
+ * tentados).
+ *
+ * @param {Error} err - Erro lancado pelo fetch
+ * @returns {Error} Erro melhorado com a causa real
+ */
 function erroComCausa(err) {
   const descrever = (c) => {
     if (!c) return "";
@@ -1592,6 +1784,17 @@ function erroComCausa(err) {
   return melhorado;
 }
 
+/**
+ * Faz download de uma URL com timeout, retries e limite de bytes.
+ * Retorna o texto decodificado e a URL final (apos redirects).
+ *
+ * @param {string} url - URL a ser baixada
+ * @param {{ timeoutMs?: number, retries?: number, signal?: AbortSignal, maxBytes?: number }} options - Opcoes
+ * @returns {Promise<{ text: string, finalUrl: string, contentType: string }>} Conteudo baixado
+ * @throws {HttpError} Para status 4xx/5xx
+ * @throws {TimeoutError} Se exceder o timeout
+ * @throws {RespostaMuitoGrandeError} Se exceder o limite de bytes
+ */
 async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -1668,6 +1871,13 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
 }
 
 // Tenta buscar a página com HTTPS se HTTP falhar.
+/**
+ * Tenta buscar a página com HTTPS se HTTP falhar.
+ *
+ * @param {string} url - URL a ser baixada
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, retries?: number }} options - Opcoes
+ * @returns {Promise<{ text: string, finalUrl: string, contentType: string }>} Conteudo baixado
+ */
 async function fetchTextWithFallback(url, options) {
   try {
     return await fetchText(url, options);
@@ -1685,6 +1895,14 @@ async function fetchTextWithFallback(url, options) {
 }
 
 // Decodifica o buffer de acordo com o charset do content-type ou detecta BOM.
+/**
+ * Decodifica um buffer de acordo com o charset do content-type ou detecta BOM.
+ * Fallback para UTF-8 quando o charset e desconhecido ou invalido.
+ *
+ * @param {Buffer} buffer - Buffer da resposta
+ * @param {string} contentType - Header content-type (pode conter charset)
+ * @returns {string} Texto decodificado
+ */
 async function decodeBuffer(buffer, contentType) {
   const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
   const charset = charsetMatch ? charsetMatch[1].toLowerCase().replace(/["']/g, "") : "";
@@ -1734,10 +1952,21 @@ const CACHE_MAX_ENTRY_BYTES = Math.min(
 const pageCache = new Map();
 let pageCacheBytes = 0;
 
+/**
+ * Calcula o tamanho em bytes de um payload de cache (texto + URL).
+ *
+ * @param {{ text: string, finalUrl: string }} payload - Payload a ser medido
+ * @returns {number} Tamanho em bytes
+ */
 const payloadBytes = (payload) =>
   Buffer.byteLength(payload.text || "", "utf8") + Buffer.byteLength(payload.finalUrl || "", "utf8");
 
-// Toda remocao passa por aqui, senao a contagem em bytes deriva.
+/**
+ * Remove uma entrada do cache e atualiza o contador em bytes.
+ * Toda remocao passa por aqui, senao a contagem em bytes deriva.
+ *
+ * @param {string} key - Chave da entrada a ser removida
+ */
 function cacheDelete(key) {
   const entry = pageCache.get(key);
   if (!entry) return;
@@ -1746,6 +1975,14 @@ function cacheDelete(key) {
   if (pageCacheBytes < 0) pageCacheBytes = 0;
 }
 
+/**
+ * Adiciona ou atualiza uma entrada no cache. Sobrescrever a mesma chave nao
+ * pode contar duas vezes. Despeja os menos recentemente usados ate caber nos
+ * DOIS tetos (entradas e bytes).
+ *
+ * @param {string} key - Chave da entrada
+ * @param {{ at: number, payload: { text: string, finalUrl: string }, bytes: number }} entry - Entrada a ser adicionada
+ */
 function cacheSet(key, entry) {
   cacheDelete(key); // sobrescrever a mesma chave nao pode contar duas vezes
   pageCache.set(key, entry);
@@ -1767,6 +2004,12 @@ const cacheCleanup = setInterval(() => {
 }, CACHE_TTL_MS);
 cacheCleanup.unref();
 
+/**
+ * Retorna estatisticas do cache: numero de entradas, bytes usados, tetos
+ * configurados e TTL.
+ *
+ * @returns {{ entries: number, bytes: number, maxBytes: number, maxEntries: number, ttlMs: number }} Estatisticas do cache
+ */
 function cacheStats() {
   return {
     entries: pageCache.size,
@@ -1823,6 +2066,14 @@ const robotsEmVoo = new Map();
 // Grupo = linhas de User-agent seguidas (ou nao) de Allow/Disallow. Uma
 // linha User-agent DEPOIS de regras comeca um grupo novo; sitemap,
 // crawl-delay e companhia sao ignorados.
+/**
+ * Processa o texto do robots.txt e extrai os grupos de regras. Cada grupo
+ * contem User-agents seguidos de Allow/Disallow. Ignora comentarios e
+ * linhas invalidas.
+ *
+ * @param {string} texto - Conteudo do robots.txt
+ * @returns {Array<{ agentes: string[], regras: Array<{ tipo: string, valor: string }> }>} Grupos extraidos
+ */
 function robotsGruposDoTexto(texto) {
   const grupos = [];
   let grupo = null;
@@ -1848,6 +2099,13 @@ function robotsGruposDoTexto(texto) {
   return grupos;
 }
 
+/**
+ * Extrai as regras aplicaveis ao user-agent "*" (generico). Se nao houver
+ * grupo para "*", retorna null (sem regras a respeitar).
+ *
+ * @param {Array<{ agentes: string[], regras: Array<{ tipo: string, valor: string }> }>} grupos - Grupos extraidos do robots.txt
+ * @returns {Array<{ tipo: string, valor: string }> | null} Regras aplicaveis ou null
+ */
 function robotsRegrasAplicaveis(grupos) {
   const grupo = grupos.find((g) => g.agentes.includes("*"));
   return grupo ? grupo.regras : null;
@@ -1856,6 +2114,14 @@ function robotsRegrasAplicaveis(grupos) {
 // Padrao do robots para regex, com cache: os padroes vem de sites remotos,
 // e recompilar a cada requisicao seria trabalho repetido a toa.
 const robotsRegexCache = new Map();
+/**
+ * Converte um padrao do robots.txt para regex, com cache. Os padroes vem de
+ * sites remotos, e recompilar a cada requisicao seria trabalho repetido a toa.
+ * Suporta curingas "*" e ancora "$" no fim.
+ *
+ * @param {string} padrao - Padrao do robots.txt (ex: "/admin/*")
+ * @returns {RegExp} Regex compilada
+ */
 function robotsPadraoParaRegex(padrao) {
   const cache = robotsRegexCache.get(padrao);
   if (cache) return cache;
@@ -1872,8 +2138,14 @@ function robotsPadraoParaRegex(padrao) {
   return re;
 }
 
-// Devolve { permite, regra }. Sem grupo * (ou grupo sem regras) nao ha nada
-// a respeitar. Empate de tamanho: Allow ganha (regra menos restritiva).
+/**
+ * Devolve { permite, regra }. Sem grupo * (ou grupo sem regras) nao ha nada
+ * a respeitar. Empate de tamanho: Allow ganha (regra menos restritiva).
+ *
+ * @param {Array<{ tipo: string, valor: string }> | null} regras - Regras aplicaveis
+ * @param {string} caminho - Caminho da URL (pathname + search)
+ * @returns {{ permite: boolean, regra?: string }} Decisao do robots.txt
+ */
 function robotsPermite(regras, caminho) {
   if (!regras || regras.length === 0) return { permite: true };
   let vencedora = null;
@@ -1891,6 +2163,14 @@ function robotsPermite(regras, caminho) {
   return { permite: vencedora.tipo === "allow", regra: vencedora.valor };
 }
 
+/**
+ * Busca e processa o robots.txt de uma origem. Fail-open: qualquer problema
+ * para ler o robots.txt devolve grupos=null, que significa "permitido".
+ * A falha tambem fica em cache (TTL curto) para nao martelar o host.
+ *
+ * @param {string} origem - Origem (protocolo + host)
+ * @returns {Promise<{ at: number, grupos: Array | null }>} Entrada do cache
+ */
 async function robotsDaOrigem(origem) {
   const agora = Date.now();
   const hit = robotsCache.get(origem);
@@ -1927,6 +2207,13 @@ async function robotsDaOrigem(origem) {
   return busca;
 }
 
+/**
+ * Verifica se uma URL pode ser acessada segundo o robots.txt da origem.
+ * Lanca RobotsBloqueadoError se a URL for bloqueada.
+ *
+ * @param {string} url - URL a ser verificada
+ * @throws {RobotsBloqueadoError} Se a URL for bloqueada pelo robots.txt
+ */
 async function checarRobots(url) {
   if (!ROBOTS_RESPECT) return;
   let alvo;
@@ -1948,6 +2235,17 @@ async function checarRobots(url) {
   }
 }
 
+/**
+ * Fetch com cache LRU + TTL. Valida segurança (SSRF + robots) ANTES de
+ * baixar. Cache hit ANTES da validacao: se a URL ja esta no cache, ela ja
+ * passou pela validacao quando foi adicionada.
+ *
+ * @param {string} url - URL a ser baixada
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, retries?: number }} options - Opcoes
+ * @returns {Promise<{ text: string, finalUrl: string, contentType: string }>} Conteudo baixado
+ * @throws {HostBloqueadoError} Se o host for privado/interno
+ * @throws {RobotsBloqueadoError} Se bloqueado pelo robots.txt
+ */
 async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   // Cache hit ANTES da validacao de seguranca: se a URL ja esta no cache,
   // ela ja passou pela validacao quando foi adicionada. Isso evita lookup
@@ -1980,18 +2278,37 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, re
   return payload;
 }
 
+/**
+ * Limita o maxChars aos valores validos (200 a HARD_MAX_CHARS).
+ *
+ * @param {number|string} value - Valor solicitado
+ * @returns {number} Valor limitado ao range valido
+ */
 function clampMaxChars(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return DEFAULT_MAX_CHARS;
   return Math.max(200, Math.min(HARD_MAX_CHARS, Math.floor(n)));
 }
 
+/**
+ * Limita o timeoutMs aos valores validos (1000 a 60000 ms).
+ *
+ * @param {number|string} value - Valor solicitado
+ * @returns {number} Valor limitado ao range valido
+ */
 function clampTimeoutMs(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return DEFAULT_TIMEOUT_MS;
   return Math.max(1000, Math.min(60000, Math.floor(n)));
 }
 
+/**
+ * Trunca um texto ao limite de caracteres, marcando com [...] quando corta.
+ *
+ * @param {string} text - Texto a ser truncado
+ * @param {number} maxChars - Limite de caracteres
+ * @returns {{ text: string, truncated: boolean }} Texto possivelmente truncado
+ */
 function truncate(text, maxChars) {
   if (text.length <= maxChars) return { text, truncated: false };
   return {
@@ -2002,6 +2319,15 @@ function truncate(text, maxChars) {
   };
 }
 
+/**
+ * Formata o resultado final de leitura: titulo, URL, metadados opcionais
+ * (descricao, autor, publicacao) e conteudo. Adiciona aviso quando o
+ * conteudo foi truncado ou quando a pagina parece ser SPA sem conteudo
+ * estatico.
+ *
+ * @param {{ finalUrl: string, meta: { title: string, description: string, author: string, published: string }, text: string, truncated: boolean, fullLength: number, extraLabel?: string }} params - Parametros do resultado
+ * @returns {string} Texto formatado pronto para a IA ler
+ */
 function formatReadResult({ finalUrl, meta, text, truncated, fullLength, extraLabel }) {
   const lines = [];
   lines.push(`# ${meta.title || "(sem titulo)"}`);
@@ -2019,6 +2345,15 @@ function formatReadResult({ finalUrl, meta, text, truncated, fullLength, extraLa
   return lines.join("\n");
 }
 
+/**
+ * Valida se o conteudo retornado e realmente HTML. Lanca erro se o
+ * content-type indicar outro tipo de conteudo ou se o corpo nao parece HTML.
+ *
+ * @param {string} contentType - Header content-type da resposta
+ * @param {string} html - Corpo da resposta
+ * @param {string} url - URL de origem (para mensagem de erro)
+ * @throws {ConteudoNaoHtmlError} Se o conteudo nao for HTML
+ */
 function ensureHtml(contentType, html, url = "URL desconhecida") {
   if (contentType && !/html|xml|text\//.test(contentType)) {
     throw new ConteudoNaoHtmlError(contentType, url);
@@ -2036,6 +2371,16 @@ function ensureHtml(contentType, html, url = "URL desconhecida") {
 // robots.txt isso faz o "Disallow: /" do Yandex valer para todo mundo; num
 // sitemap, cola as URLs umas nas outras. A fidelidade manda devolver o
 // texto cru — so com o fim de linha normalizado.
+/**
+ * Verifica se o conteudo e texto puro ou XML (nao HTML). Se o content-type
+ * indicar text/plain ou XML e o corpo nao parecer HTML, retorna true.
+ * Robots.txt, sitemap.xml, feeds RSS/Atom e arquivos .md/.json sao conteudos
+ * crus que devem ser devolvidos como vieram, sem conversao para markdown.
+ *
+ * @param {string} contentType - Header content-type da resposta
+ * @param {string} html - Corpo da resposta
+ * @returns {boolean} true se for conteudo cru (texto puro/XML)
+ */
 function isConteudoBruto(contentType, html) {
   const ct = String(contentType || "").toLowerCase();
   if (!ct || ct.includes("html")) return false;
@@ -2046,6 +2391,15 @@ function isConteudoBruto(contentType, html) {
   return true;
 }
 
+/**
+ * Formata um conteudo cru (texto puro/XML) para retorno. Preserva as quebras
+ * de linha originais e trunca ao limite quando necessario.
+ *
+ * @param {string} html - Corpo da resposta (texto puro/XML)
+ * @param {string} finalUrl - URL final apos redirects
+ * @param {number} maxChars - Limite de caracteres
+ * @returns {string} Texto formatado pronto para a IA ler
+ */
 function conteudoBrutoResult(html, finalUrl, maxChars) {
   const texto = html.replace(/\r\n?/g, "\n");
   const { text, truncated } = truncate(texto, maxChars);
@@ -2059,6 +2413,18 @@ function conteudoBrutoResult(html, finalUrl, maxChars) {
   });
 }
 
+/**
+ * Le uma pagina web (GET) e devolve o conteúdo extraido em markdown: titulo,
+ * meta descricao e texto principal. Se o conteudo extraido for muito curto,
+ * tenta extrair dados embutidos (APIs internas, JSON-LD, etc).
+ *
+ * @param {{ url: string, maxChars?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Conteudo da pagina em markdown
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ * @throws {HostBloqueadoError} Se o host for privado/interno
+ * @throws {HttpError} Para status 4xx/5xx
+ * @throws {TimeoutError} Se exceder o timeout
+ */
 async function toolReadPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
@@ -2090,6 +2456,15 @@ async function toolReadPage(args) {
 }
 
 // Extrai dados embutidos de páginas dinâmicas e converte em markdown.
+/**
+ * Extrai dados embutidos de páginas dinâmicas e converte em markdown.
+ * Busca __NEXT_DATA__, __NUXT__, __INITIAL_STATE__, JSON-LD e APIs internas.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} baseUrl - URL base para resolver links relativos
+ * @param {number} timeoutMs - Timeout para busca de APIs internas
+ * @returns {Promise<string | null>} Markdown extraido ou null se nada encontrado
+ */
 async function extractEmbeddedData(html, baseUrl, timeoutMs) {
   const sources = [];
   // __NEXT_DATA__ (Next.js)
@@ -2128,6 +2503,15 @@ async function extractEmbeddedData(html, baseUrl, timeoutMs) {
 // =====================================================================
 
 // Detecta se uma pagina provavelmente precisa de JavaScript para renderizar.
+/**
+ * Detecta se uma pagina provavelmente precisa de JavaScript para renderizar.
+ * Verifica marcadores de framework (Next.js, Nuxt, Vue, Angular) e se o
+ * conteudo extraido e muito curto.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} markdown - Markdown extraido do HTML
+ * @returns {boolean} true se a pagina parece ser dinamica
+ */
 function isDynamicPage(html, markdown) {
   const visibleText = markdown.replace(/\s+/g, " ").trim();
   const hasFrameworkScript =
@@ -2138,6 +2522,13 @@ function isDynamicPage(html, markdown) {
 }
 
 // Extrai JSON de uma tag <script> pelo id ou tipo.
+/**
+ * Extrai JSON de uma tag <script> pelo id. Usado para __NEXT_DATA__ e similares.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} id - id da tag script
+ * @returns {Object | null} Objeto JSON ou null se nao encontrar/invalido
+ */
 function extractJsonById(html, id) {
   const re = new RegExp(`<script[^>]+id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/script>`, "i");
   const m = html.match(re);
@@ -2150,6 +2541,12 @@ function extractJsonById(html, id) {
 }
 
 // Extrai JSON-LD (application/ld+json) — muito usado em sites de noticias e produtos.
+/**
+ * Extrai JSON-LD (application/ld+json) — muito usado em sites de noticias e produtos.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @returns {Array<Object>} Objetos JSON-LD extraidos
+ */
 function extractJsonLd(html) {
   const results = [];
   const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
@@ -2166,6 +2563,12 @@ function extractJsonLd(html) {
 }
 
 // Extrai dados de scripts com window.__INITIAL_STATE__ ou similar.
+/**
+ * Extrai dados de scripts com window.__INITIAL_STATE__ ou similar.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @returns {Object | null} Objeto JSON ou null se nao encontrar/invalido
+ */
 function extractWindowState(html) {
   const patterns = [
     /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/i,
@@ -2186,6 +2589,12 @@ function extractWindowState(html) {
 }
 
 // Extrai primitivos de um bloco JS (sem eval). Usado para __NUXT__ e similares.
+/**
+ * Extrai primitivos de um bloco JS (sem eval). Usado para __NUXT__ e similares.
+ *
+ * @param {string} jsCode - Codigo JavaScript
+ * @returns {Object<string, string | number | boolean | null>} Primitivos extraidos
+ */
 function extractPrimitives(jsCode) {
   const result = {};
   const re = /(\w+)\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|null|true|false|-?\d+(?:\.\d+)?)/g;
@@ -2206,6 +2615,15 @@ function extractPrimitives(jsCode) {
 
 // Converte um objeto JSON extraido em markdown legível.
 // Proteção contra recursão circular e profundidade excessiva.
+/**
+ * Converte um objeto JSON extraido em markdown legível.
+ * Proteção contra recursão circular e profundidade excessiva.
+ *
+ * @param {any} data - Dado a ser convertido
+ * @param {number} depth - Profundidade atual (padrão 0)
+ * @param {Set} seen - Objetos já visitados (para detectar circularidade)
+ * @returns {string} Markdown gerado
+ */
 function jsonToMarkdown(data, depth = 0, seen = new Set()) {
   if (data === null || data === undefined) return "";
   if (typeof data === "string") return data;
@@ -2241,6 +2659,14 @@ function jsonToMarkdown(data, depth = 0, seen = new Set()) {
 // Pontua o candidato para escolher os mais provaveis de serem dados de verdade.
 // Endpoint de dados costuma ter "json"/"graphql"/"api" no caminho; asset
 // estatico (imagem, css, fonte) nunca e.
+/**
+ * Pontua um candidato a API interna para escolher os mais provaveis de serem
+ * dados de verdade. Endpoint de dados costuma ter "json"/"graphql"/"api" no
+ * caminho; asset estatico (imagem, css, fonte) nunca e.
+ *
+ * @param {string} url - URL candidata
+ * @returns {number} Pontuacao (maior = mais provavel)
+ */
 function scoreApiCandidate(url) {
   const u = new URL(url);
   const caminho = u.pathname.toLowerCase();
@@ -2260,6 +2686,18 @@ function scoreApiCandidate(url) {
 // - dedupe pela URL ja resolvida
 // - no maximo API_MAX_CANDIDATES, com API_TOTAL_BUDGET_MS de orcamento TOTAL
 // Se o orcamento estourar, devolve o que ja conseguiu e segue sem erro.
+/**
+ * Tenta achar APIs internas comuns em sites dinamicos.
+ * - so o MESMO host da pagina (alem da guarda SSRF, que roda dentro do fetch)
+ * - dedupe pela URL ja resolvida
+ * - no maximo API_MAX_CANDIDATES, com API_TOTAL_BUDGET_MS de orcamento TOTAL
+ * Se o orcamento estourar, devolve o que ja conseguiu e segue sem erro.
+ *
+ * @param {string} html - HTML cru da pagina
+ * @param {string} baseUrl - URL base para resolver links relativos
+ * @param {number} timeoutMs - Timeout por requisicao
+ * @returns {Promise<Array<{ url: string, data: string }>>} APIs encontradas
+ */
 async function tryInternalApi(html, baseUrl, timeoutMs) {
   if (API_MAX_CANDIDATES === 0) return [];
   const baseHost = hostOf(baseUrl);
@@ -2298,10 +2736,10 @@ async function tryInternalApi(html, baseUrl, timeoutMs) {
   const controller = new AbortController();
   const orcamento = setTimeout(() => controller.abort(), API_TOTAL_BUDGET_MS);
   const prazo = Date.now() + API_TOTAL_BUDGET_MS;
-  const results = [];
   try {
-    for (const alvo of alvos) {
-      if (controller.signal.aborted || Date.now() >= prazo) break; // orcamento esgotado
+    // Paraleliza as APIs: em vez de esperar cada uma (3 × 10s = 30s),
+    // todas rodam juntas e o orcamento total corta juntas.
+    const promises = alvos.map(async (alvo) => {
       try {
         const restante = Math.max(1000, Math.min(timeoutMs, prazo - Date.now()));
         // retries: 0 porque o orcamento manda mais que a insistencia aqui.
@@ -2311,18 +2749,33 @@ async function tryInternalApi(html, baseUrl, timeoutMs) {
           retries: 0,
         });
         if (contentType && /json/.test(contentType)) {
-          results.push({ url: alvo.url, data: text.slice(0, 5000) });
+          return { url: alvo.url, data: text.slice(0, 5000) };
         }
       } catch {
         // candidato que falha ou e cortado pelo orcamento: segue com o que tem
       }
-    }
+      return null;
+    });
+    const results = await Promise.allSettled(promises);
+    return results
+      .filter((r) => r.status === "fulfilled" && r.value !== null)
+      .map((r) => r.value);
   } finally {
     clearTimeout(orcamento);
   }
-  return results;
 }
 
+/**
+ * Le paginas que dependem de JavaScript para renderizar (React, Vue, Angular,
+ * Next.js, etc.) sem precisar de Playwright. Detecta se a pagina e dinamica
+ * e extrai dados embutidos no HTML (__NEXT_DATA__, __NUXT__, __INITIAL_STATE__,
+ * JSON-LD, APIs internas).
+ *
+ * @param {{ url: string, maxChars?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Conteudo da pagina em markdown
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ * @throws {HostBloqueadoError} Se o host for privado/interno
+ */
 async function toolReadDynamicPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
@@ -2334,17 +2787,23 @@ async function toolReadDynamicPage(args) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
   }
   const meta = extractMeta(html);
-  const markdown = htmlToMarkdown(html, finalUrl);
 
   // BUG-3: se o HTML estatico ja tem conteudo completo, ele GANHA. Dados
   // embutidos (__NEXT_DATA__ etc.) so substituem quando o estatico e curto
   // — a MESMA regra que o read_page aplica (la: markdown < 300 caracteres).
   // Antes uma pagina SSR rica (react.dev) tinha a documentacao inteira
   // sobrescrita por um dump de JSON.
-  const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= 300;
 
-  // Se nao parece dinamica, retorna o conteudo estatico normal.
-  if (!isDynamicPage(html, markdown)) {
+  // Verifica marcadores de framework ANTES de converter para markdown:
+  // evita processar 100KB+ de HTML quando a pagina claramente nao precisa.
+  const hasFrameworkMarker =
+    /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i.test(html);
+  const hasEmptyRoot = /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/.test(html);
+  const pareceDinamica = hasFrameworkMarker || hasEmptyRoot;
+
+  // Se nao parece dinamica, converte e retorna o conteudo estatico normal.
+  if (!pareceDinamica) {
+    const markdown = htmlToMarkdown(html, finalUrl);
     const { text, truncated } = truncate(markdown, maxChars);
     return formatReadResult({
       finalUrl,
@@ -2356,8 +2815,12 @@ async function toolReadDynamicPage(args) {
     });
   }
 
-  // Pagina "dinamica" (tem marcador de framework) MAS com texto completo no
-  // HTML: entrega o estatico e diz por que nao usou os dados embutidos.
+  // Pagina dinamicamente marcada: extrai markdown para verificar se o
+  // conteudo estatico ja e suficiente (300+ caracteres). Se for, retorna
+  // o markdown completo sem buscar dados embutidos.
+  const markdown = htmlToMarkdown(html, finalUrl);
+  const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= 300;
+
   if (estaticoCompleto) {
     const { text, truncated } = truncate(markdown, maxChars);
     return formatReadResult({
@@ -2370,13 +2833,9 @@ async function toolReadDynamicPage(args) {
     });
   }
 
-  // Pagina dinamica: tenta extrair dados embutidos (reutiliza a mesma lógica
-  // que o read_page ja usa quando o conteudo vem curto).
+  // Pagina dinamica com conteudo estatico curto: tenta extrair dados embutidos.
   const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
 
-  // Se achou dados, usa eles; senao, cai no conteudo estatico com aviso.
-  // O cabecalho (titulo, URL, rotulo, contagem) e montado UMA vez pelo
-  // formatReadResult — antes o fullText ja trazia tudo e saia duplicado.
   if (dynamicMarkdown) {
     const { text, truncated } = truncate(dynamicMarkdown, maxChars);
     return formatReadResult({
@@ -2401,6 +2860,15 @@ async function toolReadDynamicPage(args) {
   });
 }
 
+/**
+ * Acessa uma pagina e lista seus links (texto + URL absoluta), sem duplicatas.
+ * Use para descobrir para onde uma pagina aponta e escolher a proxima pagina a ler.
+ *
+ * @param {{ url: string, limit?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Lista de links formatada
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ * @throws {HostBloqueadoError} Se o host for privado/interno
+ */
 async function toolExtractLinks(args) {
   const parsed = validateHttpUrl(args.url);
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
@@ -2417,6 +2885,16 @@ async function toolExtractLinks(args) {
   return lines.join("\n");
 }
 
+/**
+ * Le UMA pagina do crawl. Lanca erro quando a pagina falha: quem chama decide
+ * se isola (no meio do crawl) ou propaga (na URL inicial).
+ *
+ * @param {string} url - URL da pagina
+ * @param {number} maxChars - Limite de caracteres
+ * @param {number} timeoutMs - Timeout em ms
+ * @returns {Promise<string>} Conteudo da pagina em markdown
+ * @throws {Error} Se a pagina nao puder ser lida
+ */
 async function readOnePage(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
@@ -2442,6 +2920,16 @@ const MULTI_MAX_TOTAL_CHARS = Math.max(
   Math.floor(Number(process.env.MULTI_MAX_TOTAL_CHARS) || 10 * HARD_MAX_CHARS)
 );
 
+/**
+ * Le varias paginas por chamada (max 30 URLs, em lotes paralelos) e devolve o
+ * conteudo de cada uma, com o status de sucesso/falha por URL.
+ * Deduplica URLs repetidas e aplica teto de saida somada.
+ *
+ * @param {{ urls: string[], maxChars?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Conteudo das paginas concatenado
+ * @throws {ParametroInvalidoError} Se urls nao for uma lista
+ * @throws {LimiteExcedidoError} Se exceder o maximo de URLs
+ */
 async function toolReadMultiplePages(args) {
   const urls = Array.isArray(args.urls) ? args.urls.map((u) => String(u)) : [];
   if (urls.length === 0) throw new ParametroInvalidoError("urls", "informe uma lista de URLs");
@@ -2524,6 +3012,15 @@ async function toolReadMultiplePages(args) {
 
 // Descobre as URLs de um site: tenta sitemap.xml (e variantes), segue
 // sitemap indexes e, se nao achar, devolve os links internos da home.
+/**
+ * Descobre as URLs de um site: le o sitemap.xml (e variantes, incluindo sitemap
+ * indexes) e lista as paginas encontradas. Se nao houver sitemap, devolve os
+ * links internos da home.
+ *
+ * @param {{ url: string, limit?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Lista de URLs formatada
+ * @throws {UrlInvalidaError} Se a URL for invalida
+ */
 async function toolDiscoverUrls(args) {
   const parsed = validateHttpUrl(args.url);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -2615,6 +3112,14 @@ const NAVIGATION_SEGMENTS = new Set([
   "comment", "comments",
 ]);
 
+/**
+ * Verifica se uma URL e de navegacao (login, privacidade, termos, etc.) e
+ * nao vale a pena ler em um crawl. Casam contra segmentos do pathname, nao
+ * contra a URL inteira.
+ *
+ * @param {string} url - URL a ser verificada
+ * @returns {boolean} true se for URL de navegacao
+ */
 function isNavigationUrl(url) {
   let parsed;
   try {
@@ -2636,6 +3141,13 @@ function isNavigationUrl(url) {
 
 // Classifica a falha de uma leitura para o resumo do crawl. Sem isso a IA ve
 // so "0 paginas lidas" e nao sabe se o site estava vazio ou se foi bloqueado.
+/**
+ * Classifica a falha de uma leitura para o resumo do crawl. Sem isso a IA ve
+ * so "0 paginas lidas" e nao sabe se o site estava vazio ou se foi bloqueado.
+ *
+ * @param {Error} err - Erro lancado durante a leitura
+ * @returns {string} Categoria da falha (ex: "com timeout", "com HTTP 404")
+ */
 function classifyFetchError(err) {
   const msg = String((err && err.message) || "");
   const code = String((err && err.cause && err.cause.code) || "");
@@ -2692,6 +3204,15 @@ async function crawlOnePage(url, maxChars, timeoutMs) {
   };
 }
 
+/**
+ * Le um site sozinho: comeca na URL, extrai os links internos e vai seguindo
+ * pelos nao visitados (BFS, lotes paralelos), devolvendo o conteudo de cada pagina.
+ * URLs de navegacao (login, privacidade, termos) sao ignoradas.
+ *
+ * @param {{ url: string, maxPages?: number, maxChars?: number, timeoutMs?: number }} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Conteudo das paginas concatenado
+ * @throws {CrawlError} Se a URL inicial nao puder ser lida
+ */
 async function toolCrawlSite(args) {
   const start = validateHttpUrl(args.url);
   const maxPages = Math.max(2, Math.min(30, Number(args.maxPages) || 10));
@@ -2775,6 +3296,15 @@ async function toolCrawlSite(args) {
   return cabecalho + "\n\n" + conteudos.join("\n\n========================================\n\n");
 }
 
+/**
+ * Despacha a chamada da ferramenta pelo nome. Lanca erro se a ferramenta
+ * for desconhecida.
+ *
+ * @param {string} name - Nome da ferramenta
+ * @param {Object} args - Argumentos da ferramenta
+ * @returns {Promise<string>} Resultado da ferramenta
+ * @throws {FerramentaDesconhecidaError} Se a ferramenta nao existir
+ */
 async function callTool(name, args) {
   switch (name) {
     case "read_page":
@@ -2915,6 +3445,14 @@ const TOOLS = [
 
 // Transporte agnostico: `send(jsonrpcMessage)` joga a resposta onde for
 // (stdout no modo stdio, corpo HTTP no modo Render).
+/**
+ * Trata uma mensagem JSON-RPC do MCP. Despacha para initialize, ping,
+ * tools/list, tools/call e metodos de lista (resources, prompts, roots).
+ * Notificacoes (sem id) sao ignoradas silenciosamente.
+ *
+ * @param {Object} msg - Mensagem JSON-RPC
+ * @param {(message: Object) => void} send - Funcao para enviar resposta
+ */
 async function handleMessage(msg, send) {
   if (!msg || typeof msg !== "object" || typeof msg.method !== "string") {
     if (msg && msg.id !== undefined) {
@@ -2989,6 +3527,10 @@ async function handleMessage(msg, send) {
 
 /* ---------------- transporte stdio (uso local no WorkBuddy) ------------- */
 
+/**
+ * Inicia o servidor em modo stdio (JSON-RPC newline-delimited).
+ * Usado localmente no WorkBuddy.
+ */
 function startStdio() {
   let buffer = "";
   process.stdin.setEncoding("utf8");
@@ -3032,6 +3574,11 @@ function startStdio() {
 
 /* ------------- transporte HTTP remoto (Streamable HTTP p/ o Render) ------- */
 
+/**
+ * Inicia o servidor em modo HTTP Streamable (para o Render).
+ * Inclui autenticacao por token, rate limiting, controle de admissao e
+ * endpoint /health.
+ */
 async function startHttp() {
   const http = await import("node:http");
   const port = Number(process.env.PORT) || 3000;
@@ -3407,6 +3954,12 @@ const HTTP_MODE = FORCE_HTTP || (!FORCE_STDIO && !!process.env.PORT);
 // andamento terminarem antes do exit.
 // A referencia ao servidor HTTP chega por startHttp (stdio nao tem).
 let servidorHttp = null;
+/**
+ * Encerra o processo apos erro fatal (excecao nao tratada ou rejeicao nao
+ * tratada). Fecha o servidor HTTP se existir e sai com codigo 1.
+ *
+ * @param {string} motivo - Motivo do encerramento
+ */
 function encerrarPorErro(motivo) {
   console.error(`[${SERVER_NAME}] ${motivo} - encerrando o processo (codigo 1).`);
   const sair = () => process.exit(1);

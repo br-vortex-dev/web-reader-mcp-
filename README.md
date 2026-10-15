@@ -26,7 +26,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 npm test
 ```
 
-Roda nove arquivos em `tests/` (66 testes, ~30 s, sem rede na maioria):
+Roda onze arquivos em `tests/` (97 testes, ~30 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -325,9 +325,9 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `ROBOTS_TIMEOUT_MS` | `10000` (10 s) | Timeout da busca do `robots.txt` (1 s–30 s). |
 | `MAX_RESPONSE_BYTES` | `10485760` (10 MB) | Teto de download por requisição, lido em streaming com corte. |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
-| `FETCH_CONCURRENCY` | `6` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
+| `FETCH_CONCURRENCY` | `12` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
 | `API_MAX_CANDIDATES` | `3` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
-| `API_TOTAL_BUDGET_MS` | `10000` (10 s) | Orçamento total dessa busca de APIs internas. |
+| `API_TOTAL_BUDGET_MS` | `5000` (5 s) | Orçamento total dessa busca de APIs internas. |
 | `MAX_INFLIGHT_REQUESTS` | `128` | Quantas requisições são processadas ao mesmo tempo. Calibrado pelo **joelho da curva de capacidade** (~64 no hardware de referência). **Aumentar não aumenta a vazão** — só a fila. |
 | `MAX_WAITING_REQUESTS` | `4096` | Quantas esperam por uma vaga. `0` = recusa na hora. |
 | `MAX_WAIT_MS` | `15000` (15 s) | Teto de espera por uma vaga; depois disso, **503 com `Retry-After`**. Deve ser menor que o timeout do seu cliente MCP. |
@@ -426,7 +426,7 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
 
 - **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).  
   Pra produto, use o plano pago (evita dormir e dá mais RAM).
-- **30 URLs por chamada**, em lotes de 6 (`FETCH_CONCURRENCY`): pesquisa rápida
+- **30 URLs por chamada**, em lotes de 12 (`FETCH_CONCURRENCY`): pesquisa rápida
   sem estourar memória.
 - **Orçamento de memória no plano free (512 MB)** — os tetos foram escolhidos
   para caber com folga:
@@ -434,7 +434,7 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
     é o segundo teto.
   - download por requisição: `MAX_RESPONSE_BYTES` (10 MB), lido em **streaming**
     com corte (não carrega a resposta inteira antes de conferir).
-  - pico simultâneo: 6 requisições em paralelo × 10 MB = 60 MB transitórios.
+  - pico simultâneo: 12 requisições em paralelo × 10 MB = 120 MB transitórios.
   - Se subir `FETCH_CONCURRENCY` ou `MAX_RESPONSE_BYTES`, refaça essa conta.
 - **Sem navegador, por escolha**: `read_dynamic_page` não usa Playwright nem
   Chromium (o plano free não tem RAM para isso, e o deploy continua sem build).
@@ -463,7 +463,7 @@ Quando o `read_page` dispara essa extração, ele também tenta as rotas `/api/.
 `/graphql`, `/data/...` e `/wp-json/...` citadas no HTML da página:
 
 - **no máximo `API_MAX_CANDIDATES`** (padrão 3) candidatos;
-- **orçamento total de `API_TOTAL_BUDGET_MS`** (padrão 10 s), depois disso devolve
+- **orçamento total de `API_TOTAL_BUDGET_MS`** (padrão 5 s), depois disso devolve
   o que já obteve e segue, sem erro;
 - só o **mesmo domínio** da página (e passando pela guarda SSRF);
 - deduplicados e priorizados: caminho com cara de dados (`json`, `graphql`, `api`)
@@ -487,8 +487,8 @@ vazia"**. O contrato é:
 - Páginas atrás de login não funcionam (o fetch é anônimo).
 - O conteúdo é truncado em **8000 caracteres** por padrão (ajustável via `maxChars`).
 - Sites com proteção anti-bot muito agressiva podem barrar a requisição.
-- **DNS rebinding:** sobra uma janela entre resolver o nome (para checar se é
-  endereço interno) e conectar, porque o `fetch` do Node não deixa fixar o IP de
-  destino. Fechar isso exigiria abrir o socket na mão ou usar dependência.
+- **DNS rebinding:** a janela entre resolver o nome (para checar se é
+  endereço interno) e conectar é fechada com um Agent customizado que retorna
+  apenas o IP já validado — o fetch nunca resolve DNS de novo.
 - Só o que o site embute no HTML é extraído: JavaScript que monta o conteúdo
   depois do carregamento (client-side puro) não aparece.
