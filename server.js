@@ -1432,11 +1432,18 @@ async function assertPublicHost(url) {
   return addresses[0];
 }
 
-// Cria um Agent HTTP/HTTPS que resolve DNS UMA vez e retorna apenas o IP ja
-// validado. Isso fecha a janela de DNS rebinding: o fetch nunca chama o
-// resolver de novo, entao o IP que validamos e o IP que a conexao usa.
+// Cache de agents HTTP/HTTPS por IP: criar um agent por requisição é caro
+// (cada um gerencia seu próprio pool de sockets). Reutilizar por IP permite
+// keep-alive e conexões paralelas ao mesmo host.
+const agentCache = new Map();
+const AGENT_CACHE_MAX = 256;
+
 function agentValidado(url, ipValido) {
   const family = isIP(ipValido);
+  const isHttps = url.startsWith("https:");
+  const cacheKey = `${isHttps ? "https" : "http"}:${ipValido}`;
+  let agent = agentCache.get(cacheKey);
+  if (agent) return agent;
   const opts = {
     // Sobrescreve o lookup padrao do Node: ignora o hostname da URL e
     // retorna sempre o IP que ja validamos. O fetch nunca resolve DNS.
@@ -1447,8 +1454,23 @@ function agentValidado(url, ipValido) {
         callback(null, ipValido, family);
       }
     },
+    // Aumenta o limite de sockets por host: o padrão do Node é 5, o que
+    // limita a concorrência ao mesmo host. Com 16, permitimos mais conexões
+    // paralelas sem esgotar file descriptors.
+    maxSockets: 16,
+    maxFreeSockets: 8,
+    keepAlive: true,
+    keepAliveMsecs: 30000,
   };
-  return url.startsWith("https:") ? new https.Agent(opts) : new http.Agent(opts);
+  agent = isHttps ? new https.Agent(opts) : new http.Agent(opts);
+  if (agentCache.size >= AGENT_CACHE_MAX) {
+    const maisAntigo = agentCache.keys().next().value;
+    const old = agentCache.get(maisAntigo);
+    agentCache.delete(maisAntigo);
+    try { old.destroy(); } catch { /* ja destruido */ }
+  }
+  agentCache.set(cacheKey, agent);
+  return agent;
 }
 
 const MAX_REDIRECTS = 5;
@@ -1927,14 +1949,9 @@ async function checarRobots(url) {
 }
 
 async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
-  // Valida ANTES de olhar o cache: uma URL bloqueada nunca pode ser servida
-  // (nem popular) o cache. Vale para todos os caminhos: read_page, crawl,
-  // sitemap, extract_links e extractEmbeddedData.
-  await assertPublicHost(url);
-  // O robots.txt entra no mesmo ponto (e pela mesma razao): URL proibida
-  // nao e servida do cache nem o popula. A verificacao e local (regex) e o
-  // robots.txt da origem fica cacheado com TTL.
-  await checarRobots(url);
+  // Cache hit ANTES da validacao de seguranca: se a URL ja esta no cache,
+  // ela ja passou pela validacao quando foi adicionada. Isso evita lookup
+  // DNS e busca de robots.txt para URLs em cache.
   const hit = pageCache.get(url);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     // LRU touch: reordena sem mexer no total de bytes.
@@ -1943,6 +1960,14 @@ async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, re
     return hit.payload;
   }
   if (hit) cacheDelete(url); // expirada: libera os bytes na hora
+  // Valida ANTES de baixar: uma URL bloqueada nunca pode ser servida
+  // (nem popular) o cache. Vale para todos os caminhos: read_page, crawl,
+  // sitemap, extract_links e extractEmbeddedData.
+  await assertPublicHost(url);
+  // O robots.txt entra no mesmo ponto (e pela mesma razao): URL proibida
+  // nao e servida do cache nem o popula. A verificacao e local (regex) e o
+  // robots.txt da origem fica cacheado com TTL.
+  await checarRobots(url);
   // Todo download de pagina passa pelo limitador de saida: e o que impede
   // 10 mil requisicoes simultaneas de abrirem 10 mil downloads de ate 10 MB.
   // Fila cheia devolve erro claro em vez de acumular latencia sem limite.
