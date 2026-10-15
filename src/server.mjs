@@ -264,6 +264,7 @@ export function startStdio() {
  */
 export async function startHttp() {
   const port = Number(process.env.PORT) || 3000;
+  const host = process.env.HOST || undefined;
 
   const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 
@@ -525,7 +526,7 @@ export async function startHttp() {
   if (MAX_CONNECTIONS > 0) server.maxConnections = MAX_CONNECTIONS;
   servidorHttp = server;
 
-  server.listen(port, () => {
+  server.listen(port, host, () => {
     console.error(
       `[${SERVER_NAME}] v${SERVER_VERSION} no ar - modo HTTP (Render) na porta ${port} | ` +
         `admissão: ${MAX_INFLIGHT_REQUESTS}+${MAX_WAITING_REQUESTS} (espera ${MAX_WAIT_MS} ms) | ` +

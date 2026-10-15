@@ -26,7 +26,7 @@ export const PROTOCOL_VERSIONS = new Set([
 ]);
 
 // Timeout padrão de cada requisição HTTP.
-export const DEFAULT_TIMEOUT_MS = 2500;
+export const DEFAULT_TIMEOUT_MS = 1500;
 
 // Tetos de saída de texto.
 export const DEFAULT_MAX_CHARS = 4000;
@@ -45,12 +45,12 @@ export const MAX_RESPONSE_BYTES = Math.max(
 // 32 permite que read_multiple_pages e crawl_token processem lotes maiores sem travar.
 export const FETCH_CONCURRENCY = Math.max(
   1,
-  Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 16))
+  Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 32))
 );
 
 // Busca automática de APIs internas.
 export const API_MAX_CANDIDATES = Math.max(0, Math.floor(Number(process.env.API_MAX_CANDIDATES || 2)));
-export const API_TOTAL_BUDGET_MS = Math.max(250, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 2500));
+export const API_TOTAL_BUDGET_MS = Math.max(250, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 1500));
 
 // Controle de admissão HTTP.
 export const MAX_INFLIGHT_REQUESTS = clampEnv(process.env.MAX_INFLIGHT_REQUESTS, 128, 1, 100000);

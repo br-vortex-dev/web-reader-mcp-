@@ -9,17 +9,16 @@
  */
 
 import { spawn } from "node:child_process";
-import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const PORT = 5847;
-const BASE = `http://localhost:${PORT}`;
+const PORT = 5900 + Math.floor(Math.random() * 500);
+const BASE = `http://127.0.0.1:${PORT}`;
 const LOG_PREFIX = "[live-test]";
 
 // Sobe o servidor MCP em modo HTTP.
 const proc = spawn(`"${process.execPath}" server.js --http`, {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(PORT) },
+  env: { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" },
   stdio: ["ignore", "pipe", "pipe"],
   shell: true,
 });
@@ -28,14 +27,10 @@ let logBuf = "";
 proc.stdout.on("data", (d) => (logBuf += d));
 proc.stderr.on("data", (d) => (logBuf += d));
 
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let data = "";
-      res.on("data", (d) => (data += d));
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
-    }).on("error", reject);
-  });
+async function httpGet(url) {
+  const res = await fetch(url);
+  const body = await res.text();
+  return { status: res.status, body };
 }
 
 function httpPost(url, body) {
@@ -60,7 +55,9 @@ async function waitHealth() {
     try {
       const r = await httpGet(`${BASE}/health`);
       if (r.status === 200) return JSON.parse(r.body);
-    } catch { /* ainda não subiu */ }
+    } catch (e) {
+      if (i === 0) console.log(`${LOG_PREFIX} health check erro:`, e.message, e.cause?.message || "");
+    }
     await sleep(250);
   }
   throw new Error(`servidor não subiu na porta ${PORT}`);
