@@ -128,7 +128,7 @@ test("nao busca /api de host interno (bloqueio antes de qualquer candidato)", { 
     const url = paginaCom(["/api/probe/um", "/api/probe/dois"]);
     const r = await mcp.call("read_page", { url, maxChars: 2000, timeoutMs: 3000 });
     assert.equal(r.isError, true, `deveria ser bloqueado: ${r.text}`);
-    assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+    assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
     assert.deepEqual(fixture.probes, [], `nenhum candidato deveria ser buscado: ${fixture.probes.join(", ")}`);
   } finally {
     mcp.close();

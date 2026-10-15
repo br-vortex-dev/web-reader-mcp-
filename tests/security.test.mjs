@@ -49,7 +49,7 @@ test("bloqueia hosts privados/internos (ALLOW_PRIVATE_HOSTS desligado)", { timeo
     assert.equal(r.isError, true, `deveria bloquear ${rotulo} (${url})`);
     assert.match(
       r.text,
-      /Host bloqueado: endereco privado\/interno/,
+      /Host bloqueado: endereço privado\/interno/,
       `mensagem inesperada para ${rotulo}: ${r.text}`
     );
   }
@@ -65,13 +65,13 @@ test("a guarda vale para todos os caminhos de saida, nao so read_page", { timeou
   ];
   for (const [nome, args] of casos) {
     const r = await mcpBloqueando.call(nome, args);
-    assert.match(r.text, /Host bloqueado: endereco privado\/interno/, `${nome} deveria bloquear: ${r.text}`);
+    assert.match(r.text, /Host bloqueado: endereço privado\/interno/, `${nome} deveria bloquear: ${r.text}`);
   }
   // crawl_site: a URL inicial bloqueada e ERRO (nao "0 paginas lidas"), para a
   // IA nao confundir site bloqueado com site vazio.
   const crawl = await mcpBloqueando.call("crawl_site", { url: privada, maxPages: 2, timeoutMs: 3000 });
   assert.equal(crawl.isError, true, `crawl_site deveria ser erro: ${crawl.text}`);
-  assert.match(crawl.text, /Host bloqueado: endereco privado\/interno/, `crawl_site deveria citar o bloqueio: ${crawl.text}`);
+  assert.match(crawl.text, /Host bloqueado: endereço privado\/interno/, `crawl_site deveria citar o bloqueio: ${crawl.text}`);
 });
 
 test("ALLOW_PRIVATE_HOSTS=1 libera o host local (escape hatch de dev/testes)", { timeout: 30000 }, async () => {
@@ -91,13 +91,13 @@ test("segue redirects normais ate 5 saltos, resolvendo Location relativo", { tim
 test("recusa cadeia de redirects acima de 5 saltos", { timeout: 30000 }, async () => {
   const r = await mcpLocal.call("read_page", { url: `${fixture.url}/chain/9`, maxChars: 500 });
   assert.equal(r.isError, true, "deveria recusar 9 saltos");
-  assert.match(r.text, /Redirects em excesso/);
+  assert.match(r.text, /Redirect inválido: excesso de saltos/);
 });
 
 test("recusa redirect para protocolo nao suportado", { timeout: 30000 }, async () => {
   const r = await mcpLocal.call("read_page", { url: `${fixture.url}/redirect-to-file`, maxChars: 500 });
   assert.equal(r.isError, true, "deveria recusar redirect para file:");
-  assert.match(r.text, /Redirect para protocolo nao suportado/);
+  assert.match(r.text, /Redirect inválido: protocolo não suportado/);
 });
 
 // Este e o unico caso que precisa de um host PUBLICO que redirecione para um IP
@@ -123,7 +123,7 @@ test("redirect de host publico para IP interno e bloqueado", { timeout: 60000 },
 
   const r = await mcpBloqueando.call("read_page", { url, maxChars: 300, timeoutMs: 20000 });
   assert.equal(r.isError, true, `deveria bloquear o salto para 127.0.0.1: ${r.text}`);
-  assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+  assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
 });
 
 /* ---------------------------- rate limit -------------------------------- */

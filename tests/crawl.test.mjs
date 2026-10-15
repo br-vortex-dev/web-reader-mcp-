@@ -32,21 +32,21 @@ after(async () => {
 test("crawl_site com a URL inicial bloqueada devolve isError", { timeout: 60000 }, async () => {
   const r = await mcpBloqueando.call("crawl_site", { url: `${fixture.url}/`, maxPages: 3, timeoutMs: 3000 });
   assert.equal(r.isError, true, `crawl_site deveria ser erro: ${r.text}`);
-  assert.match(r.text, /Nao foi possivel iniciar o crawl/);
-  assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+  assert.match(r.text, /Não foi possível iniciar o crawl/);
+  assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
   assert.doesNotMatch(r.text, /0 paginas lidas/);
 });
 
 test("discover_urls com a URL inicial bloqueada devolve isError", { timeout: 60000 }, async () => {
   const r = await mcpBloqueando.call("discover_urls", { url: `${fixture.url}/`, limit: 5, timeoutMs: 3000 });
   assert.equal(r.isError, true, `discover_urls deveria ser erro: ${r.text}`);
-  assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+  assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
 });
 
 test("extract_links com a URL inicial bloqueada devolve isError", { timeout: 60000 }, async () => {
   const r = await mcpBloqueando.call("extract_links", { url: `${fixture.url}/`, timeoutMs: 3000 });
   assert.equal(r.isError, true, `extract_links deveria ser erro: ${r.text}`);
-  assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+  assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
 });
 
 test("crawl_site com erro de DNS devolve isError", { timeout: 60000 }, async () => {
@@ -56,7 +56,7 @@ test("crawl_site com erro de DNS devolve isError", { timeout: 60000 }, async () 
     timeoutMs: 5000,
   });
   assert.equal(r.isError, true, `deveria ser erro: ${r.text}`);
-  assert.match(r.text, /Nao foi possivel iniciar o crawl/);
+  assert.match(r.text, /Não foi possível iniciar o crawl/);
 });
 
 /* --------------------------- crawl parcial ------------------------------ */
@@ -76,7 +76,7 @@ test("crawl com falhas parciais continua e resume os motivos", { timeout: 60000 
   assert.match(cabecalho, /RESULTADO PARCIAL: 3 pagina\(s\) falharam/, cabecalho);
   assert.match(cabecalho, /1 com HTTP 404/, cabecalho);
   assert.match(cabecalho, /1 com timeout/, cabecalho);
-  assert.match(cabecalho, /1 com conteudo nao-HTML/, cabecalho);
+  assert.match(cabecalho, /1 com conteúdo não-HTML/, cabecalho);
 
   // Cada falha isolada aparece rotulada, com a URL.
   assert.match(r.text, /# Erro ao ler .*\/crawl\/erro404/);
@@ -136,7 +136,7 @@ test("read_multiple_pages rotula cada falha individual sem derrubar a chamada", 
   // Mas cada falha aparece rotulada como erro.
   const marcadores = r.text.match(/# Erro ao ler /g) || [];
   assert.equal(marcadores.length, 3, `cada falha deveria estar rotulada: ${r.text}`);
-  assert.match(r.text, /Host bloqueado: endereco privado\/interno/);
+  assert.match(r.text, /Host bloqueado: endereço privado\/interno/);
 });
 
 /* ------------- dedupe + teto de saida somada (read_multiple) ----------- */

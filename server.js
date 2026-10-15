@@ -28,6 +28,291 @@ const DEFAULT_TIMEOUT_MS = 25000;
 const DEFAULT_MAX_CHARS = 8000;
 const HARD_MAX_CHARS = 50000;
 const MAX_PAGES_PER_CALL = 30;
+
+/* ===================================================================== *
+ * Classes de Erro Customizadas                                          *
+ *                                                                       *
+ * Padroniza as mensagens de erro e facilita a classificação automática *
+ * de falhas. Cada tipo de erro tem sua classe com propriedades          *
+ * específicas (status HTTP, URL, host, etc).                            *
+ * ===================================================================== */
+
+/**
+ * Erro base do servidor web-reader.
+ * Todas as outras classes de erro herdam desta.
+ */
+class WebReaderError extends Error {
+  constructor(message, options = {}) {
+    super(message);
+    this.name = "WebReaderError";
+    this.code = options.code || "UNKNOWN_ERROR";
+    this.url = options.url || null;
+    this.host = options.host || null;
+    this.retryAfterMs = options.retryAfterMs || null;
+    this.cause = options.cause || null;
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+/**
+ * Erro de validação de URL (formato inválido, protocolo não suportado).
+ */
+class UrlInvalidaError extends WebReaderError {
+  constructor(url, motivo = "formato inválido") {
+    super(`URL inválida: ${url} (${motivo})`, {
+      code: "URL_INVALIDA",
+      url,
+    });
+    this.name = "UrlInvalidaError";
+  }
+}
+
+/**
+ * Erro de protocolo não suportado (diferente de http/https).
+ */
+class ProtocoloNaoSuportadoError extends WebReaderError {
+  constructor(protocolo, url) {
+    super(`Protocolo não suportado (${protocolo}). Use http/https.`, {
+      code: "PROTOCOLO_NAO_SUPORTADO",
+      url,
+    });
+    this.name = "ProtocoloNaoSuportadoError";
+  }
+}
+
+/**
+ * Erro de host bloqueado (endereço privado/interno — proteção SSRF).
+ */
+class HostBloqueadoError extends WebReaderError {
+  constructor(host, endereco) {
+    super(`Host bloqueado: endereço privado/interno (${endereco})`, {
+      code: "HOST_BLOQUEADO",
+      host,
+    });
+    this.name = "HostBloqueadoError";
+  }
+}
+
+/**
+ * Erro de resolução DNS (host não encontrado).
+ */
+class HostNaoResolvidoError extends WebReaderError {
+  constructor(host) {
+    super(`Não foi possível resolver o host: ${host}`, {
+      code: "HOST_NAO_RESOLVIDO",
+      host,
+    });
+    this.name = "HostNaoResolvidoError";
+  }
+}
+
+/**
+ * Erro de redirect (excesso de saltos ou Location inválido).
+ */
+class RedirectError extends WebReaderError {
+  constructor(motivo, url) {
+    super(`Redirect inválido: ${motivo}`, {
+      code: "REDIRECT_ERRO",
+      url,
+    });
+    this.name = "RedirectError";
+  }
+}
+
+/**
+ * Erro de resposta HTTP (status 4xx/5xx).
+ */
+class HttpError extends WebReaderError {
+  constructor(status, statusText, url, retryAfterMs = null) {
+    super(`HTTP ${status} ${statusText} ao acessar ${url}`, {
+      code: `HTTP_${status}`,
+      url,
+      retryAfterMs,
+    });
+    this.name = "HttpError";
+    this.status = status;
+    this.statusText = statusText;
+  }
+}
+
+/**
+ * Erro de conteúdo não-HTML (content-type inesperado).
+ */
+class ConteudoNaoHtmlError extends WebReaderError {
+  constructor(contentType, url) {
+    super(
+      contentType
+        ? `O conteúdo retornado não é HTML (content-type: ${contentType})`
+        : "A resposta não parece ser HTML.",
+      {
+        code: "CONTEUDO_NAO_HTML",
+        url,
+      }
+    );
+    this.name = "ConteudoNaoHtmlError";
+    this.contentType = contentType;
+  }
+}
+
+/**
+ * Erro de resposta muito grande (acima do limite configurado).
+ */
+class RespostaMuitoGrandeError extends WebReaderError {
+  constructor(maxBytes, url) {
+    super(`Resposta muito grande (acima de ${maxBytes} bytes, máximo ${MAX_RESPONSE_BYTES})`, {
+      code: "RESPOSTA_MUITO_GRANDE",
+      url,
+    });
+    this.name = "RespostaMuitoGrandeError";
+    this.maxBytes = maxBytes;
+  }
+}
+
+/**
+ * Erro de rede (fetch failed, timeout, conexão recusada).
+ */
+class RedeError extends WebReaderError {
+  constructor(mensagem, url, causa = null) {
+    super(mensagem, {
+      code: "REDE_ERRO",
+      url,
+      cause: causa,
+    });
+    this.name = "RedeError";
+  }
+}
+
+/**
+ * Erro de timeout (requisição excedeu o tempo limite).
+ */
+class TimeoutError extends WebReaderError {
+  constructor(url, timeoutMs) {
+    super(`Timeout após ${timeoutMs}ms ao acessar ${url}`, {
+      code: "TIMEOUT",
+      url,
+    });
+    this.name = "TimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Erro de requisição cancelada (orçamento esgotado).
+ */
+class RequisicaoCanceladaError extends WebReaderError {
+  constructor(motivo = "orçamento esgotado") {
+    super(`Requisição cancelada (${motivo}).`, {
+      code: "REQUISICAO_CANCELADA",
+    });
+    this.name = "RequisicaoCanceladaError";
+  }
+}
+
+/**
+ * Erro de bloqueio por robots.txt.
+ */
+class RobotsBloqueadoError extends WebReaderError {
+  constructor(host, pathname, regra) {
+    super(
+      `Bloqueado por robots.txt de ${host}: o caminho ${pathname} casa com "Disallow: ${regra}". ` +
+        `Defina ROBOTS_RESPECT=0 para ignorar o robots.txt.`,
+      {
+        code: "ROBOTS_BLOQUEADO",
+        host,
+      }
+    );
+    this.name = "RobotsBloqueadoError";
+    this.pathname = pathname;
+    this.regra = regra;
+  }
+}
+
+/**
+ * Erro de parâmetro inválido (argumentos da ferramenta).
+ */
+class ParametroInvalidoError extends WebReaderError {
+  constructor(parametro, motivo) {
+    super(`Parâmetro inválido '${parametro}': ${motivo}`, {
+      code: "PARAMETRO_INVALIDO",
+    });
+    this.name = "ParametroInvalidoError";
+    this.parametro = parametro;
+  }
+}
+
+/**
+ * Erro de limite excedido (máximo de URLs, caracteres, etc).
+ */
+class LimiteExcedidoError extends WebReaderError {
+  constructor(recurso, limite, recebido) {
+    super(
+      `Limite excedido para ${recurso}: ${recebido} (máximo ${limite}). ` +
+        `Divida em várias chamadas.`,
+      {
+        code: "LIMITE_EXCEDIDO",
+      }
+    );
+    this.name = "LimiteExcedidoError";
+    this.recurso = recurso;
+    this.limite = limite;
+    this.recebido = recebido;
+  }
+}
+
+/**
+ * Erro de ferramenta desconhecida.
+ */
+class FerramentaDesconhecidaError extends WebReaderError {
+  constructor(nome) {
+    super(`Ferramenta desconhecida: ${nome}`, {
+      code: "FERRAMENTA_DESCONHECIDA",
+    });
+    this.name = "FerramentaDesconhecidaError";
+    this.nome = nome;
+  }
+}
+
+/**
+ * Erro de servidor ocupado (fila cheia).
+ */
+class ServidorOcupadoError extends WebReaderError {
+  constructor(nome, ativos, fila) {
+    super(
+      `Servidor ocupado (${nome}): ${ativos} em andamento e ${fila} na fila. Tente de novo em instantes.`,
+      {
+        code: "SERVIDOR_OCUPADO",
+      }
+    );
+    this.name = "ServidorOcupadoError";
+  }
+}
+
+/**
+ * Erro de corpo muito grande (requisição HTTP).
+ */
+class CorpoMuitoGrandeError extends WebReaderError {
+  constructor(maxBytes) {
+    super(`Corpo muito grande (máximo ${maxBytes} bytes).`, {
+      code: "CORPO_MUITO_GRANDE",
+    });
+    this.name = "CorpoMuitoGrandeError";
+    this.maxBytes = maxBytes;
+    this.status = 413;
+  }
+}
+
+/**
+ * Erro de crawl (falha ao iniciar ou executar).
+ */
+class CrawlError extends WebReaderError {
+  constructor(url, causa) {
+    super(`Não foi possível iniciar o crawl em ${url}: ${causa}`, {
+      code: "CRAWL_ERRO",
+      url,
+    });
+    this.name = "CrawlError";
+  }
+}
 // Teto de download por requisicao. Configuravel, mas o padrao de 10 MB e o que
 // garante ler paginas grandes legitimas (Wikipedia, documentacao longa).
 const MAX_RESPONSE_BYTES = Math.max(
@@ -182,9 +467,7 @@ function criarLimitadorDeBytes({ orcamentoBytes, filaMax, nome, esperaMaxMs = 0 
   };
 
   const ocupado = () =>
-    new Error(
-      `Servidor ocupado (${nome}): ${usado} de ${orcamentoBytes} bytes reservados. Tente de novo em instantes.`
-    );
+    new ServidorOcupadoError(nome, usado, fila.tamanho);
 
   const ajustar = (bytes) => Math.max(1, Math.min(bytes, orcamentoBytes));
 
@@ -260,7 +543,7 @@ function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
   };
 
   const ocupado = () =>
-    new Error(`Servidor ocupado (${nome}): ${ativos} em andamento e ${fila.tamanho} na fila. Tente de novo em instantes.`);
+    new ServidorOcupadoError(nome, ativos, fila.tamanho);
 
   const atender = () => {
     const item = fila.shift();
@@ -593,6 +876,10 @@ function htmlToMarkdown(html, baseUrl) {
   let tableRow = null;
   let tableCell = null;
 
+  // Deduplicação de blocos de código: se o bloco atual é idêntico ao anterior,
+  // suprime. Resolve o caso do react.dev que entrega o mesmo código duas vezes.
+  let ultimoBlocoCodigo = null;
+
   // Com uma celula aberta o texto vai para ela; sem celula, vai para a saida.
   const emit = (chunk) => {
     if (tableCell) tableCell.text += chunk;
@@ -664,10 +951,17 @@ function htmlToMarkdown(html, baseUrl) {
       if (preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
       if (!token.selfClosing) openStack.push(token.tag);
       switch (token.tag) {
-        case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
-          // Marca o início do cabeçalho para filtrar [editar]/¶ depois
+        case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": {
+          // Manchete engaiolada: se um link está aberto, fecha ele antes do
+          // cabeçalho — o título fica fora do colchete: ## Título\n\n[link](url)
+          if (aStack.length > 0) {
+            const href = aStack.pop();
+            if (href) emit(`](${href})`);
+            emit("\n\n");
+          }
           emit("\n\n" + "#".repeat(Number(token.tag[1])) + " ");
           break;
+        }
         case "p": case "div": case "section": case "article": case "main":
         case "figure": case "figcaption": case "details": case "summary":
         case "ul": case "ol": case "dl":
@@ -829,13 +1123,24 @@ function htmlToMarkdown(html, baseUrl) {
       case "code":
         if (preDepth === 0) emit("`");
         break;
-      case "pre":
+      case "pre": {
         if (preDepth > 0) preDepth--;
         // O codigo quase sempre termina com quebras de linha; tira as que
         // sobram para o bloco nao sair com linhas em branco no fim.
         if (!tableCell) out = out.replace(/\n+$/, "");
+        // Deduplicação: se o bloco atual é idêntico ao anterior, suprime.
+        // resolve o caso do react.dev que entrega o mesmo código duas vezes
+        // (uma cópia do sandpack interativo, uma limpa).
+        const blocoAtual = out.slice(out.lastIndexOf("```\n") + 4);
+        if (blocoAtual === ultimoBlocoCodigo && blocoAtual.length > 0) {
+          out = out.slice(0, out.lastIndexOf("```\n"));
+          ultimoBlocoCodigo = null;
+        } else {
+          ultimoBlocoCodigo = blocoAtual;
+        }
         emit("\n```\n\n");
         break;
+      }
       default:
         break;
     }
@@ -962,10 +1267,10 @@ function validateHttpUrl(url) {
   try {
     parsed = new URL(String(url));
   } catch {
-    throw new Error(`URL invalida: ${url}`);
+    throw new UrlInvalidaError(url);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Protocolo nao suportado (${parsed.protocol}). Use http/https.`);
+    throw new ProtocoloNaoSuportadoError(parsed.protocol, url);
   }
   return parsed;
 }
@@ -1087,12 +1392,12 @@ async function assertPublicHost(url) {
   try {
     hostname = new URL(String(url)).hostname.replace(/^\[|\]$/g, "").toLowerCase();
   } catch {
-    throw new Error(`URL invalida: ${url}`);
+    throw new UrlInvalidaError(url);
   }
 
   const cached = hostCheckCache.get(hostname);
   if (cached && Date.now() - cached.at < HOST_CHECK_TTL_MS) {
-    if (cached.blocked) throw new Error(`Host bloqueado: endereco privado/interno (${cached.blocked})`);
+    if (cached.blocked) throw new HostBloqueadoError(hostname, ipv6ParaExibicao(cached.blocked));
     return;
   }
 
@@ -1103,10 +1408,10 @@ async function assertPublicHost(url) {
     try {
       addresses = (await lookup(hostname, { all: true })).map((entry) => entry.address);
     } catch {
-      throw new Error(`Nao foi possivel resolver o host: ${hostname}`);
+      throw new HostNaoResolvidoError(hostname);
     }
   }
-  if (addresses.length === 0) throw new Error(`Nao foi possivel resolver o host: ${hostname}`);
+  if (addresses.length === 0) throw new HostNaoResolvidoError(hostname);
 
   for (const address of addresses) {
     const blocked = blockedAddress(address);
@@ -1116,7 +1421,8 @@ async function assertPublicHost(url) {
         hostCheckCache.delete(hostCheckCache.keys().next().value);
       }
       // Mensagem curta e sem detalhes da rede interna, so o suficiente para a IA entender.
-      throw new Error(`Host bloqueado: endereco privado/interno (${blocked})`);
+      // ipv6ParaExibicao: mostra ::ffff:127.0.0.1 em vez de ::ffff:7f00:1.
+      throw new HostBloqueadoError(hostname, ipv6ParaExibicao(blocked));
     }
   }
   hostCheckCache.set(hostname, { at: Date.now(), blocked: null });
@@ -1146,20 +1452,20 @@ async function fetchNoRedirect(url, headers, signal) {
       // corpo do redirect irrelevante
     }
     if (hop === MAX_REDIRECTS) {
-      throw new Error(`Redirects em excesso (mais de ${MAX_REDIRECTS} saltos) ao acessar ${url}`);
+      throw new RedirectError(`excesso de saltos (mais de ${MAX_REDIRECTS})`, url);
     }
     let next;
     try {
       next = new URL(location, currentUrl); // resolve Location relativo
     } catch {
-      throw new Error(`Redirect com Location invalido em ${currentUrl}`);
+      throw new RedirectError(`Location inválido em ${currentUrl}`, currentUrl);
     }
     if (next.protocol !== "http:" && next.protocol !== "https:") {
-      throw new Error(`Redirect para protocolo nao suportado (${next.protocol}) em ${currentUrl}`);
+      throw new RedirectError(`protocolo não suportado (${next.protocol})`, currentUrl);
     }
     currentUrl = next.href;
   }
-  throw new Error(`Redirects em excesso (mais de ${MAX_REDIRECTS} saltos) ao acessar ${url}`);
+  throw new RedirectError(`excesso de saltos (mais de ${MAX_REDIRECTS})`, url);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1203,7 +1509,7 @@ async function readBodyWithLimit(res, maxBytes) {
         if (done) break;
         total += value.byteLength;
         if (total > maxBytes) {
-          throw new Error(`Resposta muito grande (acima de ${maxBytes} bytes, maximo ${MAX_RESPONSE_BYTES})`);
+          throw new RespostaMuitoGrandeError(maxBytes, res.url || "URL desconhecida");
         }
         chunks.push(Buffer.from(value));
       }
@@ -1234,8 +1540,11 @@ function erroComCausa(err) {
     return c.message || c.code || String(c);
   };
   const causa = descrever(err.cause);
-  const melhorado = new Error(causa ? `${err.message}: ${causa}` : err.message);
-  melhorado.cause = err.cause;
+  const melhorado = new RedeError(
+    causa ? `${err.message}: ${causa}` : err.message,
+    err.url || "URL desconhecida",
+    err.cause
+  );
   if (err.retryAfterMs != null) melhorado.retryAfterMs = err.retryAfterMs;
   return melhorado;
 }
@@ -1251,7 +1560,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
     if (externo) {
       if (externo.aborted) {
         clearTimeout(timer);
-        throw new Error("Requisicao cancelada (orcamento esgotado).");
+        throw new RequisicaoCanceladaError("orçamento esgotado");
       }
       externo.addEventListener("abort", abortarDeFora, { once: true });
     }
@@ -1278,8 +1587,7 @@ async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, sig
         const statusFrase = (res.statusText || "").replace(/\b([A-Z]{2,})\b/, (m) =>
           m.charAt(0) + m.slice(1).toLowerCase()
         );
-        const err = new Error(`HTTP ${res.status} ${statusFrase}`.trim() + ` ao acessar ${url}`);
-        err.status = res.status;
+        const err = new HttpError(res.status, statusFrase.trim(), url);
         err.retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
         throw err;
       }
@@ -1593,12 +1901,7 @@ async function checarRobots(url) {
   );
   if (!decisao.permite) {
     // Regra vencedora so bloqueia quando e Disallow (Allow implica permite).
-    const err = new Error(
-      `Bloqueado por robots.txt de ${alvo.host}: o caminho ${alvo.pathname} casa com ` +
-        `"Disallow: ${decisao.regra}". Defina ROBOTS_RESPECT=0 para ignorar o robots.txt.`
-    );
-    err.robots = true;
-    throw err;
+    throw new RobotsBloqueadoError(alvo.host, alvo.pathname, decisao.regra);
   }
 }
 
@@ -1670,12 +1973,12 @@ function formatReadResult({ finalUrl, meta, text, truncated, fullLength, extraLa
   return lines.join("\n");
 }
 
-function ensureHtml(contentType, html) {
+function ensureHtml(contentType, html, url = "URL desconhecida") {
   if (contentType && !/html|xml|text\//.test(contentType)) {
-    throw new Error(`O conteudo retornado nao e HTML (content-type: ${contentType})`);
+    throw new ConteudoNaoHtmlError(contentType, url);
   }
   if (!contentType && !/^\s*</.test(html)) {
-    throw new Error("A resposta nao parece ser HTML.");
+    throw new ConteudoNaoHtmlError(null, url);
   }
 }
 
@@ -1715,7 +2018,7 @@ async function toolReadPage(args) {
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml(contentType, html);
+  ensureHtml(contentType, html, finalUrl);
   // BUG-1: texto puro e XML voltam como vieram, com as quebras de linha.
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
@@ -1979,7 +2282,7 @@ async function toolReadDynamicPage(args) {
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml(contentType, html);
+  ensureHtml(contentType, html, finalUrl);
   // BUG-1: sitemap/feed/robots passados como "dinamicos" tambem voltam crus.
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
@@ -2057,7 +2360,7 @@ async function toolExtractLinks(args) {
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html);
+  ensureHtml("", html, finalUrl);
   const all = extractLinks(html, finalUrl);
   const shown = all.slice(0, limit);
   const lines = [`Links em ${finalUrl}: ${all.length} encontrados, exibindo ${shown.length}.`, ""];
@@ -2071,7 +2374,7 @@ async function toolExtractLinks(args) {
 async function readOnePage(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml(contentType, html);
+  ensureHtml(contentType, html, finalUrl);
   // BUG-1: mesma regra do read_page — texto puro/XML volta cru.
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
@@ -2095,12 +2398,9 @@ const MULTI_MAX_TOTAL_CHARS = Math.max(
 
 async function toolReadMultiplePages(args) {
   const urls = Array.isArray(args.urls) ? args.urls.map((u) => String(u)) : [];
-  if (urls.length === 0) throw new Error("Informe uma lista de URLs no parametro 'urls'.");
+  if (urls.length === 0) throw new ParametroInvalidoError("urls", "informe uma lista de URLs");
   if (urls.length > MAX_PAGES_PER_CALL) {
-    throw new Error(
-      `Maximo de ${MAX_PAGES_PER_CALL} URLs por chamada (recebi ${urls.length}). ` +
-        "Divida em varias chamadas."
-    );
+    throw new LimiteExcedidoError("URLs", MAX_PAGES_PER_CALL, urls.length);
   }
   const maxChars = clampMaxChars(args.maxChars ?? 4000);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -2237,7 +2537,7 @@ async function toolDiscoverUrls(args) {
 
   // fallback: links internos da home
   const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html);
+  ensureHtml("", html, finalUrl);
   const internos = extractLinks(html, finalUrl).filter((l) => l.internal);
   const mostrados = internos.slice(0, limite);
   if (mostrados.length === 0) {
@@ -2294,17 +2594,17 @@ function classifyFetchError(err) {
   const msg = String((err && err.message) || "");
   const code = String((err && err.cause && err.cause.code) || "");
   const texto = `${msg} ${code}`;
-  if (/Host bloqueado/.test(msg)) return "bloqueadas por endereco privado/interno";
-  if (/Redirects em excesso/.test(msg)) return "com redirects em excesso";
+  if (/Host bloqueado/.test(msg)) return "bloqueadas por endereço privado/interno";
+  if (/Redirect inválido: excesso de saltos/.test(msg)) return "com redirects em excesso";
   if (/Resposta muito grande/.test(msg)) return "com resposta grande demais";
   if (/aborted|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|TimeoutError|timeout/i.test(texto)) return "com timeout";
-  if (/ENOTFOUND|EAI_AGAIN|nao resolvido/i.test(texto)) return "com host nao resolvido (DNS)";
+  if (/ENOTFOUND|EAI_AGAIN|não foi possível resolver o host/i.test(texto)) return "com host não resolvido (DNS)";
   if (/ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|UND_ERR_SOCKET/i.test(texto)) {
-    return "com conexao recusada/interrompida";
+    return "com conexão recusada/interrompida";
   }
   const http = msg.match(/HTTP (\d{3})/);
   if (http) return `com HTTP ${http[1]}`;
-  if (/nao e HTML|nao parece ser HTML/.test(msg)) return "com conteudo nao-HTML";
+  if (/não é HTML|não parece ser HTML/.test(msg)) return "com conteúdo não-HTML";
   return "com outros erros";
 }
 
@@ -2313,7 +2613,7 @@ function classifyFetchError(err) {
 async function crawlOnePage(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml(contentType, html);
+  ensureHtml(contentType, html, finalUrl);
   // BUG-1: pagina do crawl que for texto puro/XML volta cru tambem.
   if (isConteudoBruto(contentType, html)) {
     // BUG-10: devolver { linksInternos } aqui quebrava o toolCrawlSite, que
@@ -2372,7 +2672,7 @@ async function toolCrawlSite(args) {
       }
     }
   } catch (err) {
-    throw new Error(`Nao foi possivel iniciar o crawl em ${start.href}: ${err.message}`);
+    throw new CrawlError(start.href, err.message);
   }
 
   const CONCURRENCY = FETCH_CONCURRENCY;
@@ -2445,7 +2745,7 @@ async function callTool(name, args) {
     case "read_dynamic_page":
       return await toolReadDynamicPage(args || {});
     default:
-      throw new Error(`Ferramenta desconhecida: ${name}`);
+      throw new FerramentaDesconhecidaError(name);
   }
 }
 
@@ -2765,8 +3065,7 @@ async function startHttp() {
         size += c.length;
         if (size > MAX_BODY_BYTES) {
           encerrado = true;
-          const err = new Error(`Corpo muito grande (maximo ${MAX_BODY_BYTES} bytes).`);
-          err.status = 413;
+          const err = new CorpoMuitoGrandeError(MAX_BODY_BYTES);
           req.pause(); // para de acumular; a conexao e descartada depois da resposta
           reject(err);
           return;
