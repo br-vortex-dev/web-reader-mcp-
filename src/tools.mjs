@@ -421,10 +421,14 @@ export async function toolReadMultiplePages(args) {
   const secoes = [];
   let total = 0;
   let omitidas = 0;
+  const primeiraPosicao = new Map();
   urls.forEach((u, pos) => {
-    const primeiraVez = pos === urls.indexOf(u);
+    if (!primeiraPosicao.has(u)) primeiraPosicao.set(u, pos);
+  });
+  urls.forEach((u, pos) => {
+    const primeiraVez = pos === primeiraPosicao.get(u);
     if (!primeiraVez) {
-      secoes.push(`(URL repetida — mesma leitura da seção ${urls.indexOf(u) + 1} acima)`);
+      secoes.push(`(URL repetida — mesma leitura da seção ${primeiraPosicao.get(u) + 1} acima)`);
       return;
     }
     const r = lidos[indice.get(u)];
@@ -439,7 +443,7 @@ export async function toolReadMultiplePages(args) {
     secoes.push(texto);
   });
 
-  const ok = urls.filter((u, pos) => pos === urls.indexOf(u) && lidos[indice.get(u)].ok).length;
+  const ok = unicas.filter((u) => lidos[indice.get(u)].ok).length;
   const resumo = [
     `Leitura concluida: ${ok}/${unicas.length} paginas OK (lidas em lotes de ${CONCURRENCY}).`,
     duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez so.` : "",

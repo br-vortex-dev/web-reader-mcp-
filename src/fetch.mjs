@@ -448,33 +448,11 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
 
 /**
  * Fetch com cache LRU + TTL. Valida segurança (SSRF + robots) ANTES de baixar.
- * O cache roda com staleWhileRevalidate DESLIGADO (o padrão), então entrada
- * expirada = busca de novo; o ramo `hit.stale` abaixo só é exercido se alguém
- * ligar o stale-while-revalidate na construção do cache.
+ * Entrada expirada = busca de novo (stale-while-revalidate desligado).
  */
 export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   const hit = pageCache.get(url);
-  if (hit) {
-    if (hit.stale) {
-      // Servir imediatamente e atualizar em background
-      const urlSegura = url;
-      const opts = { timeoutMs, signal, retries };
-      setImmediate(async () => {
-        try {
-          await assertPublicHost(urlSegura);
-          await checarRobots(urlSegura);
-          const fresh = await limiteSaida.executar(() =>
-            fetchTextWithFallback(urlSegura, opts)
-          );
-          const b = payloadBytes(fresh);
-          if (b <= CACHE_MAX_ENTRY_BYTES) pageCache.set(urlSegura, fresh, b);
-        } catch {
-          // falha na atualização em background — a entrada stale continua disponível
-        }
-      });
-    }
-    return hit.payload;
-  }
+  if (hit) return hit.payload;
 
   await Promise.all([assertPublicHost(url), checarRobots(url)]);
 

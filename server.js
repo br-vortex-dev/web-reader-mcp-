@@ -15,7 +15,7 @@
  *   read_dynamic_page(url)    -> lê páginas que dependem de JavaScript (sem Playwright)
  */
 
-import { SERVER_NAME, SERVER_VERSION, ALLOW_PRIVATE_HOSTS } from "./src/config.mjs";
+import { SERVER_NAME, ALLOW_PRIVATE_HOSTS } from "./src/config.mjs";
 import { startStdio, startHttp, encerrarPorErro } from "./src/server.mjs";
 
 if (ALLOW_PRIVATE_HOSTS) {

@@ -53,19 +53,22 @@ sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda onze arquivos em `tests/` (97 testes, ~35 s, sem rede na maioria):
+Roda onze arquivos em `tests/` (10 suítes + 1 helpers, ~35 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
 | `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos) e rate limit (não burlável por `x-forwarded-for`) |
+| `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
 | `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração |
+| `tests/campo-fixes.test.mjs` | regressões dos bugs encontrados na rodada de campo (fidelidade de conteúdo, charset, tabelas) |
 | `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
 | `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
 | `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |
 | `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
 | `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
+| `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
 
 Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
 servidor de fixture local com as páginas de teste. Os testes que precisam do
@@ -229,7 +232,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 67108864 bytes (max 100 entradas, ttl 10 min)`.
+   `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção.
@@ -492,9 +495,9 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
   para caber com folga:
   - cache: `CACHE_MAX_BYTES` (32 MB) — é o teto real; a contagem de 100 entradas
     é o segundo teto.
-  - download por requisição: `MAX_RESPONSE_BYTES` (10 MB), lido em **streaming**
+  - download por requisição: `MAX_RESPONSE_BYTES` (5 MB), lido em **streaming**
     com corte (não carrega a resposta inteira antes de conferir).
-  - pico simultâneo: 12 requisições em paralelo × 10 MB = 120 MB transitórios.
+  - pico simultâneo: 32 requisições em paralelo × 5 MB = 160 MB transitórios.
   - Se subir `FETCH_CONCURRENCY` ou `MAX_RESPONSE_BYTES`, refaça essa conta.
 - **Sem navegador, por escolha**: `read_dynamic_page` não usa Playwright nem
   Chromium (o plano free não tem RAM para isso, e o deploy continua sem build).
