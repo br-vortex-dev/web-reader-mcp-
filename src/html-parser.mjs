@@ -214,258 +214,354 @@ function cleanMarkdown(text) {
   return cleaned.replace(/\u0000(\d+)\u0000/g, (_, index) => blocks[Number(index)]);
 }
 
+/* ===================================================================== *
+ * Tabelas                                                                 *
+ * ===================================================================== */
+
+/** Monta a linha markdown de uma linha de células, preenchendo as faltantes. */
+function linhaDeTabela(cells, cols, celula) {
+  const partes = [];
+  for (let c = 0; c < cols; c++) partes.push(celula(cells[c]));
+  return `| ${partes.join(" | ")} |`;
+}
+
+/**
+ * Renderiza as linhas de uma tabela em markdown GFM.
+ * Linhas sem células são descartadas; o número de colunas é o maior entre as
+ * linhas válidas (colspan vira uma célula a mais).
+ */
+function renderTable(rows) {
+  const validas = rows.filter((row) => row.cells.length > 0);
+  if (validas.length === 0) return "";
+  const cols = Math.max(...validas.map((row) => row.cells.length));
+  const celula = (cell) =>
+    String(cell ? cell.text : "")
+      .replace(/\s+/g, " ")
+      .replace(/\|/g, "\\|")
+      .trim();
+  const linhas = [
+    linhaDeTabela(validas[0].cells, cols, celula),
+    `| ${Array.from({ length: cols }, () => "---").join(" | ")} |`,
+  ];
+  for (let r = 1; r < validas.length; r++) linhas.push(linhaDeTabela(validas[r].cells, cols, celula));
+  return "\n\n" + linhas.join("\n") + "\n\n";
+}
+
+/* ===================================================================== *
+ * Estado da conversão                                                     *
+ * ===================================================================== */
+
+/**
+ * Estado mutável da conversão: saída acumulada, profundidades de skip/pre,
+ * pilhas de tags abertas, de links e de blocos aria-hidden, e a tabela em
+ * montagem. As ações recebem o estado e o emitem texto por `emit`.
+ */
+function criarEstadoConversao() {
+  return {
+    out: "",
+    skipDepth: 0,
+    preDepth: 0,
+    openStack: [],
+    aStack: [],
+    ariaHiddenStack: [],
+    tableDepth: 0,
+    tableRows: [],
+    tableRow: null,
+    tableCell: null,
+    ultimoBlocoCodigo: null,
+    emit(chunk) {
+      if (this.tableCell) this.tableCell.text += chunk;
+      else this.out += chunk;
+    },
+  };
+}
+
+/* ===================================================================== *
+ * Texto                                                                   *
+ * ===================================================================== */
+
+/**
+ * Normaliza um texto simples: decodifica entidades e, fora de <pre>, remove
+ * o "[editar]" da Wikipédia, o "¶" e colapsa espaços.
+ */
+function textoNormalizado({ token, preDepth }) {
+  if (!token) return "";
+  let decoded = token.raw ? token.value : decodeEntities(token.value);
+  if (preDepth === 0) {
+    decoded = decoded
+      .replace(/\[editar[^\]]*\]/g, "")
+      .replace(/¶/g, "")
+      .replace(/\s+/g, " ");
+  }
+  return decoded;
+}
+
+/* ===================================================================== *
+ * Ações por categoria de tag                                              *
+ * ===================================================================== */
+
+const TAGS_BLOCOS_FECHO = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "p", "div", "section", "article", "main",
+  "ul", "ol", "dl", "blockquote",
+  "figure", "figcaption", "details",
+]);
+
+/** Cabeçalhos: fecham o link aberto, depois abrem o título. */
+function abrirCabecalho(st, tag, emit) {
+  if (st.aStack.length > 0) {
+    const href = st.aStack.pop();
+    if (href) emit(`](${href})`);
+    emit("\n\n");
+  }
+  emit("\n\n" + "#".repeat(Number(tag[1])) + " ");
+}
+
+/** Listas: marcador de item. */
+function abrirLista(st, tag, emit) {
+  emit("- ");
+}
+
+/** Tabelas: abrem a linha e a célula. */
+function abrirTabela(st, tag, emit) {
+  if (tag === "table") {
+    if (st.tableDepth === 0) {
+      st.tableRows = [];
+      st.tableRow = null;
+      st.tableCell = null;
+    }
+    st.tableDepth++;
+  } else if (tag === "tr") {
+    if (st.tableDepth > 0) {
+      st.tableRow = { cells: [] };
+      st.tableCell = null;
+    } else {
+      emit("\n");
+    }
+  } else if (tag === "th" || tag === "td") {
+    if (st.tableDepth > 0) st.tableCell = { text: "" };
+    else emit(" ");
+  } else {
+    // caption/tbody/thead/tfoot fora de tabela
+    if (st.tableDepth === 0) emit("\n");
+  }
+}
+
+/** Links e imagens: abrem "[texto](" ou "![alt](src)". */
+function abrirLinkOuImagem(st, token, baseUrl, emit) {
+  const tag = token.tag;
+  if (tag === "a") {
+    const href = resolveUrl(token.attrs.href, baseUrl);
+    st.aStack.push(href);
+    if (href) emit("[");
+    return;
+  }
+  const src = resolveUrl(token.attrs.src, baseUrl);
+  const alt = (token.attrs.alt || "").trim();
+  if (src) {
+    const altLimitado = alt.length > 200 ? alt.slice(0, 200) + "…" : alt;
+    emit(`![${altLimitado}](${src})`);
+  }
+}
+
+/** Código: abre bloco em <pre> ou cercado inline. */
+function abrirCodigo(st, tag, emit) {
+  if (tag === "pre") {
+    st.preDepth++;
+    emit("\n\n```\n");
+  } else if (st.preDepth === 0) {
+    emit("`");
+  }
+}
+
+/** Fecho de cabeçalho/bloco/lista: quebras de linha. */
+function fecharBloco(st, tag, emit) {
+  emit("\n\n");
+}
+
+/** Fecho de item de lista. */
+function fecharLista(st, tag, emit) {
+  emit("\n");
+}
+
+/** Fecho de tabela: desce a profundidade e renderiza quando fecha a tabela. */
+function fecharTabela(st, tag, emit) {
+  if (tag === "table") {
+    if (st.tableDepth > 0) {
+      st.tableDepth--;
+      if (st.tableDepth === 0) {
+        st.out += renderTable(st.tableRows);
+        st.tableRows = [];
+        st.tableRow = null;
+        st.tableCell = null;
+      }
+    }
+    return;
+  }
+  if (tag === "tr") {
+    if (st.tableDepth > 0) {
+      if (st.tableRow && st.tableRow.cells.length > 0) st.tableRows.push(st.tableRow);
+      st.tableRow = null;
+      st.tableCell = null;
+    } else {
+      emit("\n");
+    }
+    return;
+  }
+  if (tag === "th" || tag === "td") {
+    if (st.tableDepth > 0) {
+      if (st.tableRow && st.tableCell) st.tableRow.cells.push(st.tableCell);
+      st.tableCell = null;
+    } else {
+      emit(" |");
+    }
+    return;
+  }
+  // caption/tbody/thead/tfoot fora de tabela
+  if (st.tableDepth === 0) emit("\n");
+}
+
+/** Fecho de link, inline e código. */
+function fecharInline(st, tag, emit) {
+  if (tag === "a") {
+    const href = st.aStack.pop();
+    if (href) emit(`](${href})`);
+    return;
+  }
+  if (tag === "code") {
+    if (st.preDepth === 0) emit("`");
+    return;
+  }
+  if (tag === "pre") {
+    if (st.preDepth > 0) st.preDepth--;
+    if (!st.tableCell) st.out = st.out.replace(/\n+$/, "");
+    const blocoAtual = st.out.slice(st.out.lastIndexOf("```\n") + 4);
+    if (blocoAtual === st.ultimoBlocoCodigo && blocoAtual.length > 0) {
+      st.out = st.out.slice(0, st.out.lastIndexOf("```\n"));
+      st.ultimoBlocoCodigo = null;
+    } else {
+      st.ultimoBlocoCodigo = blocoAtual;
+    }
+    emit("\n```\n\n");
+    return;
+  }
+  if (tag === "strong" || tag === "b") {
+    emit("**");
+    return;
+  }
+  if (tag === "em" || tag === "i") {
+    emit("*");
+  }
+}
+
+/* ===================================================================== *
+ * Conversão                                                               *
+ * ===================================================================== */
+
+/**
+ * Aplica o fecho de uma tag na pilha de tags abertas (ignora o que não casa).
+ */
+function fecharNaPilha(st, tag) {
+  for (let k = st.openStack.length - 1; k >= 0; k--) {
+    if (st.openStack[k] === tag) {
+      st.openStack.length = k;
+      break;
+    }
+  }
+}
+
 /**
  * Converte o HTML em markdown enxuto.
  */
 export function htmlToMarkdown(html, baseUrl) {
-  let out = "";
-  let skipDepth = 0;
-  let preDepth = 0;
-  const openStack = [];
-  const aStack = [];
-  const ariaHiddenStack = [];
-
-  let tableDepth = 0;
-  let tableRows = [];
-  let tableRow = null;
-  let tableCell = null;
-
-  let ultimoBlocoCodigo = null;
-
-  const emit = (chunk) => {
-    if (tableCell) tableCell.text += chunk;
-    else out += chunk;
-  };
-
-  const renderTable = (rows) => {
-    const validas = rows.filter((row) => row.cells.length > 0);
-    if (validas.length === 0) return "";
-    const cols = Math.max(...validas.map((row) => row.cells.length));
-    const celula = (cell) =>
-      String(cell ? cell.text : "")
-        .replace(/\s+/g, " ")
-        .replace(/\|/g, "\\|")
-        .trim();
-    const linha = (cells) => {
-      const partes = [];
-      for (let c = 0; c < cols; c++) partes.push(celula(cells[c]));
-      return `| ${partes.join(" | ")} |`;
-    };
-    const linhas = [
-      linha(validas[0].cells),
-      `| ${Array.from({ length: cols }, () => "---").join(" | ")} |`,
-    ];
-    for (let r = 1; r < validas.length; r++) linhas.push(linha(validas[r].cells));
-    return "\n\n" + linhas.join("\n") + "\n\n";
-  };
+  const st = criarEstadoConversao();
+  const emit = (chunk) => st.emit(chunk);
 
   for (const token of tokenize(html)) {
     const isSkipped = SKIP_TAGS.has(token.tag);
 
+    // ---- texto -------------------------------------------------------
     if (token.type === "text") {
-      if (skipDepth > 0) continue;
-      let decoded = token.raw ? token.value : decodeEntities(token.value);
-      if (preDepth === 0) {
-        decoded = decoded
-          .replace(/\[editar[^\]]*\]/g, "")
-          .replace(/¶/g, "")
-          .replace(/\s+/g, " ");
-      }
+      if (st.skipDepth > 0) continue;
+      const decoded = textoNormalizado({ token, preDepth: st.preDepth });
       if (!decoded) continue;
       emit(decoded);
       continue;
     }
 
+    // ---- abertura de tag --------------------------------------------
     if (token.type === "open") {
       const escondido = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
       if (isSkipped || escondido) {
         if (token.selfClosing) continue;
-        skipDepth++;
-        if (escondido) ariaHiddenStack.push(token.tag);
+        st.skipDepth++;
+        if (escondido) st.ariaHiddenStack.push(token.tag);
         continue;
       }
-      if (skipDepth > 0) continue;
-      if (preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
-      if (!token.selfClosing) openStack.push(token.tag);
-      switch (token.tag) {
-        case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": {
-          if (aStack.length > 0) {
-            const href = aStack.pop();
-            if (href) emit(`](${href})`);
-            emit("\n\n");
-          }
-          emit("\n\n" + "#".repeat(Number(token.tag[1])) + " ");
-          break;
-        }
-        case "p": case "div": case "section": case "article": case "main":
-        case "figure": case "figcaption": case "details": case "summary":
-        case "ul": case "ol": case "dl":
-          emit("\n");
-          break;
-        case "blockquote":
-          emit("\n> ");
-          break;
-        case "li":
-          emit("- ");
-          break;
-        case "table":
-          if (tableDepth === 0) {
-            tableRows = [];
-            tableRow = null;
-            tableCell = null;
-          }
-          tableDepth++;
-          break;
-        case "caption": case "tbody": case "thead": case "tfoot":
-          if (tableDepth === 0) emit("\n");
-          break;
-        case "tr":
-          if (tableDepth > 0) {
-            tableRow = { cells: [] };
-            tableCell = null;
-          } else {
-            emit("\n");
-          }
-          break;
-        case "th": case "td":
-          if (tableDepth > 0) tableCell = { text: "" };
-          else emit(" ");
-          break;
-        case "a": {
-          const href = resolveUrl(token.attrs.href, baseUrl);
-          aStack.push(href);
-          if (href) emit("[");
-          break;
-        }
-        case "strong": case "b":
-          emit("**");
-          break;
-        case "em": case "i":
-          emit("*");
-          break;
-        case "code":
-          if (preDepth === 0) emit("`");
-          break;
-        case "pre":
-          preDepth++;
-          emit("\n\n```\n");
-          break;
-        case "br":
-          emit(tableCell ? " " : "\n");
-          break;
-        case "hr":
-          emit("\n\n---\n\n");
-          break;
-        case "img": {
-          const src = resolveUrl(token.attrs.src, baseUrl);
-          const alt = (token.attrs.alt || "").trim();
-          if (src) {
-            const altLimitado = alt.length > 200 ? alt.slice(0, 200) + "…" : alt;
-            emit(`![${altLimitado}](${src})`);
-          }
-          break;
-        }
-        default:
-          break;
+      if (st.skipDepth > 0) continue;
+      if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
+      if (!token.selfClosing) st.openStack.push(token.tag);
+
+      const tag = token.tag;
+      if (/^h[1-6]$/.test(tag)) abrirCabecalho(st, tag, emit);
+      else if (tag === "p" || tag === "div" || tag === "section" || tag === "article" ||
+               tag === "main" || tag === "figure" || tag === "figcaption" ||
+               tag === "details" || tag === "summary" || tag === "ul" || tag === "ol" ||
+               tag === "dl") {
+        emit("\n");
+      } else if (tag === "blockquote") {
+        emit("\n> ");
+      } else if (tag === "li") {
+        abrirLista(st, tag, emit);
+      } else if (tag === "table" || tag === "tr" || tag === "th" || tag === "td" ||
+                 tag === "caption" || tag === "tbody" || tag === "thead" || tag === "tfoot") {
+        abrirTabela(st, tag, emit);
+      } else if (tag === "a" || tag === "img") {
+        abrirLinkOuImagem(st, token, baseUrl, emit);
+      } else if (tag === "strong" || tag === "b") {
+        emit("**");
+      } else if (tag === "em" || tag === "i") {
+        emit("*");
+      } else if (tag === "pre" || tag === "code") {
+        abrirCodigo(st, tag, emit);
+      } else if (tag === "br") {
+        emit(st.tableCell ? " " : "\n");
+      } else if (tag === "hr") {
+        emit("\n\n---\n\n");
       }
       continue;
     }
 
-    // token.type === "close"
-    const idxHidden = ariaHiddenStack.lastIndexOf(token.tag);
+    // ---- fechamento de tag ------------------------------------------
+    const idxHidden = st.ariaHiddenStack.lastIndexOf(token.tag);
     if (idxHidden !== -1) {
-      ariaHiddenStack.length = idxHidden;
-      if (skipDepth > 0) skipDepth--;
+      st.ariaHiddenStack.length = idxHidden;
+      if (st.skipDepth > 0) st.skipDepth--;
       continue;
     }
     if (isSkipped) {
-      if (skipDepth > 0) skipDepth--;
+      if (st.skipDepth > 0) st.skipDepth--;
       continue;
     }
-    if (skipDepth > 0) continue;
-    if (preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
-    for (let k = openStack.length - 1; k >= 0; k--) {
-      if (openStack[k] === token.tag) {
-        openStack.length = k;
-        break;
-      }
-    }
-    switch (token.tag) {
-      case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
-      case "p": case "div": case "section": case "article": case "main":
-      case "ul": case "ol": case "dl": case "blockquote":
-      case "figure": case "figcaption": case "details":
-        emit("\n\n");
-        break;
-      case "li":
-        emit("\n");
-        break;
-      case "table":
-        if (tableDepth > 0) {
-          tableDepth--;
-          if (tableDepth === 0) {
-            out += renderTable(tableRows);
-            tableRows = [];
-            tableRow = null;
-            tableCell = null;
-          }
-        }
-        break;
-      case "caption": case "tbody": case "thead": case "tfoot":
-        if (tableDepth === 0) emit("\n");
-        break;
-      case "tr":
-        if (tableDepth > 0) {
-          if (tableRow && tableRow.cells.length > 0) tableRows.push(tableRow);
-          tableRow = null;
-          tableCell = null;
-        } else {
-          emit("\n");
-        }
-        break;
-      case "th": case "td":
-        if (tableDepth > 0) {
-          if (tableRow && tableCell) tableRow.cells.push(tableCell);
-          tableCell = null;
-        } else {
-          emit(" |");
-        }
-        break;
-      case "a": {
-        const href = aStack.pop();
-        if (href) emit(`](${href})`);
-        break;
-      }
-      case "strong": case "b":
-        emit("**");
-        break;
-      case "em": case "i":
-        emit("*");
-        break;
-      case "code":
-        if (preDepth === 0) emit("`");
-        break;
-      case "pre": {
-        if (preDepth > 0) preDepth--;
-        if (!tableCell) out = out.replace(/\n+$/, "");
-        const blocoAtual = out.slice(out.lastIndexOf("```\n") + 4);
-        if (blocoAtual === ultimoBlocoCodigo && blocoAtual.length > 0) {
-          out = out.slice(0, out.lastIndexOf("```\n"));
-          ultimoBlocoCodigo = null;
-        } else {
-          ultimoBlocoCodigo = blocoAtual;
-        }
-        emit("\n```\n\n");
-        break;
-      }
-      default:
-        break;
+    if (st.skipDepth > 0) continue;
+    if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
+    fecharNaPilha(st, token.tag);
+
+    const tag = token.tag;
+    if (TAGS_BLOCOS_FECHO.has(tag)) fecharBloco(st, tag, emit);
+    else if (tag === "li") fecharLista(st, tag, emit);
+    else if (tag === "table" || tag === "tr" || tag === "th" || tag === "td" ||
+             tag === "caption" || tag === "tbody" || tag === "thead" || tag === "tfoot") {
+      fecharTabela(st, tag, emit);
+    } else if (tag === "a" || tag === "img" || tag === "strong" || tag === "b" ||
+               tag === "em" || tag === "i" || tag === "code" || tag === "pre") {
+      fecharInline(st, tag, emit);
     }
   }
 
-  if (tableDepth > 0) out += renderTable(tableRows);
+  if (st.tableDepth > 0) st.out += renderTable(st.tableRows);
 
-  let resultado = cleanMarkdown(out);
+  let resultado = cleanMarkdown(st.out);
   resultado = resultado
     .replace(/\[\s*\]/g, "")
     .replace(/\[\s*\n\s*\]/g, "")

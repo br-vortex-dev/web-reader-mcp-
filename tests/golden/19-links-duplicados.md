@@ -1,0 +1,1 @@
+[A](https://exemplo.com/a) e [A de novo](https://exemplo.com/a) e [B](https://exemplo.com/b)

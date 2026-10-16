@@ -55,7 +55,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda quinze arquivos em `tests/` (13 suítes + 1 helpers + 1 snapshot, ~35 s, sem rede na maioria):
+Roda dezessete arquivos em `tests/` (14 suítes + 1 helpers + snapshots, ~35 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -73,6 +73,7 @@ Roda quinze arquivos em `tests/` (13 suítes + 1 helpers + 1 snapshot, ~35 s, se
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400 |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
+| `tests/golden.test.mjs` | `htmlToMarkdown` bate com os 20 golden files em `tests/golden/` (saída byte a byte) |
 | `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
 
 Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
