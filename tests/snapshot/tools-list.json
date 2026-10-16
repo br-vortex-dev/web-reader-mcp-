@@ -1,0 +1,153 @@
+[
+  {
+    "name": "read_page",
+    "description": "Lê uma página web (GET) e devolve o conteúdo extraído em markdown: título, meta descrição e texto principal. Use para ler artigos, documentações, blogs, páginas de produto, etc.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL completa (http/https) da página a ler"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres do conteúdo retornado (padrão 8000, max 25000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "extract_links",
+    "description": "Acessa uma página e lista seus links (texto + URL absoluta), sem duplicatas. Use para descobrir para onde uma página aponta e escolher a próxima página a ler.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL da página"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Quantidade máxima de links a listar (padrão 50, max 200)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "read_multiple_pages",
+    "description": "Lê várias páginas por chamada (máx 30 URLs, em lotes paralelos) e devolve o conteúdo de cada uma, com o status de sucesso/falha por URL.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "urls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Lista de URLs (http/https), máximo 30"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres por página (padrão 8000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout por requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "urls"
+      ]
+    }
+  },
+  {
+    "name": "discover_urls",
+    "description": "Descobre as URLs de um site: lê o sitemap.xml (e variantes, incluindo sitemap indexes) e lista as páginas encontradas. Se não houver sitemap, devolve os links internos da home. Use para saber o que dá para ler num site antes de chamar read_multiple_pages.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL do site (ex.: https://exemplo.com)"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Quantidade máxima de URLs a listar (padrão 100, max 300)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout por requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "crawl_site",
+    "description": "Lê um site sozinho: começa na URL, extrai os links internos e vai seguindo pelos não visitados (BFS, lotes paralelos), devolvendo o conteúdo de cada página. Ideal para varrer um blog, documentação ou seção de notícias sem a IA ter que pedir URL por URL. Máximo de 30 páginas por chamada.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL inicial (página ou home do site)"
+        },
+        "maxPages": {
+          "type": "number",
+          "description": "Máximo de páginas a ler (padrão 10, max 30)"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres por página (padrão 2000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout por requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "read_dynamic_page",
+    "description": "Lê páginas que dependem de JavaScript para renderizar (React, Vue, Angular, Next.js, etc.) sem precisar de Playwright. Detecta se a página é dinâmica e extrai dados embutidos no HTML (__NEXT_DATA__, __NUXT__, __INITIAL_STATE__, JSON-LD, APIs internas). Use quando read_page retornar conteúdo vazio ou muito curto em sites modernos.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL completa (http/https) da página a ler"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres do conteúdo retornado (padrão 8000, max 25000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  }
+]

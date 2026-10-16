@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -21,7 +21,9 @@ sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
 | `fetch.mjs` | O fetch de baixo nível: cache, redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. |
-| `server.mjs` | O transporte: JSON-RPC em stdio, HTTP Streamable, autenticação por token, rate limit e `/health`. |
+| `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
+| `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, handlers, `/health` e shutdown limpo. |
+| `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
 
 **As três regras que mantêm o projeto saudável:**
 
@@ -53,7 +55,7 @@ sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda doze arquivos em `tests/` (11 suítes + 1 helpers, ~35 s, sem rede na maioria):
+Roda quinze arquivos em `tests/` (13 suítes + 1 helpers + 1 snapshot, ~35 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -69,6 +71,8 @@ Roda doze arquivos em `tests/` (11 suítes + 1 helpers, ~35 s, sem rede na maior
 | `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
 | `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
+| `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400 |
+| `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
 | `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
 
 Cada teste sobe o servidor MCP de verdade (`--http`) numa porta livre, mais um
@@ -143,7 +147,9 @@ web-reader-mcp/
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
 │   ├── tools.mjs      <- as 6 ferramentas do MCP
-│   └── server.mjs     <- transporte: stdio, HTTP, auth, rate limit, /health
+│   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
+│   ├── http-transport.mjs<- HTTP: rate limit, auth, /health, handlers
+│   └── server.mjs     <- roteador JSON-RPC, stdio e montagem do HTTP
 ├── package.json
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
 ├── .gitignore
