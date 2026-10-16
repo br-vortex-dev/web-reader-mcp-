@@ -33,7 +33,7 @@ export const DEFAULT_MAX_CHARS = 4000;
 export const HARD_MAX_CHARS = 25000;
 
 // Teto de páginas por chamada em read_multiple_pages e crawl_site.
-export const MAX_PAGES_PER_CALL = 15;
+export const MAX_PAGES_PER_CALL = 30;
 
 // Teto de download por requisição.
 export const MAX_RESPONSE_BYTES = Math.max(
@@ -62,7 +62,7 @@ export const OUTBOUND_MAX_QUEUE = clampEnvZero(process.env.OUTBOUND_MAX_QUEUE, 1
 export const OUTBOUND_MEMORY_BUDGET = clampEnv(
   process.env.OUTBOUND_MEMORY_BUDGET,
   64 * 1024 * 1024,
-  2 * 1024 * 1024,
+  4 * 1024 * 1024,
   512 * 1024 * 1024
 );
 
@@ -91,8 +91,8 @@ export const AGENT_CACHE_MAX = 256;
 // Teto de redirects seguidos.
 export const MAX_REDIRECTS = 3;
 
-// Teto do Retry-After (5 s).
-export const RETRY_AFTER_MAX_MS = 5000;
+// Teto do Retry-After (10 s).
+export const RETRY_AFTER_MAX_MS = 10000;
 
 // Cache de robots.txt.
 export const ROBOTS_RESPECT = process.env.ROBOTS_RESPECT !== "0";
@@ -114,7 +114,7 @@ export const ALLOW_PRIVATE_HOSTS = process.env.ALLOW_PRIVATE_HOSTS === "1";
 /**
  * Clampa um valor de ambiente entre min e max.
  */
-function clampEnv(valor, padrao, min, max) {
+export function clampEnv(valor, padrao, min, max) {
   const n = Math.floor(Number(valor));
   if (!Number.isFinite(n) || n <= 0) return padrao;
   return Math.max(min, Math.min(max, n));
@@ -123,7 +123,7 @@ function clampEnv(valor, padrao, min, max) {
 /**
  * Como clampEnv, mas aceita 0 (ex.: "sem fila", "sem teto de conexões").
  */
-function clampEnvZero(valor, padrao, min, max) {
+export function clampEnvZero(valor, padrao, min, max) {
   if (valor === undefined || valor === null || valor === "") return padrao;
   const n = Math.floor(Number(valor));
   if (!Number.isFinite(n) || n < 0) return padrao;

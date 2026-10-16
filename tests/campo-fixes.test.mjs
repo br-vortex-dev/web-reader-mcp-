@@ -224,3 +224,26 @@ test("BUG-10: crawl_site comecando em texto puro nao quebra", async () => {
   // o conteudo cru da pagina inicial tem de entrar no resultado
   assert.match(r.text, /User-agent: \*/);
 });
+
+// ------------------------------- BUG-11 --------------------------------- //
+// extractLinks nao tinha o mesmo criterio de "conteudo que nao e conteudo" do
+// htmlToMarkdown: um link dentro de um bloco aria-hidden="true" aparecia na
+// lista de links mas sumia do texto. Uma IA lendo a lista achava que a pagina
+// tinha um link que o markdown dizia nao existir.
+test("BUG-11: extract_links ignora links dentro de aria-hidden", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/github-like` });
+  assert.equal(r.isError, false, r.text);
+  // o bloco aria-hidden do fixture nao tem <a>; o que importa aqui e o contrato:
+  // nada de link vindo de conteudo escondido.
+  assert.doesNotMatch(r.text, /Skip to content/);
+});
+
+// Regressao da correcao do BUG-11: um bloco escondido mal fechado nao pode
+// engolir os links que vem DEPOIS dele.
+test("BUG-11 (regressao): bloco escondido nao engole os links seguintes", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/skip-self` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /2 encontrados/, `links perdidos: ${r.text}`);
+  assert.match(r.text, /alvo-1/);
+  assert.match(r.text, /alvo-2/);
+});

@@ -128,16 +128,13 @@ async function main() {
   show("read_multiple_pages(2 URLs)", tm1, 500);
 
   // --- 30 URLs por chamada (limite ampliado, lotes paralelos) ---
-  const pool = [
-    "https://example.com",
-    "https://example.org",
-    "https://www.iana.org/domains/example",
-    "https://httpbin.org/html",
-    "https://pt.wikipedia.org/wiki/P%C3%A1gina_principal",
-    "url-invalida-de-proposito",
-  ];
-  const many = [];
-  for (let i = 0; i < 30; i++) many.push(pool[i % pool.length]);
+  // O pool tem 30 URLs DISTINTAS de propósito: repetir a mesma URL 5x contorna
+  // a deduplicacao (o servidor le uma so), e o teste parava de medir a leitura
+  // real das 30 paginas. A unica URL ruim fica no pool pequeno, la embaixo.
+  const many = Array.from(
+    { length: 30 },
+    (_, i) => `https://example.com/?smoke=${i}`
+  );
   const startedAt = Date.now();
   const m2 = await rpc("tools/call", {
     name: "read_multiple_pages",
@@ -150,12 +147,13 @@ async function main() {
   check(ok30 >= 24, `30 URLs lidas em lotes (${ok30}/30 OK em ${elapsed}s)`);
   show("read_multiple_pages(30 URLs) — resumo", tm2.slice(0, 260), 260);
 
+  // 31 URLs distintas (o pool de cima mais uma): acima do teto, tem de ser erro.
   const e31 = await rpc("tools/call", {
     name: "read_multiple_pages",
-    arguments: { urls: [...many, "https://example.com"] },
+    arguments: { urls: [...many, "https://example.org/?smoke=31"] },
   });
   const te31 = (e31.content || []).map((c) => c.text).join("\n");
-  check(Boolean(e31.isError) && /Maximo de 30/.test(te31), "rejeita 31 URLs com erro claro");
+  check(Boolean(e31.isError) && /Máximo de 30/.test(te31), "rejeita 31 URLs com erro claro");
 
   // --- discover_urls (sitemap) ---
   const du1 = await rpc("tools/call", {

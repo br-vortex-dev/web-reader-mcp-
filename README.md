@@ -7,6 +7,33 @@ Servidor **MCP feito do zero** para ler páginas web.
 - **Protocolo MCP implementado à mão** — JSON-RPC newline-delimited direto no stdio, sem usar o SDK do MCP.
 - **Parser HTML → markdown também feito à mão** — tokenizador próprio, sem cheerio/jsdom.
 
+## Arquitetura
+
+O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
+sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
+
+| Módulo | Responsabilidade |
+| --- | --- |
+| `config.mjs` | **Toda** a configuração: tetos, timeouts, defaults e os clamps de variável de ambiente. Nenhum outro módulo lê `process.env` diretamente. |
+| `errors.mjs` | As 19 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
+| `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes) e o cache LRU com TTL. |
+| `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado, NAT64, 6to4), DNS rebinding, Agent validado e robots.txt. |
+| `fetch.mjs` | O fetch de baixo nível: cache, redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
+| `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
+| `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. |
+| `server.mjs` | O transporte: JSON-RPC em stdio, HTTP Streamable, autenticação por token, rate limit e `/health`. |
+
+**As três regras que mantêm o projeto saudável:**
+
+1. **Segurança na origem, não na borda.** `fetchTextCached` valida SSRF e robots **antes**
+   de olhar o cache e **antes** de baixar — então toda ferramenta herda a guarda de
+   graça, e uma URL bloqueada nunca é servida do cache.
+2. **O pipeline de leitura é único.** Quem lê uma página passa pelo mesmo caminho:
+   valida URL → busca → garante HTML → converte (ou devolve cru) → trunca → formata.
+3. **Erro classificado, mensagem traduzida.** O código de erro (`HTTP_404`,
+   `HOST_BLOQUEADO`, `TIMEOUT`…) nasce junto com a exceção; o transporte só decide o
+   status HTTP a partir dele.
+
 ## Ferramentas
 
 | Ferramenta                  | O que faz                                                                               |
@@ -26,7 +53,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 npm test
 ```
 
-Roda onze arquivos em `tests/` (97 testes, ~30 s, sem rede na maioria):
+Roda onze arquivos em `tests/` (97 testes, ~35 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -57,10 +84,18 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 6 ferramentas
+npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 ```
 
 Roda um cliente MCP mínimo que conecta no servidor, lista as ferramentas e exercita todas elas.
+
+### Medir latência em sites reais
+
+```bash
+npm run bench     # latência de leitura em 5 sites (3 leituras cada)
+npm run bench:20  # 20 sites em 2 chamadas paralelas de read_multiple_pages
+```
 
 ## Como usar no WorkBuddy
 
@@ -95,16 +130,25 @@ Estrutura que deve estar na pasta antes do push:
 
 ```
 web-reader-mcp/
-├── server.js          <- o servidor MCP (single-file, de proposito)
+├── server.js          <- entrada: escolhe stdio ou HTTP e trata erro fatal
+├── src/               <- o produto, em modulos (ver "Arquitetura" abaixo)
+│   ├── config.mjs     <- todos os tetos, timeouts e defaults
+│   ├── errors.mjs     <- classes de erro e seus codigos
+│   ├── utils.mjs      <- fila FIFO, limitadores de carga, cache LRU
+│   ├── security.mjs   <- SSRF, DNS rebinding, agent validado, robots.txt
+│   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
+│   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
+│   ├── tools.mjs      <- as 6 ferramentas do MCP
+│   └── server.mjs     <- transporte: stdio, HTTP, auth, rate limit, /health
 ├── package.json
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
 ├── .gitignore
 ├── README.md
-├── RELATORIO-CAMPO.md <- relatorio da rodada de campo na web real (nota 7,5/10)
+├── RELATORIO-CAMPO.md <- relatorio da rodada de campo na web real
 ├── tests/             <- testes automatizados (node:test, sem dependencias)
 ├── campo/             <- bateria de campo: driver + saidas brutas de 70 casos
 ├── load/              <- harness de carga e script k6
-└── scripts/           <- clientes MCP manuais (smoke-test, live-test)
+└── scripts/           <- clientes MCP manuais (smoke-test, live-test, benchmarks)
 ```
 
 O `.gitignore` já cobre `node_modules/`, `.env`, logs e arquivos de editor. Se um
@@ -186,7 +230,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
    `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 67108864 bytes (max 100 entradas, ttl 10 min)`.
-   A versão vem da constante `SERVER_VERSION` no `server.js`, e o `/health` também
+   A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção.
 
@@ -268,7 +312,7 @@ interno**, que não faz parte da web:
   (nesses casos o IPv4 embutido é validado, e não o IPv6 inteiro).
 
 Redirects continuam funcionando normalmente (`http→https`, `www`, encurtadores), até
-**5 saltos**, com o destino de **cada salto** revalidado. A checagem roda no fetch de
+**3 saltos**, com o destino de **cada salto** revalidado. A checagem roda no fetch de
 baixo nível, então vale para todas as ferramentas: `read_page`, `extract_links`,
 `read_multiple_pages`, `discover_urls`, `crawl_site`, `read_dynamic_page` e para a
 extração automática de dados embutidos (que busca "APIs internas" citadas na página).
@@ -279,8 +323,10 @@ Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
 `Host bloqueado: endereco privado/interno (127.0.0.1)`.
 
 **Limitação conhecida:** sobra uma janela de DNS rebinding entre a resolução do nome e a
-conexão, porque o `fetch` do Node não permite fixar o IP de destino. Está documentada no
-código (`assertPublicHost` em `server.js`).
+conexão, porque o `fetch` do Node não permite fixar o IP de destino. Ela é fechada na
+prática por um Agent customizado que resolve **apenas** o IP já validado (`assertPublicHost`
+e `agentValidado` em `src/security.mjs`), e o teste `DNS rebinding` da suíte verifica o
+comportamento.
 
 ### Respeito ao robots.txt
 
@@ -318,25 +364,39 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `PORT` | `3000` | Porta do modo HTTP. O Render define sozinha; a presença dela é o que escolhe o modo HTTP (sem `PORT` → stdio). |
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
-| `CACHE_MAX_BYTES` | `67108864` (64 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
-| `CACHE_TTL_MS` | `600000` (10 min) | Validade de cada entrada do cache. |
+| `CACHE_MAX_BYTES` | `33554432` (32 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
+| `CACHE_MAX_ENTRIES` | `100` | Teto de entradas do cache (o segundo teto, além dos bytes). |
+| `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
 | `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
-| `ROBOTS_TTL_MS` | igual ao `CACHE_TTL_MS` | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (60 s, fixo). |
-| `ROBOTS_TIMEOUT_MS` | `10000` (10 s) | Timeout da busca do `robots.txt` (1 s–30 s). |
-| `MAX_RESPONSE_BYTES` | `10485760` (10 MB) | Teto de download por requisição, lido em streaming com corte. |
+| `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (`ROBOTS_NEGATIVE_TTL_MS`, 60 s fixo). |
+| `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
+| `ROBOTS_MAX_BYTES` | `524288` (512 KB) | Corpo do `robots.txt` acima disso é descartado (fail-open). |
+| `ROBOTS_MAX_ORIGINS` | `1000` | Teto de origens com `robots.txt` em cache. |
+| `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
-| `FETCH_CONCURRENCY` | `12` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
-| `API_MAX_CANDIDATES` | `3` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
-| `API_TOTAL_BUDGET_MS` | `5000` (5 s) | Orçamento total dessa busca de APIs internas. |
+| `FETCH_CONCURRENCY` | `32` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
+| `API_MAX_CANDIDATES` | `2` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
+| `API_TOTAL_BUDGET_MS` | `1500` | Orçamento total dessa busca de APIs internas. |
+| `ROBOTS_NEGATIVE_TTL_MS` | `60000` | TTL da falha ao ler o `robots.txt` (fail-open), para não martelar o host. |
+| `MAX_REDIRECTS` | `3` | Máximo de saltos de redirect seguidos (revalidando o destino de cada um). |
+| `RETRY_AFTER_MAX_MS` | `10000` | Teto do `Retry-After` obedecido no retry. |
+| `DEFAULT_TIMEOUT_MS` | `1500` | Timeout padrão de cada requisição HTTP. |
+| `MULTI_MAX_TOTAL_CHARS` | `250000` | Teto da soma das seções em `read_multiple_pages`. |
+| `DEFAULT_MAX_CHARS` | `4000` | Padrão de `maxChars` das ferramentas. |
+| `HARD_MAX_CHARS` | `25000` | Teto absoluto de `maxChars` por página. |
+| `MAX_PAGES_PER_CALL` | `30` | Teto de páginas por `read_multiple_pages` e por `crawl_site`. |
+| `HOST_CHECK_TTL_MS` | `300000` (5 min) | Validade da validação de host (SSRF) por nome. |
+| `AGENT_CACHE_MAX` | `256` | Teto de Agents HTTP/HTTPS mantidos por IP (keep-alive). |
 | `MAX_INFLIGHT_REQUESTS` | `128` | Quantas requisições são processadas ao mesmo tempo. Calibrado pelo **joelho da curva de capacidade** (~64 no hardware de referência). **Aumentar não aumenta a vazão** — só a fila. |
 | `MAX_WAITING_REQUESTS` | `4096` | Quantas esperam por uma vaga. `0` = recusa na hora. |
 | `MAX_WAIT_MS` | `15000` (15 s) | Teto de espera por uma vaga; depois disso, **503 com `Retry-After`**. Deve ser menor que o timeout do seu cliente MCP. |
 | `OUTBOUND_MAX_CONCURRENCY` | `128` | Downloads simultâneos (limita sockets/tarefas). |
-| `OUTBOUND_MAX_QUEUE` | `200` | Quantos downloads esperam por vaga. Fila cheia = erro claro e imediato. |
-| `OUTBOUND_MEMORY_BUDGET` | `134217728` (128 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, MAX_RESPONSE_BYTES)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. |
-| `HTTP_KEEPALIVE_TIMEOUT_MS` | `65000` | Keep-alive do servidor. O padrão do Node é 5 s, o que causa **churn de conexão** sob carga; e precisa ser **maior que o idle timeout do balanceador**, senão dá 502. |
-| `HTTP_HEADERS_TIMEOUT_MS` | `66000` | Precisa ser ≥ keep-alive. |
-| `HTTP_REQUEST_TIMEOUT_MS` | `300000` | Precisa ser ≥ headers. |
+| `OUTBOUND_MAX_QUEUE` | `100` | Quantos downloads esperam por vaga. Fila cheia = erro claro e imediato. |
+| `OUTBOUND_MEMORY_BUDGET` | `67108864` (64 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, MAX_RESPONSE_BYTES)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. |
+| `HTTP_KEEPALIVE_TIMEOUT_MS` | `32500` | Keep-alive do servidor. O padrão do Node é 5 s, o que causa **churn de conexão** sob carga; e precisa ser **maior que o idle timeout do balanceador**, senão dá 502. |
+| `HTTP_HEADERS_TIMEOUT_MS` | `33000` | Precisa ser ≥ keep-alive. |
+| `HTTP_REQUEST_TIMEOUT_MS` | `150000` | Precisa ser ≥ headers. |
+| `HOST` | *(todos)* | Endereço de escuta do modo HTTP (padrão: todas as interfaces). Útil em testes que precisam fixar `127.0.0.1`. |
 | `MAX_CONNECTIONS` | `0` (sem teto) | Teto de conexões aceitas; `0` deixa o limite para o SO. |
 | `RATE_LIMIT_MAX` | `60` | Requisições por janela, por cliente. O `render.yaml` usa **10000**: quando quem chama é o backend de um site, todos os usuários chegam pelo mesmo IP e 60/min seria um balde único para o site inteiro. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Tamanho da janela do rate limit. |
@@ -426,11 +486,11 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
 
 - **Plano free dorme** após 15 min sem uso: a 1ª chamada leva ~30-50s (cold start).  
   Pra produto, use o plano pago (evita dormir e dá mais RAM).
-- **30 URLs por chamada**, em lotes de 12 (`FETCH_CONCURRENCY`): pesquisa rápida
+- **30 URLs por chamada**, em lotes de 32 (`FETCH_CONCURRENCY`): pesquisa rápida
   sem estourar memória.
 - **Orçamento de memória no plano free (512 MB)** — os tetos foram escolhidos
   para caber com folga:
-  - cache: `CACHE_MAX_BYTES` (64 MB) — é o teto real; a contagem de 100 entradas
+  - cache: `CACHE_MAX_BYTES` (32 MB) — é o teto real; a contagem de 100 entradas
     é o segundo teto.
   - download por requisição: `MAX_RESPONSE_BYTES` (10 MB), lido em **streaming**
     com corte (não carrega a resposta inteira antes de conferir).
@@ -462,8 +522,8 @@ extraído vem curto (menos de 300 caracteres) e a página parece dinâmica.
 Quando o `read_page` dispara essa extração, ele também tenta as rotas `/api/...`,
 `/graphql`, `/data/...` e `/wp-json/...` citadas no HTML da página:
 
-- **no máximo `API_MAX_CANDIDATES`** (padrão 3) candidatos;
-- **orçamento total de `API_TOTAL_BUDGET_MS`** (padrão 5 s), depois disso devolve
+- **no máximo `API_MAX_CANDIDATES`** (padrão 2) candidatos;
+- **orçamento total de `API_TOTAL_BUDGET_MS`** (padrão 1,5 s), depois disso devolve
   o que já obteve e segue, sem erro;
 - só o **mesmo domínio** da página (e passando pela guarda SSRF);
 - deduplicados e priorizados: caminho com cara de dados (`json`, `graphql`, `api`)
@@ -485,7 +545,7 @@ vazia"**. O contrato é:
 ## Limitações conhecidas
 
 - Páginas atrás de login não funcionam (o fetch é anônimo).
-- O conteúdo é truncado em **8000 caracteres** por padrão (ajustável via `maxChars`).
+- O conteúdo é truncado em **4000 caracteres** por padrão (ajustável via `maxChars`, teto de 25000).
 - Sites com proteção anti-bot muito agressiva podem barrar a requisição.
 - **DNS rebinding:** a janela entre resolver o nome (para checar se é
   endereço interno) e conectar é fechada com um Agent customizado que retorna

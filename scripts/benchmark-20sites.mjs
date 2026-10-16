@@ -87,6 +87,7 @@ async function main() {
   console.log("[benchmark] subindo servidor MCP...");
 
   const server = spawn(process.execPath, ["server.js", "--http"], {
+    cwd: process.cwd(),
     env: { ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: "benchmark-token" },
     stdio: ["ignore", "pipe", "pipe"],
   });

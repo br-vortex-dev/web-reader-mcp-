@@ -14,12 +14,12 @@ import {
   HTTP_HEADERS_TIMEOUT_MS,
   HTTP_KEEPALIVE_TIMEOUT_MS,
   MAX_CONNECTIONS,
-  ALLOW_PRIVATE_HOSTS,
   MAX_INFLIGHT_REQUESTS,
   MAX_WAITING_REQUESTS,
   MAX_WAIT_MS,
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
+  clampEnv,
 } from "./config.mjs";
 import { admissaoHttp, limiteSaida, orcamentoSaida, cacheStats } from "./fetch.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
@@ -115,9 +115,9 @@ const TOOLS = [
         url: { type: "string", description: "URL completa (http/https) da página a ler" },
         maxChars: {
           type: "number",
-          description: "Máximo de caracteres do conteúdo retornado (padrão 8000, max 50000)",
+          description: "Máximo de caracteres do conteúdo retornado (padrão 4000, max 25000)",
         },
-        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 1500)" },
       },
       required: ["url"],
     },
@@ -132,7 +132,7 @@ const TOOLS = [
       properties: {
         url: { type: "string", description: "URL da página" },
         limit: { type: "number", description: "Quantidade máxima de links a listar (padrão 50, max 200)" },
-        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 1500)" },
       },
       required: ["url"],
     },
@@ -154,7 +154,7 @@ const TOOLS = [
           type: "number",
           description: "Máximo de caracteres por página (padrão 4000)",
         },
-        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 1500)" },
       },
       required: ["urls"],
     },
@@ -170,7 +170,7 @@ const TOOLS = [
       properties: {
         url: { type: "string", description: "URL do site (ex.: https://exemplo.com)" },
         limit: { type: "number", description: "Quantidade máxima de URLs a listar (padrão 100, max 300)" },
-        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 1500)" },
       },
       required: ["url"],
     },
@@ -188,7 +188,7 @@ const TOOLS = [
         url: { type: "string", description: "URL inicial (página ou home do site)" },
         maxPages: { type: "number", description: "Máximo de páginas a ler (padrão 10, max 30)" },
         maxChars: { type: "number", description: "Máximo de caracteres por página (padrão 2000)" },
-        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout por requisição em ms (padrão 1500)" },
       },
       required: ["url"],
     },
@@ -206,9 +206,9 @@ const TOOLS = [
         url: { type: "string", description: "URL completa (http/https) da página a ler" },
         maxChars: {
           type: "number",
-          description: "Máximo de caracteres do conteúdo retornado (padrão 8000, max 50000)",
+          description: "Máximo de caracteres do conteúdo retornado (padrão 4000, max 25000)",
         },
-        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 25000)" },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 1500)" },
       },
       required: ["url"],
     },
@@ -588,10 +588,4 @@ export function encerrarPorErro(motivo) {
     }
   }
   sair();
-}
-
-function clampEnv(valor, padrao, min, max) {
-  const n = Math.floor(Number(valor));
-  if (!Number.isFinite(n) || n <= 0) return padrao;
-  return Math.max(min, Math.min(max, n));
 }

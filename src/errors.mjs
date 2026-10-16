@@ -88,7 +88,7 @@ export class ConteudoNaoHtmlError extends WebReaderError {
 
 export class RespostaMuitoGrandeError extends WebReaderError {
   constructor(maxBytes, url) {
-    super(`Resposta muito grande (acima de ${maxBytes} bytes, máximo ${MAX_RESPONSE_BYTES})`, {
+    super(`Resposta muito grande (acima de ${maxBytes} bytes).`, {
       code: "RESPOSTA_MUITO_GRANDE",
       url,
     });
@@ -142,8 +142,10 @@ export class ParametroInvalidoError extends WebReaderError {
 
 export class LimiteExcedidoError extends WebReaderError {
   constructor(recurso, limite, recebido) {
+    // "Máximo" com acento de propósito: a mensagem é lida por uma IA e o
+    // smoke-test casa exatamente /Maximo de <limite>/ nela.
     super(
-      `Limite excedido para ${recurso}: ${recebido} (máximo ${limite}). Divida em várias chamadas.`,
+      `Limite excedido para ${recurso}: ${recebido} (Máximo de ${limite}). Divida em várias chamadas.`,
       { code: "LIMITE_EXCEDIDO" }
     );
     this.name = "LimiteExcedidoError";
@@ -164,10 +166,13 @@ export class FerramentaDesconhecidaError extends WebReaderError {
 export class ServidorOcupadoError extends WebReaderError {
   constructor(nome, ativos, fila) {
     super(
-      `Servidor ocupado (${nome}): ${ativos} em e ${fila} na fila. Tente de novo em instantes.`,
+      `Servidor ocupado (${nome}): ${ativos} em andamento e ${fila} na fila. Tente de novo em instantes.`,
       { code: "SERVIDOR_OCUPADO" }
     );
     this.name = "ServidorOcupadoError";
+    this.nome = nome;
+    this.ativos = ativos;
+    this.fila = fila;
   }
 }
 

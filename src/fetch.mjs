@@ -13,7 +13,6 @@ import {
   CACHE_MAX_ENTRIES,
   CACHE_MAX_BYTES,
   CACHE_MAX_ENTRY_BYTES,
-  FETCH_CONCURRENCY,
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
   OUTBOUND_MEMORY_BUDGET,
@@ -36,7 +35,6 @@ import {
   RedeError,
   TimeoutError,
   RequisicaoCanceladaError,
-  RobotsBloqueadoError,
 } from "./errors.mjs";
 
 // Limadores de admissão e saída.
@@ -63,7 +61,6 @@ export const pageCache = new CacheLRU({
   ttlMs: CACHE_TTL_MS,
   maxEntries: CACHE_MAX_ENTRIES,
   maxBytes: CACHE_MAX_BYTES,
-  maxEntryBytes: CACHE_MAX_ENTRY_BYTES,
 });
 
 // Limpeza periódica de entradas expiradas.
@@ -95,6 +92,31 @@ function erroComCausa(err) {
   );
   if (err.retryAfterMs != null) melhorado.retryAfterMs = err.retryAfterMs;
   return melhorado;
+}
+
+/**
+ * Traduz o erro cru do Node para uma das classes de erro do projeto.
+ *
+ * O AbortController usado no timeout aborta com o motivo "AbortError", que nao
+ * diz nada ao caller — sem esta traducao um timeout virava "Erro: fetch failed"
+ * (a mesma mensagem de uma queda de DNS). Distinguimos os dois motivos de abort
+ * pelo `cause`: o timer local cancela com ETIMEDOUT; o signal externo (orcamento
+ * da busca de APIs internas) cancela com o motivo que o caller passou.
+ */
+function classificarErro(errBruto, url, timeoutMs) {
+  if (errBruto && errBruto.name === "AbortError") {
+    const motivo = errBruto.cause;
+    if (motivo && motivo.code !== "ETIMEDOUT" && motivo.name !== "AbortError") {
+      return new RequisicaoCanceladaError(
+        motivo && motivo.message ? motivo.message : "orcamento esgotado"
+      );
+    }
+    return new TimeoutError(url, timeoutMs);
+  }
+  if (errBruto instanceof TypeError && errBruto.cause && errBruto.status === undefined) {
+    return erroComCausa(errBruto);
+  }
+  return errBruto;
 }
 
 /**
@@ -169,7 +191,9 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // O motivo ETIMEDOUT e o que distingue "estourou o timeout" de "foi
+    // cancelado por orcamento externo" no catch (ver classificarErro).
+    const timer = setTimeout(() => controller.abort(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" })), timeoutMs);
     const abortarDeFora = () => controller.abort();
     if (externo) {
       if (externo.aborted) {
@@ -209,16 +233,17 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
         finalUrl,
         contentType: (res.headers.get("content-type") || "").toLowerCase(),
       };
-    } catch (err) {
-      lastError = err;
-      if (err instanceof TypeError && err.cause && err.status === undefined) {
-        err = erroComCausa(err);
-        lastError = err;
-      }
-      const retriable = err && (err.status === 429 || err.status === 503 || err.status === 500);
-      if (!retriable || attempt === retries) throw err;
-      const respeitaRetryAfter = (err.status === 429 || err.status === 503) && err.retryAfterMs != null;
-      await sleep(respeitaRetryAfter ? err.retryAfterMs : 400 * 2 ** attempt);
+    } catch (errBruto) {
+      // Nao reatribuir a variavel do catch: o `finally` roda depois do catch e
+      // uma reatribuicao aqui se perde, fazendo o throw final lancar o erro
+      // original (ex.: um 500 retriavel) em vez da falha real (ex.: EAI_AGAIN).
+      lastError = classificarErro(errBruto, url, timeoutMs);
+      const retriable =
+        lastError && (lastError.status === 429 || lastError.status === 503 || lastError.status === 500);
+      if (!retriable || attempt === retries) throw lastError;
+      const respeitaRetryAfter =
+        (lastError.status === 429 || lastError.status === 503) && lastError.retryAfterMs != null;
+      await sleep(respeitaRetryAfter ? lastError.retryAfterMs : 400 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
       if (externo) externo.removeEventListener("abort", abortarDeFora);
@@ -423,8 +448,9 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
 
 /**
  * Fetch com cache LRU + TTL. Valida segurança (SSRF + robots) ANTES de baixar.
- * Stale-while-revalidate: entrada expirada dentro da janela de graça é servida
- * imediatamente e atualizada em background (não bloqueia a resposta).
+ * O cache roda com staleWhileRevalidate DESLIGADO (o padrão), então entrada
+ * expirada = busca de novo; o ramo `hit.stale` abaixo só é exercido se alguém
+ * ligar o stale-while-revalidate na construção do cache.
  */
 export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   const hit = pageCache.get(url);

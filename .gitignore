@@ -10,6 +10,7 @@ node_modules/
 # Logs e saida de execucao
 *.log
 *.err
+*.out
 npm-debug.log*
 demo-output.txt
 

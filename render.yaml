@@ -2,13 +2,11 @@ services:
   - type: web
     name: web-reader-mcp
     runtime: node
-    # Para produto, troque free por starter (~US$ 7/mes): evita o cold start
-    # de ~50s e da RAM para o read_dynamic_page (Playwright).
+    # Plano free: o projeto nao tem dependencias nem build, e o cold start e
+    # curto porque o servidor sobe um processo Node puro. Para produto (sem
+    # dormir e com mais RAM), troque para starter (~US$ 7/mes).
     plan: free
-    buildCommand: echo "sem dependencias para instalar - v2"
-    # Para liberar read_dynamic_page (Playwright) no Render:
-    #   plan: starter
-    #   buildCommand: npm install playwright && npx playwright install --with-deps chromium
+    buildCommand: echo "sem dependencias para instalar - zero-dep"
     startCommand: node server.js
     healthCheckPath: /health
     envVars:

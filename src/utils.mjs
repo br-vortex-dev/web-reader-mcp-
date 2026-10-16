@@ -38,11 +38,20 @@ export function criarFila() {
     },
     peek,
     shift: () => {
+      // So pode sair quem ainda nao foi decidido: sem isso uma entrada
+      // rejeitada (fila cheia, espera esgotada) continuava no array e um
+      // liberar() futuro resolvia a promessa dela de novo.
       const item = peek();
-      if (item) {
-        itens[cabeca] = undefined;
-        cabeca++;
-        pendentes--;
+      if (!item || item.decidido) return undefined;
+      itens[cabeca] = undefined;
+      cabeca++;
+      pendentes--;
+      // Se a fila esvaziou pela direita, libera o array: sem isso uma fila
+      // que so esvazia (toda entrada atendida/recusada) mantem o array
+      // alocado para sempre.
+      if (pendentes === 0) {
+        itens = [];
+        cabeca = 0;
       }
       return item;
     },
@@ -51,6 +60,14 @@ export function criarFila() {
         item.decidido = true;
         pendentes--;
       }
+    },
+    // Tira uma entrada especifica da fila. So pode ser chamado DEPOIS de
+    // marcar a entrada como decidida: sem isso o item rejeitado continuaria na
+    // fila e um liberar() futuro chamaria o resolve() dele de novo.
+    remover: (item) => {
+      const posicao = itens.indexOf(item, cabeca);
+      if (posicao === -1) return;
+      itens[posicao] = undefined;
     },
   };
 }
@@ -105,7 +122,7 @@ export function criarLimitadorDeBytes({ orcamentoBytes, filaMax, nome, esperaMax
       if (esperaMaxMs > 0) {
         entrada.timer = setTimeout(() => {
           if (entrada.decidido) return;
-          fila.cancelar(entrada);
+          fila.remover(entrada);
           stats.recusados++;
           sincronizar();
           reject(ocupado());
@@ -153,8 +170,13 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
   };
 
   const liberar = () => {
-    ativos--;
-    atender();
+    // So desconta se havia vaga ocupada: um liberar() a mais (ou um liberar()
+    // solto no fim de um fluxo que nao adquiriu) nao pode deixar o contador
+    // negativo nem liberar vaga que nao existe.
+    if (ativos > 0) {
+      ativos--;
+      atender();
+    }
     sincronizar();
   };
 
@@ -173,7 +195,7 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
       if (esperaMaxMs > 0) {
         entrada.timer = setTimeout(() => {
           if (entrada.decidido) return;
-          fila.cancelar(entrada);
+          fila.remover(entrada);
           stats.recusados++;
           sincronizar();
           reject(ocupado());
@@ -201,17 +223,17 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
 
 /**
  * Cache LRU + TTL com teto em bytes.
- * Stale-while-revalidate: quando staleWhileRevalidate=true, entradas expiradas
- * dentro de uma janela de graça (staleWindowMs) são servidas imediatamente e
- * atualizadas em background. Sem isso, expirada = busca de novo (comportamento
- * original dos testes).
+ * Stale-while-revalidate (quando `staleWhileRevalidate=true`): entradas expiradas
+ * dentro da janela de graça (staleWindowMs) são devolvidas com `stale: true` e
+ * atualizadas em background pelo caller — assim uma página que acabou de vencer
+ * não bloqueia a resposta atrás de uma nova busca. Com ele desligado (padrão,
+ * o comportamento que a suíte assume), expirada = busca de novo.
  */
 export class CacheLRU {
-  constructor({ ttlMs, maxEntries, maxBytes, maxEntryBytes, staleWindowMs = ttlMs * 2, staleWhileRevalidate = false }) {
+  constructor({ ttlMs, maxEntries, maxBytes, staleWindowMs = ttlMs * 2, staleWhileRevalidate = false }) {
     this.ttlMs = ttlMs;
     this.maxEntries = maxEntries;
     this.maxBytes = maxBytes;
-    this.maxEntryBytes = maxEntryBytes;
     this.staleWindowMs = staleWindowMs;
     this.staleWhileRevalidate = staleWhileRevalidate;
     this.map = new Map();
@@ -232,11 +254,12 @@ export class CacheLRU {
 
     if (stale) {
       if (!this.staleWhileRevalidate || age >= this.staleWindowMs) {
-        // Muito antiga ou sem stale-while-revalidate — remove e deixa buscar de novo
+        // Sem stale-while-revalidate (ou já fora da janela de graça) — remove e
+        // deixa o caller buscar de novo.
         this.delete(key);
         return undefined;
       }
-      // Stale-while-revalidate: serve imediatamente e atualiza em background
+      // Stale-while-revalidate: serve imediatamente e atualiza em background.
       this.staleHits++;
       this.map.delete(key);
       this.map.set(key, entry);
@@ -254,9 +277,12 @@ export class CacheLRU {
     this.map.set(key, { at: Date.now(), payload, bytes });
     this.bytes += bytes;
     // Despeja os menos recentemente usados até caber nos DOIS tetos.
+    // Para quando nao sobra ninguem para despejar (so a propria chave) OU
+    // quando a entrada e maior que o teto inteiro — nesse caso nao ha o que
+    // despejar, e o loop antigo girava para sempre travando o processo.
     while (this.map.size > 1 && (this.map.size > this.maxEntries || this.bytes > this.maxBytes)) {
       const maisAntiga = this.map.keys().next().value;
-      if (maisAntiga === key) break;
+      if (maisAntiga === key || this.map.get(maisAntiga).bytes >= this.bytes) break;
       this.delete(maisAntiga);
     }
   }

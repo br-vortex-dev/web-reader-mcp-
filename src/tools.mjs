@@ -4,8 +4,6 @@
  */
 
 import {
-  DEFAULT_MAX_CHARS,
-  HARD_MAX_CHARS,
   MAX_PAGES_PER_CALL,
   API_MAX_CANDIDATES,
   API_TOTAL_BUDGET_MS,
@@ -255,16 +253,27 @@ async function extractEmbeddedData(html, baseUrl, timeoutMs) {
   return parts.join("\n\n");
 }
 
+// Marcas de framework e casca vazia: a pagina monta o conteudo em JavaScript.
+const MARCA_FRAMEWORK =
+  /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i;
+const RAIZ_VAZIA =
+  /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/;
+
+/**
+ * O HTML carrega sinais de que o conteudo vem de JavaScript?
+ * Comum a read_page e read_dynamic_page: as duas ferramentas tem de concordar
+ * sobre o que e "pagina dinamica", senao uma manda extrair e a outra nao.
+ */
+function htmlIndicaDinamico(html) {
+  return MARCA_FRAMEWORK.test(html) || RAIZ_VAZIA.test(html);
+}
+
 /**
  * Detecta se uma página provavelmente precisa de JavaScript.
  */
 function isDynamicPage(html, markdown) {
   const visibleText = markdown.replace(/\s+/g, " ").trim();
-  const hasFrameworkScript =
-    /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i.test(html);
-  const hasEmptyRoot = /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/.test(html);
-  const shortContent = visibleText.length < 500;
-  return hasFrameworkScript || hasEmptyRoot || shortContent;
+  return htmlIndicaDinamico(html) || visibleText.length < 500;
 }
 
 /**
@@ -307,7 +316,7 @@ function classifyFetchError(err) {
   if (/Host bloqueado/.test(msg)) return "bloqueadas por endereço privado/interno";
   if (/Redirect inválido: excesso de saltos/.test(msg)) return "com redirects em excesso";
   if (/Resposta muito grande/.test(msg)) return "com resposta grande demais";
-  if (/aborted|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|TimeoutError|timeout/i.test(texto)) return "com timeout";
+  if (/Timeout após|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|TimeoutError|timeout/i.test(texto)) return "com timeout";
   if (/ENOTFOUND|EAI_AGAIN|não foi possível resolver o host/i.test(texto)) return "com host não resolvido (DNS)";
   if (/ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|UND_ERR_SOCKET/i.test(texto)) {
     return "com conexão recusada/interrompida";
@@ -398,7 +407,7 @@ export async function toolReadMultiplePages(args) {
     const settled = await Promise.all(
       lote.map(async (url) => {
         try {
-          return { ok: true, text: await readOnePage(url, maxChars, timeoutMs) };
+          return { ok: true, text: (await lerPaginaCompleta(url, maxChars, timeoutMs)).conteudo };
         } catch (err) {
           return { ok: false, text: `# Erro ao ler ${url}\n${err.message}` };
         }
@@ -445,22 +454,6 @@ export async function toolReadMultiplePages(args) {
 }
 
 /**
- * Lê UMA página do crawl.
- */
-async function readOnePage(url, maxChars, timeoutMs) {
-  const parsed = validateHttpUrl(url);
-  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml(contentType, html, finalUrl);
-  if (isConteudoBruto(contentType, html)) {
-    return conteudoBrutoResult(html, finalUrl, maxChars);
-  }
-  const meta = extractMeta(html);
-  const markdown = htmlToMarkdown(html, finalUrl);
-  const { text, truncated } = truncate(markdown, maxChars);
-  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length });
-}
-
-/**
  * Lê páginas que dependem de JavaScript (React, Vue, Angular, Next.js, etc.).
  */
 export async function toolReadDynamicPage(args) {
@@ -474,10 +467,7 @@ export async function toolReadDynamicPage(args) {
   }
   const meta = extractMeta(html);
 
-  const hasFrameworkMarker =
-    /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i.test(html);
-  const hasEmptyRoot = /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/.test(html);
-  const pareceDinamica = hasFrameworkMarker || hasEmptyRoot;
+  const pareceDinamica = htmlIndicaDinamico(html);
 
   if (!pareceDinamica) {
     const markdown = htmlToMarkdown(html, finalUrl);
@@ -608,36 +598,36 @@ export async function toolDiscoverUrls(args) {
 }
 
 /**
- * Lê UMA página do crawl.
+ * Filtra os links internos uteis para seguir num crawl: mesmo dominio, nao a
+ * propria pagina e fora dos padroes de navegacao (login, tag, paginacao...).
  */
-async function crawlOnePage(url, maxChars, timeoutMs) {
+function linksParaCrawl(html, finalUrl) {
+  return extractLinks(html, finalUrl)
+    .filter((l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href))
+    .map((l) => l.href);
+}
+
+/**
+ * Le UMA pagina e devolve { conteudo, links }. E o unico lugar que conhece o
+ * pipeline completo (fetch -> valida -> markdown/cru -> trunca), compartilhado
+ * por read_multiple_pages e crawl_site.
+ */
+async function lerPaginaCompleta(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
   const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
-    const links = extractLinks(html, finalUrl).filter(
-      (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
-    );
     return {
       conteudo: conteudoBrutoResult(html, finalUrl, maxChars),
-      links: links.map((l) => l.href),
+      links: linksParaCrawl(html, finalUrl),
     };
   }
   const meta = extractMeta(html);
   const markdown = htmlToMarkdown(html, finalUrl);
   const { text, truncated } = truncate(markdown, maxChars);
-  const linksInternos = extractLinks(html, finalUrl).filter(
-    (l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href)
-  );
   return {
-    conteudo: formatReadResult({
-      finalUrl,
-      meta,
-      text,
-      truncated,
-      fullLength: markdown.length,
-    }),
-    links: linksInternos.map((l) => l.href),
+    conteudo: formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length }),
+    links: linksParaCrawl(html, finalUrl),
   };
 }
 
@@ -658,7 +648,7 @@ export async function toolCrawlSite(args) {
   let lidas = 0;
 
   try {
-    const primeira = await crawlOnePage(start.href, maxChars, timeoutMs);
+    const primeira = await lerPaginaCompleta(start.href, maxChars, timeoutMs);
     conteudos.push(primeira.conteudo);
     lidas++;
     for (const href of primeira.links) {
@@ -686,7 +676,7 @@ export async function toolCrawlSite(args) {
     const resultados = await Promise.all(
       lote.map(async (url) => {
         try {
-          return { ok: true, url, ...(await crawlOnePage(url, maxChars, timeoutMs)) };
+          return { ok: true, url, ...(await lerPaginaCompleta(url, maxChars, timeoutMs)) };
         } catch (err) {
           return { ok: false, url, erro: err };
         }

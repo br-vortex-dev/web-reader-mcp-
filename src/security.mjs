@@ -285,6 +285,36 @@ function robotsPermite(regras, caminho) {
 }
 
 /**
+ * Lê o corpo do robots.txt em streaming, cortando ao passar de ROBOTS_MAX_BYTES.
+ * O `res.text()` carregaria o corpo inteiro antes de qualquer conferência; um
+ * robots.txt gigante (ou uma resposta que nao e robots.txt) entao custaria
+ * memoria a toa. Acima do teto devolve null, que o caller trata como fail-open.
+ */
+async function lerRobotsComTeto(res) {
+  const corpo = res.body;
+  if (!corpo) return null;
+  const reader = corpo.getReader();
+  const pedacos = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > ROBOTS_MAX_BYTES) return null;
+      pedacos.push(Buffer.from(value));
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // corpo ja encerrado
+    }
+  }
+  return new TextDecoder("utf-8").decode(Buffer.concat(pedacos, total));
+}
+
+/**
  * Busca e processa o robots.txt de uma origem. Fail-open.
  * Usa fetch global diretamente para evitar dependência circular com fetch.mjs.
  */
@@ -306,8 +336,9 @@ async function robotsDaOrigem(origem) {
       });
       clearTimeout(timer);
       if (res.ok) {
-        const text = await res.text();
-        entrada = { at: Date.now(), grupos: robotsGruposDoTexto(text) };
+        const text = await lerRobotsComTeto(res);
+        // null = passou do teto: sem regra para cumprir, fica o fail-open.
+        if (text !== null) entrada = { at: Date.now(), grupos: robotsGruposDoTexto(text) };
       }
     } catch {
       // inacessível/4xx/5xx/grande demais: fica o fail-open

@@ -479,20 +479,35 @@ export function htmlToMarkdown(html, baseUrl) {
 
 /**
  * Extrai todos os links de uma página HTML.
+ *
+ * Espelha o mesmo critério de "conteúdo que não é conteúdo" do
+ * `htmlToMarkdown`: tags de skip E blocos `aria-hidden="true"` são ignorados.
+ * Sem isso, um link dentro de um carrossel/navegação decorativa marcado como
+ * aria-hidden aparecia na lista de links mas sumia do texto — e uma IA lendo a
+ * lista acharia que a página tem um link que o markdown diz não existir.
+ *
+ * O `ariaHiddenStack` guarda a tag de CADA bloco aberto, então o fecho de uma
+ * tag comum (ex.: `</nav>`) não baixa o contador de um bloco aria-hidden que
+ * continua aberto — sem isso, um bloco mal fechado engolia os links seguintes.
  */
 export function extractLinks(html, baseUrl) {
   const links = [];
   const seen = new Set();
   const baseHost = hostOf(baseUrl);
   let skipDepth = 0;
+  const ariaHiddenStack = [];
   let current = null;
 
   for (const token of tokenize(html)) {
     const isSkipped = SKIP_TAGS.has(token.tag);
+    const escondido = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
 
     if (token.type === "open") {
-      if (isSkipped) {
-        if (!token.selfClosing) skipDepth++;
+      if (isSkipped || escondido) {
+        if (!token.selfClosing) {
+          skipDepth++;
+          ariaHiddenStack.push(token.tag);
+        }
         continue;
       }
       if (skipDepth > 0) continue;
@@ -504,6 +519,14 @@ export function extractLinks(html, baseUrl) {
         if (alt) current.imgAlt = alt;
       }
     } else if (token.type === "close") {
+      // Fecho de um bloco escondido: baixa o contador só se a tag for a que
+      // abriu o bloco. Fechar outra tag comum não pode encerrar o bloco.
+      const idxHidden = ariaHiddenStack.lastIndexOf(token.tag);
+      if (idxHidden !== -1) {
+        ariaHiddenStack.length = idxHidden;
+        if (skipDepth > 0) skipDepth--;
+        continue;
+      }
       if (isSkipped) {
         if (skipDepth > 0) skipDepth--;
         continue;
