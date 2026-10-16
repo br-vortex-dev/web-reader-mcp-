@@ -9,6 +9,7 @@ import {
   API_TOTAL_BUDGET_MS,
   MULTI_MAX_TOTAL_CHARS,
   FETCH_CONCURRENCY,
+  DEFAULT_MAX_CHARS,
 } from "./config.mjs";
 import {
   fetchTextCached,
@@ -387,7 +388,7 @@ export async function toolReadMultiplePages(args) {
   if (urls.length > MAX_PAGES_PER_CALL) {
     throw new LimiteExcedidoError("URLs", MAX_PAGES_PER_CALL, urls.length);
   }
-  const maxChars = clampMaxChars(args.maxChars ?? 4000);
+  const maxChars = clampMaxChars(args.maxChars ?? DEFAULT_MAX_CHARS);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
 
   const unicas = [];

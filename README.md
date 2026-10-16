@@ -381,11 +381,11 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `API_MAX_CANDIDATES` | `2` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
 | `API_TOTAL_BUDGET_MS` | `1500` | Orçamento total dessa busca de APIs internas. |
 | `ROBOTS_NEGATIVE_TTL_MS` | `60000` | TTL da falha ao ler o `robots.txt` (fail-open), para não martelar o host. |
-| `MAX_REDIRECTS` | `3` | Máximo de saltos de redirect seguidos (revalidando o destino de cada um). |
+| `MAX_REDIRECTS` | `5` | Máximo de saltos de redirect seguidos (revalidando o destino de cada um). |
 | `RETRY_AFTER_MAX_MS` | `10000` | Teto do `Retry-After` obedecido no retry. |
-| `DEFAULT_TIMEOUT_MS` | `1500` | Timeout padrão de cada requisição HTTP. |
+| `DEFAULT_TIMEOUT_MS` | `8000` | Timeout padrão de cada requisição HTTP. |
 | `MULTI_MAX_TOTAL_CHARS` | `250000` | Teto da soma das seções em `read_multiple_pages`. |
-| `DEFAULT_MAX_CHARS` | `4000` | Padrão de `maxChars` das ferramentas. |
+| `DEFAULT_MAX_CHARS` | `8000` | Padrão de `maxChars` das ferramentas. |
 | `HARD_MAX_CHARS` | `25000` | Teto absoluto de `maxChars` por página. |
 | `MAX_PAGES_PER_CALL` | `30` | Teto de páginas por `read_multiple_pages` e por `crawl_site`. |
 | `HOST_CHECK_TTL_MS` | `300000` (5 min) | Validade da validação de host (SSRF) por nome. |
@@ -548,7 +548,7 @@ vazia"**. O contrato é:
 ## Limitações conhecidas
 
 - Páginas atrás de login não funcionam (o fetch é anônimo).
-- O conteúdo é truncado em **4000 caracteres** por padrão (ajustável via `maxChars`, teto de 25000).
+- O conteúdo é truncado em **8000 caracteres** por padrão (ajustável via `maxChars`, teto de 25000).
 - Sites com proteção anti-bot muito agressiva podem barrar a requisição.
 - **DNS rebinding:** a janela entre resolver o nome (para checar se é
   endereço interno) e conectar é fechada com um Agent customizado que retorna

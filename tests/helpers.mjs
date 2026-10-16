@@ -252,6 +252,26 @@ export async function startFixture({ robots = "regras" } = {}) {
       }
     }
 
+    // /longa -> pagina bem maior que o DEFAULT_MAX_CHARS (8000), para o teste do
+    // truncamento padrao: sem maxChars, o corte tem de acontecer em 8000.
+    if (path === "/longa") {
+      const blocos = Array.from({ length: 120 }, (_, i) => `<p>Paragrafo ${i} com texto de enchimento para compor uma pagina longa o bastante.</p>`).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><head><title>Pagina Longa</title></head><body><h1>Pagina Longa</h1>${blocos}</body></html>`);
+      return;
+    }
+
+    // /longchain/N -> N redirects ABSOLUTOS e depois /pagina. Serve para travar
+    // o padrao de redirects (uma cadeia de 5 passa, uma de 6 e recusada).
+    if (path.startsWith("/longchain/")) {
+      const n = Number(path.slice("/longchain/".length));
+      if (Number.isFinite(n) && n > 0) {
+        res.writeHead(302, { location: `http://127.0.0.1:${server.address().port}/longchain/${n - 1}` });
+        res.end();
+        return;
+      }
+    }
+
     if (path === "/redirect-to-private") {
       res.writeHead(302, { location: `http://127.0.0.1:${server.address().port}/pagina` });
       res.end();

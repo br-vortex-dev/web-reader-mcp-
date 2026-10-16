@@ -25,12 +25,12 @@ export const PROTOCOL_VERSIONS = new Set([
   "2025-06-18",
 ]);
 
-// Timeout padrão de cada requisição HTTP.
-export const DEFAULT_TIMEOUT_MS = 1500;
+// Timeout padrão de cada requisição HTTP (configurável por DEFAULT_TIMEOUT_MS).
+export const DEFAULT_TIMEOUT_MS = clampEnv(process.env.DEFAULT_TIMEOUT_MS, 8000, 1000, 60000);
 
 // Tetos de saída de texto.
-export const DEFAULT_MAX_CHARS = 4000;
 export const HARD_MAX_CHARS = 25000;
+export const DEFAULT_MAX_CHARS = clampEnv(process.env.DEFAULT_MAX_CHARS, 8000, 200, HARD_MAX_CHARS);
 
 // Teto de páginas por chamada em read_multiple_pages e crawl_site.
 export const MAX_PAGES_PER_CALL = 30;
@@ -88,8 +88,8 @@ export const HOST_CHECK_MAX_ENTRIES = 500;
 // Cache de agents HTTP (keep-alive por IP).
 export const AGENT_CACHE_MAX = 256;
 
-// Teto de redirects seguidos.
-export const MAX_REDIRECTS = 3;
+// Teto de redirects seguidos (configurável por MAX_REDIRECTS).
+export const MAX_REDIRECTS = clampEnv(process.env.MAX_REDIRECTS, 5, 1, 10);
 
 // Teto do Retry-After (10 s).
 export const RETRY_AFTER_MAX_MS = 10000;

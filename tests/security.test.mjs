@@ -88,6 +88,20 @@ test("segue redirects normais ate 5 saltos, resolvendo Location relativo", { tim
   assert.match(r.text, /Fixture Parser/);
 });
 
+// Trava o PADRAO de redirects (MAX_REDIRECTS=5): uma cadeia de 5 passa e uma
+// de 6 e recusada. O fixture serve /longchain/N com N saltos absolutos.
+test("o padrao de redirects aceita uma cadeia de 5 saltos", { timeout: 30000 }, async () => {
+  const r = await mcpLocal.call("read_page", { url: `${fixture.url}/longchain/5`, maxChars: 500 });
+  assert.equal(r.isError, false, `deveria aceitar 5 saltos: ${r.text}`);
+  assert.match(r.text, /Fixture Parser/);
+});
+
+test("o padrao de redirects recusa uma cadeia de 6 saltos", { timeout: 30000 }, async () => {
+  const r = await mcpLocal.call("read_page", { url: `${fixture.url}/longchain/6`, maxChars: 500 });
+  assert.equal(r.isError, true, "deveria recusar 6 saltos");
+  assert.match(r.text, /Redirect inválido: excesso de saltos/);
+});
+
 test("recusa cadeia de redirects acima de 5 saltos", { timeout: 30000 }, async () => {
   const r = await mcpLocal.call("read_page", { url: `${fixture.url}/chain/9`, maxChars: 500 });
   assert.equal(r.isError, true, "deveria recusar 9 saltos");
