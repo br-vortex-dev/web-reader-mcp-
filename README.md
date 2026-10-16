@@ -15,7 +15,7 @@ sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
 | Módulo | Responsabilidade |
 | --- | --- |
 | `config.mjs` | **Toda** a configuração: tetos, timeouts, defaults e os clamps de variável de ambiente. Nenhum outro módulo lê `process.env` diretamente. |
-| `errors.mjs` | As 19 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
+| `errors.mjs` | As 18 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
 | `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes) e o cache LRU com TTL. |
 | `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado, NAT64, 6to4), DNS rebinding, Agent validado e robots.txt. |
 | `fetch.mjs` | O fetch de baixo nível: cache, redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
@@ -53,7 +53,7 @@ sai. O produto mora em `src/`, em oito módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda onze arquivos em `tests/` (10 suítes + 1 helpers, ~35 s, sem rede na maioria):
+Roda doze arquivos em `tests/` (11 suítes + 1 helpers, ~35 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -62,6 +62,7 @@ Roda onze arquivos em `tests/` (10 suítes + 1 helpers, ~35 s, sem rede na maior
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
 | `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração |
 | `tests/campo-fixes.test.mjs` | regressões dos bugs encontrados na rodada de campo (fidelidade de conteúdo, charset, tabelas) |
+| `tests/defaults.test.mjs` | trava os padrões de leitura: `maxChars` 8000, `MAX_REDIRECTS` 5 e `DEFAULT_TIMEOUT_MS` 8000 |
 | `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
 | `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
 | `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |

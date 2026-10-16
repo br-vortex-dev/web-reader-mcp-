@@ -42,7 +42,7 @@ export const MAX_RESPONSE_BYTES = Math.max(
 );
 
 // Concorrência de downloads (sockets/tarefas simultâneas).
-// 32 permite que read_multiple_pages e crawl_token processem lotes maiores sem travar.
+// 32 permite que read_multiple_pages e crawl_site processem lotes maiores sem travar.
 export const FETCH_CONCURRENCY = Math.max(
   1,
   Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 32))
