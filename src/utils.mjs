@@ -234,6 +234,54 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
 }
 
 /**
+ * Coalescedor de buscas em voo (single-flight).
+ *
+ * Vários pedidos da MESMA chave feitos enquanto a busca ainda está em
+ * andamento aguardam a MESMA promessa, em vez de disparar buscas paralelas.
+ * É o que impede uma rajada de N usuários nas mesmas URLs de virar N
+ * downloads: o primeiro inicia; os demais caronam (e o cache só precisa
+ * "esquentar" uma vez).
+ *
+ * Contratos:
+ * - `executar(chave, fn)`: já há busca em voo para a chave? devolve a
+ *   promessa dela (sem chamar `fn`); senão chama `fn`, guarda e devolve.
+ * - A entrada sai da tabela quando a busca termina — a próxima chamada
+ *   tenta de novo (o cache de páginas decide se precisa mesmo baixar).
+ * - A promessa guardada recebe um handler no-op: se todos os que esperavam
+ *   desistirem, uma rejeição compartilhada NÃO vira "unhandled rejection"
+ *   (que neste projeto derruba o processo de propósito).
+ * - `stats.colapsadas` conta os pedidos que caronaram (não iniciaram busca).
+ */
+export function criarCoalescedorDeBuscas() {
+  const emVoo = new Map();
+  const stats = { emVoo: 0, colapsadas: 0 };
+
+  const executar = (chave, fn) => {
+    const existente = emVoo.get(chave);
+    if (existente) {
+      stats.colapsadas++;
+      return existente;
+    }
+    const busca = Promise.resolve().then(fn);
+    emVoo.set(chave, busca);
+    stats.emVoo = emVoo.size;
+    const limpar = () => {
+      if (emVoo.get(chave) === busca) {
+        emVoo.delete(chave);
+        stats.emVoo = emVoo.size;
+      }
+    };
+    busca.then(limpar, limpar);
+    busca.catch(() => {
+      // consumida pelo coalescedor: quem espera ainda vê a rejeição na própria promessa
+    });
+    return busca;
+  };
+
+  return { executar, stats };
+}
+
+/**
  * Cache LRU + TTL com teto em bytes.
  * Stale-while-revalidate (quando `staleWhileRevalidate=true`): entradas expiradas
  * dentro da janela de graça (staleWindowMs) são devolvidas com `stale: true` e

@@ -13,6 +13,8 @@ import {
   CACHE_MAX_ENTRIES,
   CACHE_MAX_BYTES,
   CACHE_MAX_ENTRY_BYTES,
+  CACHE_SWR,
+  CACHE_STALE_WINDOW_MS,
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
   OUTBOUND_MEMORY_BUDGET,
@@ -22,7 +24,7 @@ import {
   DEFAULT_MAX_CHARS,
   HARD_MAX_CHARS,
 } from "./config.mjs";
-import { criarLimitador, criarLimitadorDeBytes, CacheLRU } from "./utils.mjs";
+import { criarLimitador, criarLimitadorDeBytes, CacheLRU, criarCoalescedorDeBuscas } from "./utils.mjs";
 import { assertPublicHost, agentValidado, checarRobots } from "./security.mjs";
 import { extractMeta } from "./html-parser.mjs";
 import {
@@ -56,12 +58,21 @@ export const orcamentoSaida = criarLimitadorDeBytes({
   nome: "memória-de-download",
 });
 
-// Cache em memória (LRU + TTL).
+// Cache em memória (LRU + TTL). Com CACHE_SWR=1, entrada vencida dentro da
+// janela de graça é servida na hora e revalidada em segundo plano.
 export const pageCache = new CacheLRU({
   ttlMs: CACHE_TTL_MS,
   maxEntries: CACHE_MAX_ENTRIES,
   maxBytes: CACHE_MAX_BYTES,
+  staleWhileRevalidate: CACHE_SWR,
+  staleWindowMs: CACHE_STALE_WINDOW_MS > 0 ? CACHE_STALE_WINDOW_MS : undefined,
 });
+
+// Junção de buscas em voo: N pedidos simultâneos da MESMA URL viram 1 download.
+export const coalescedorDeBuscas = criarCoalescedorDeBuscas();
+
+// Revalidações em segundo plano (SWR): contadores para o /health.
+export const revalidacoes = { tentadas: 0, falhas: 0 };
 
 // Limpeza periódica de entradas expiradas.
 const cacheCleanup = setInterval(() => pageCache.cleanup(), CACHE_TTL_MS);
@@ -447,12 +458,18 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
 }
 
 /**
- * Fetch com cache LRU + TTL. Valida segurança (SSRF + robots) ANTES de baixar.
- * Entrada expirada = busca de novo (stale-while-revalidate desligado).
+ * Busca de verdade: valida segurança (SSRF + robots), baixa e grava no cache.
+ * É o corpo que roda sob a junção em voo (um por URL em andamento). Com
+ * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
+ * propósito; o objetivo é atualizá-la.
  */
-export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
-  const hit = pageCache.get(url);
-  if (hit) return hit.payload;
+async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false } = {}) {
+  if (!revalidacao) {
+    // Quem esperou na junção pode encontrar a entrada que outro pedido acabou
+    // de gravar — nesse caso não baixa de novo.
+    const hitQuente = pageCache.get(url);
+    if (hitQuente && !hitQuente.stale) return hitQuente.payload;
+  }
 
   await Promise.all([assertPublicHost(url), checarRobots(url)]);
 
@@ -464,6 +481,49 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
     pageCache.set(url, payload, bytes);
   }
   return payload;
+}
+
+/**
+ * Stale-while-revalidate: atualiza uma entrada vencida em segundo plano, sem
+ * bloquear quem já foi servido com a versão em cache. Passa pela junção em
+ * voo — uma rajada no vencimento vira UMA revalidação. A contagem é feita
+ * DENTRO do callback: `tentadas` conta revalidações que de fato iniciaram,
+ * não pedidos que a pediram (a rajada toda colapsa em uma). Erros são
+ * engolidos: falhou, a entrada vencida segue valendo até sair da janela.
+ */
+function revalidarEmSegundoPlano(url, { timeoutMs, retries } = {}) {
+  coalescedorDeBuscas
+    .executar(url, () => {
+      revalidacoes.tentadas++;
+      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true }).catch((err) => {
+        revalidacoes.falhas++;
+        throw err;
+      });
+    })
+    .catch(() => {
+      // registrada em falhas; quem está sendo servido já recebeu a versão vencida
+    });
+}
+
+/**
+ * Fetch com cache LRU + TTL, junção de buscas em voo e (com CACHE_SWR=1)
+ * revalidação em segundo plano. Valida segurança (SSRF + robots) ANTES de
+ * baixar. Entrada vencida: sem SWR, busca de novo; com SWR, serve a vencida
+ * na hora e atualiza atrás.
+ *
+ * A junção é o que segura a rajada: N pedidos simultâneos da MESMA URL viram
+ * 1 download e todos recebem a mesma resposta — sem ela, cada pedido disparava
+ * o próprio fetch até o cache esquentar, multiplicando trabalho na hora
+ * crítica. O timeout/sinal é o de quem INICIA a busca; quem carona recebe o
+ * resultado dela.
+ */
+export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
+  const hit = pageCache.get(url);
+  if (hit) {
+    if (hit.stale) revalidarEmSegundoPlano(url, { timeoutMs, retries });
+    return hit.payload;
+  }
+  return coalescedorDeBuscas.executar(url, () => buscarEAquecer(url, { timeoutMs, signal, retries }));
 }
 
 /**

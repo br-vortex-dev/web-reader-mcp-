@@ -175,3 +175,72 @@ test("despejo por contagem continua valendo (CACHE_MAX_ENTRIES)", { timeout: 120
     mcp.close();
   }
 });
+
+/* ------------------- stale-while-revalidate (CACHE_SWR) ------------------- */
+
+test("SWR: vencido serve na hora e a rajada no vencimento vira 1 revalidação", { timeout: 90000 }, async () => {
+  // Backend atrasado de 300 ms de propósito: garante que a revalidação fica
+  // EM VOO enquanto a rajada inteira chega — é isso que prova a coalescência.
+  const mcp = await startMcp({
+    ALLOW_PRIVATE_HOSTS: "1",
+    CACHE_SWR: "1",
+    CACHE_TTL_MS: "1000",
+    CACHE_STALE_WINDOW_MS: "60000",
+  });
+  try {
+    const url = `${fixture.url}/page/swr?kb=5&ms=300`;
+
+    // 1a leitura: busca de verdade (contador 1).
+    const r1 = await mcp.call("read_page", { url, maxChars: 300, timeoutMs: 20000 });
+    assert.equal(reqDe(r1.text, "swr"), 1);
+
+    // Vence (TTL 1 s), seguindo DENTRO da janela de graça (60 s).
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Rajada no vencimento: ninguém espera rede — todos recebem o vencido.
+    const t0 = Date.now();
+    const rajada = await Promise.all(
+      Array.from({ length: 8 }, () => mcp.call("read_page", { url, maxChars: 300, timeoutMs: 20000 }))
+    );
+    const ms = Date.now() - t0;
+    for (const r of rajada) {
+      assert.equal(r.isError, false, r.text);
+      assert.equal(reqDe(r.text, "swr"), 1, `deveria servir o vencido (contador 1): ${r.text.slice(0, 200)}`);
+    }
+    assert.ok(ms < 2500, `a rajada não podia esperar a rede (levou ${ms} ms)`);
+
+    // A revalidação roda atrás: depois dela, a leitura devolve a versão nova.
+    await new Promise((r) => setTimeout(r, 800));
+    const r2 = await mcp.call("read_page", { url, maxChars: 300, timeoutMs: 20000 });
+    assert.equal(reqDe(r2.text, "swr"), 2, `revalidação deveria ter atualizado (contador 2): ${r2.text.slice(0, 200)}`);
+
+    // E o /health conta UMA revalidação — não oito (a rajada coalesceu nela).
+    const health = await (await fetch(`${mcp.base}/health`)).text();
+    const m = health.match(/revalidacoes: (\d+) \(falhas (\d+)\)/);
+    assert.ok(m, `o /health deveria trazer o contador de revalidações: ${health}`);
+    assert.equal(Number(m[1]), 1, `a rajada deveria colapsar em 1 revalidação: ${health}`);
+    assert.equal(Number(m[2]), 0, `nenhuma revalidação deveria falhar: ${health}`);
+  } finally {
+    mcp.close();
+  }
+});
+
+test("SWR desligado (padrão): vencido continua bloqueando na nova busca", { timeout: 60000 }, async () => {
+  // O padrão da suíte e do modo local segue conservador: expirada = busca de novo.
+  const mcp = await startMcp({
+    ALLOW_PRIVATE_HOSTS: "1",
+    CACHE_TTL_MS: "700",
+  });
+  try {
+    const url = pagina("swroff", 10);
+    await mcp.call("read_page", { url, maxChars: 200, timeoutMs: 20000 });
+    await new Promise((r) => setTimeout(r, 1200));
+    const r = await mcp.call("read_page", { url, maxChars: 200, timeoutMs: 20000 });
+    assert.equal(reqDe(r.text, "swroff"), 2, "sem SWR a releitura precisa baixar de novo");
+    const health = await (await fetch(`${mcp.base}/health`)).text();
+    const m = health.match(/revalidacoes: (\d+) \(falhas (\d+)\)/);
+    assert.equal(Number(m[1]), 0, `sem SWR nao pode haver revalidacao: ${health}`);
+  } finally {
+    mcp.close();
+  }
+});

@@ -21,7 +21,8 @@ import {
   OUTBOUND_MAX_QUEUE,
   clampEnv,
 } from "./config.mjs";
-import { admissaoHttp, limiteSaida, orcamentoSaida, cacheStats } from "./fetch.mjs";
+import { admissaoHttp, limiteSaida, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes } from "./fetch.mjs";
+import { conversoesMemo } from "./tools.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
 // Referência global ao servidor HTTP (para encerramento por erro fatal).
@@ -170,6 +171,9 @@ export async function montarTextoHealth(server) {
     `${orcamentoSaida.stats.naFila} na fila, recusados ${orcamentoSaida.stats.recusados}) | `,
     `conexoes: ${conexoes} | `,
     `rss: ${Math.round(mem.rss / 1024 / 1024)} MB`,
+    ` | coalescidas: ${coalescedorDeBuscas.stats.colapsadas} (em voo ${coalescedorDeBuscas.stats.emVoo})`,
+    ` | revalidacoes: ${revalidacoes.tentadas} (falhas ${revalidacoes.falhas})`,
+    ` | conversoes: ${conversoesMemo.realizadas} (reaproveitadas ${conversoesMemo.caronas})`,
   ].join("");
 }
 

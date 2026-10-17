@@ -83,6 +83,23 @@ export const CACHE_MAX_ENTRY_BYTES = Math.min(
   Math.floor(MAX_RESPONSE_BYTES / 2)
 );
 
+// Revalidação em segundo plano (stale-while-revalidate). Desligada por padrão:
+// expirada = busca de novo (o comportamento que a suíte trava). Com CACHE_SWR=1,
+// entrada vencida dentro da janela de graça é servida na hora e atualizada atrás
+// — quem chega no vencimento não espera download nenhum.
+export const CACHE_SWR = process.env.CACHE_SWR === "1";
+// Janela de graça do SWR em ms. 0 = padrão do cache (2× o TTL).
+export const CACHE_STALE_WINDOW_MS = clampEnvZero(
+  process.env.CACHE_STALE_WINDOW_MS,
+  0,
+  0,
+  Number.MAX_SAFE_INTEGER
+);
+
+// Memoização da conversão (HTML -> markdown/meta/links) por conteúdo baixado.
+// Ligada por padrão; MEMO_CONVERSAO=0 desliga (depurar o parser sem memo).
+export const MEMO_CONVERSAO = process.env.MEMO_CONVERSAO !== "0";
+
 // Cache de validação de host (SSRF).
 export const HOST_CHECK_TTL_MS = 5 * 60 * 1000;
 export const HOST_CHECK_MAX_ENTRIES = 500;

@@ -16,16 +16,16 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | --- | --- |
 | `config.mjs` | **Toda** a configuração: tetos, timeouts, defaults e os clamps de variável de ambiente. Nenhum outro módulo lê `process.env` diretamente. |
 | `errors.mjs` | As 18 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
-| `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes) e o cache LRU com TTL. |
+| `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes), o cache LRU com TTL e a **junção de buscas em voo** (single-flight). |
 | `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado, NAT64, 6to4), DNS rebinding, Agent validado e robots.txt. |
-| `fetch.mjs` | O fetch de baixo nível: cache, redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
+| `fetch.mjs` | O fetch de baixo nível: cache, **junção de buscas em voo**, revalidação em segundo plano (SWR), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. |
+| `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, handlers, `/health` e shutdown limpo. |
 | `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
 
-**As três regras que mantêm o projeto saudável:**
+**As quatro regras que mantêm o projeto saudável:**
 
 1. **Segurança na origem, não na borda.** `fetchTextCached` valida SSRF e robots **antes**
    de olhar o cache e **antes** de baixar — então toda ferramenta herda a guarda de
@@ -35,6 +35,10 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 3. **Erro classificado, mensagem traduzida.** O código de erro (`HTTP_404`,
    `HOST_BLOQUEADO`, `TIMEOUT`…) nasce junto com a exceção; o transporte só decide o
    status HTTP a partir dele.
+4. **Trabalho repetido não se multiplica.** Junção de buscas em voo, cache com
+   revalidação em segundo plano e memoização da conversão andam juntos: uma rajada de
+   milhares de pedidos nas **mesmas** URLs vira pouquíssimos downloads e quase zero
+   conversão redundante (ver *Capacidade e carga*).
 
 ## Ferramentas
 
@@ -55,14 +59,16 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda dezessete arquivos em `tests/` (14 suítes + 1 helpers + snapshots, ~35 s, sem rede na maioria):
+Roda dezenove arquivos em `tests/` (16 suítes + 1 helpers + snapshots, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
 | `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos) e rate limit (não burlável por `x-forwarded-for`) |
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
-| `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração |
+| `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração, **SWR (vencido serve na hora; rajada no vencimento = 1 revalidação)** |
+| `tests/coalesce.test.mjs` | **junção de buscas em voo**: rajada de N leituras da mesma URL = 1 acesso, série continua do cache, falha compartilhada não derruba o servidor |
+| `tests/memo.test.mjs` | **memoização da conversão**: acerto de cache reaproveita, conteúdo novo reconverte, `MEMO_CONVERSAO=0` desliga, ferramentas compartilham o memo do mesmo payload |
 | `tests/campo-fixes.test.mjs` | regressões dos bugs encontrados na rodada de campo (fidelidade de conteúdo, charset, tabelas) |
 | `tests/defaults.test.mjs` | trava os padrões de leitura: `maxChars` 8000, `MAX_REDIRECTS` 5 e `DEFAULT_TIMEOUT_MS` 8000 |
 | `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
@@ -244,7 +250,10 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
-   o cache em produção.
+   o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
+   `coalescidas: N (em voo M)` (pedidos que caronaram na junção de buscas),
+   `revalidacoes: N (falhas M)` (atualizações em segundo plano) e
+   `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas).
 
 ### Conectar o MCP remoto
 
@@ -379,6 +388,9 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `CACHE_MAX_BYTES` | `33554432` (32 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
 | `CACHE_MAX_ENTRIES` | `100` | Teto de entradas do cache (o segundo teto, além dos bytes). |
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
+| `CACHE_SWR` | desligada | `1` liga a **revalidação em segundo plano**: entrada vencida dentro da janela de graça é servida na hora e atualizada atrás (passando pela junção em voo). O `render.yaml` liga. Desligada, vencida = busca de novo (comportamento conservador). |
+| `CACHE_STALE_WINDOW_MS` | `0` (2× o TTL) | Tamanho da janela de graça do SWR em ms. Fora dela, a entrada é descartada e a leitura espera a nova busca. |
+| `MEMO_CONVERSAO` | ligada | `0` desliga a memoização da conversão (HTML → markdown/meta/links). Existe para depurar o parser; não há por quê desligar em produção. |
 | `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
 | `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (`ROBOTS_NEGATIVE_TTL_MS`, 60 s fixo). |
 | `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
@@ -445,12 +457,52 @@ confortavelmente à esquerda do joelho. Já 10.000 requisições *em voo* não c
 numa instância: o servidor atende o que pode e responde **503 explícito** para o
 resto, sem estourar a memória.
 
+#### Rajada nas mesmas URLs: o trabalho não se multiplica
+
+O cenário que importa num produto de IA: **muita gente lendo os mesmos sites
+difíceis** ao mesmo tempo. Sem proteção, uma rajada de N pedidos da mesma URL
+virava N downloads (o cache só esquenta depois do primeiro terminar) e cada
+leitura acerto pagava a conversão HTML → markdown de novo. Três mecanismos
+resolvem, e eles trabalham juntos:
+
+1. **Junção de buscas em voo (single-flight).** Pedidos simultâneos da mesma URL
+   compartilham **um único download**: o primeiro inicia, os demais caronam e
+   recebem a mesma resposta. Vale para todas as ferramentas. No `/health`, o
+   campo `coalescidas` conta as caronas (e `em voo`, quantas buscas estão ativas).
+2. **Revalidação em segundo plano (stale-while-revalidate, `CACHE_SWR=1`).** No
+   vencimento do cache, quem chega recebe a versão guardada **na hora** e a
+   atualização acontece atrás — passando pela junção, então uma rajada no
+   vencimento vira **uma** revalidação. Sem isso, o instante do vencimento era o
+   pior momento possível: todo mundo esperava bloqueado pela mesma nova busca.
+3. **Memoização da conversão.** O HTML baixado é convertido **uma vez** por
+   conteúdo (meta, markdown e links ficam presos ao objeto do cache via
+   `WeakMap`); acerto de cache não paga parser de novo. Conteúdo novo (TTL
+   vencido, revalidação) é objeto novo e converte de novo — sem invalidação para
+   esquecer. No `/health`: `conversoes: N (reaproveitadas M)`.
+
+Efeito combinado, medido nos testes: **12 leituras simultâneas da mesma URL = 1
+acesso** ao site (`tests/coalesce.test.mjs`), **8 pedidos no vencimento = 1
+revalidação** (`tests/cache.test.mjs`), e releituras de cache **não reconvertem**
+(`tests/memo.test.mjs`).
+
+O que isso **não** muda: o teto físico de conexões simultâneas da instância.
+Nenhuma dessas otimizações multiplica hardware — elas garantem que o serviço
+**não desperdice** o que tem. 30 mil conexões simultâneas num plano free não
+existem; o que existe é uma multidão em cima das mesmas páginas colapsando em
+poucos downloads, com o excedente de conexões recebendo 503 explícito e
+retentativa que acerta o cache.
+
 Para testar carga:
 
 ```bash
 node dev/load/harness.mjs --concurrency 64 --seconds 15 --mode read --delay 150
+node dev/load/rajada.mjs   # prova de rajada: mesmos sites, muitos leitores, antes × depois
 k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t dev/load/k6.js
 ```
+
+O `rajada.mjs` compara o servidor atual com a cópia em `dev/_baseline/` sob a
+**mesma carga** — é ele que produz os números de "acessos ao site" citados
+acima (com a cópia do baseline congelada da rodada anterior).
 
 O `k6` não é dependência do projeto — instale à parte (`winget`/`brew`/`apt`).
 Os números antes/depois do tuning e o caminho para 10k req/s ficaram registrados

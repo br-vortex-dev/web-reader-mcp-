@@ -88,19 +88,26 @@ export async function startFixture({ robots = "regras" } = {}) {
   const server = http.createServer((req, res) => {
     const path = String(req.url || "/");
 
-    // /page/<id>?kb=N -> pagina de ~N KB com o contador de requisicoes no texto.
+    // /page/<id>?kb=N[&ms=M] -> pagina de ~N KB com o contador de requisicoes no
+    // texto. `ms` atrasa a resposta (usado pelos testes de junção em voo para
+    // garantir que os pedidos chegam ENQUANTO a busca esta em andamento).
     if (path.startsWith("/page/")) {
       const url = new URL(path, "http://local");
       const id = url.pathname.slice("/page/".length);
       const kb = Number(url.searchParams.get("kb")) || 1;
+      const ms = Number(url.searchParams.get("ms")) || 0;
       const n = (hits.get(id) || 0) + 1;
       hits.set(id, n);
       const recheio = "x".repeat(Math.max(0, kb * 1024 - 400));
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(
-        `<!DOCTYPE html><html><head><title>Pagina ${id}</title></head><body>` +
-          `<h1>Pagina ${id}</h1><p>REQ-${id}-${n}</p><p>${recheio}</p></body></html>`
-      );
+      const responder = () => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!DOCTYPE html><html><head><title>Pagina ${id}</title></head><body>` +
+            `<h1>Pagina ${id}</h1><p>REQ-${id}-${n}</p><p>${recheio}</p></body></html>`
+        );
+      };
+      if (ms > 0) setTimeout(responder, ms);
+      else responder();
       return;
     }
 

@@ -10,6 +10,7 @@ import {
   MULTI_MAX_TOTAL_CHARS,
   FETCH_CONCURRENCY,
   DEFAULT_MAX_CHARS,
+  MEMO_CONVERSAO,
 } from "./config.mjs";
 import {
   fetchTextCached,
@@ -29,6 +30,80 @@ import {
   FerramentaDesconhecidaError,
   CrawlError,
 } from "./errors.mjs";
+
+/* ===================================================================== *
+ * Memoização da conversão (por conteúdo baixado)                          *
+ * ===================================================================== */
+
+/**
+ * Converter HTML é a parte CARA da leitura (tokenize + htmlToMarkdown ≈ 3 ms
+ * por página pequena, mais em páginas grandes). O payload do cache é estável
+ * entre acertos — o MESMO objeto é devolvido — então memoizamos meta, markdown
+ * e links num WeakMap chaveado por ele: o primeiro toque converte, os
+ * seguintes só consultam. Conteúdo novo (TTL vencido, revalidação do SWR) =
+ * objeto novo = conversão nova — a invalidação é a identidade do objeto.
+ * WeakMap ainda garante que nada fica preso: sem referência, some com o payload.
+ *
+ * `conversoesMemo` é exposto no /health: `realizadas` são conversões de fato
+ * executadas; `caronas` são consultas que acharam o resultado pronto.
+ */
+const memoConversao = new WeakMap();
+export const conversoesMemo = { realizadas: 0, caronas: 0 };
+
+function memoDoPayload(payload) {
+  if (!MEMO_CONVERSAO) return null;
+  let entrada = memoConversao.get(payload);
+  if (!entrada) {
+    entrada = {};
+    memoConversao.set(payload, entrada);
+  }
+  return entrada;
+}
+
+function metaMemo(payload) {
+  const memo = memoDoPayload(payload);
+  if (!memo) {
+    conversoesMemo.realizadas++;
+    return extractMeta(payload.text);
+  }
+  if (!("meta" in memo)) {
+    memo.meta = extractMeta(payload.text);
+    conversoesMemo.realizadas++;
+  } else {
+    conversoesMemo.caronas++;
+  }
+  return memo.meta;
+}
+
+function markdownMemo(payload) {
+  const memo = memoDoPayload(payload);
+  if (!memo) {
+    conversoesMemo.realizadas++;
+    return htmlToMarkdown(payload.text, payload.finalUrl);
+  }
+  if (!("markdown" in memo)) {
+    memo.markdown = htmlToMarkdown(payload.text, payload.finalUrl);
+    conversoesMemo.realizadas++;
+  } else {
+    conversoesMemo.caronas++;
+  }
+  return memo.markdown;
+}
+
+function linksMemo(payload) {
+  const memo = memoDoPayload(payload);
+  if (!memo) {
+    conversoesMemo.realizadas++;
+    return extractLinks(payload.text, payload.finalUrl);
+  }
+  if (!("links" in memo)) {
+    memo.links = extractLinks(payload.text, payload.finalUrl);
+    conversoesMemo.realizadas++;
+  } else {
+    conversoesMemo.caronas++;
+  }
+  return memo.links;
+}
 
 /**
  * Extrai JSON de uma tag <script> pelo id.
@@ -339,13 +414,14 @@ export async function toolReadPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
   }
-  const meta = extractMeta(html);
-  let markdown = htmlToMarkdown(html, finalUrl);
+  const meta = metaMemo(payload);
+  let markdown = markdownMemo(payload);
   if (markdown.replace(/\s+/g, " ").trim().length < 300 && isDynamicPage(html, markdown)) {
     const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
@@ -367,9 +443,10 @@ export async function toolExtractLinks(args) {
   const parsed = validateHttpUrl(args.url);
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html, finalUrl);
-  const all = extractLinks(html, finalUrl);
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { finalUrl } = payload;
+  ensureHtml("", payload.text, finalUrl);
+  const all = linksMemo(payload);
   const shown = all.slice(0, limit);
   const lines = [`Links em ${finalUrl}: ${all.length} encontrados, exibindo ${shown.length}.`, ""];
   shown.forEach((link, index) => {
@@ -465,17 +542,18 @@ export async function toolReadDynamicPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
   }
-  const meta = extractMeta(html);
+  const meta = metaMemo(payload);
 
   const pareceDinamica = htmlIndicaDinamico(html);
 
   if (!pareceDinamica) {
-    const markdown = htmlToMarkdown(html, finalUrl);
+    const markdown = markdownMemo(payload);
     const { text, truncated } = truncate(markdown, maxChars);
     return formatReadResult({
       finalUrl,
@@ -487,7 +565,7 @@ export async function toolReadDynamicPage(args) {
     });
   }
 
-  const markdown = htmlToMarkdown(html, finalUrl);
+  const markdown = markdownMemo(payload);
   const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= 300;
 
   if (estaticoCompleto) {
@@ -586,9 +664,9 @@ export async function toolDiscoverUrls(args) {
     ].join("\n");
   }
 
-  const { text: html, finalUrl } = await fetchTextCached(parsed.href, { timeoutMs });
-  ensureHtml("", html, finalUrl);
-  const internos = extractLinks(html, finalUrl).filter((l) => l.internal);
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  ensureHtml("", payload.text, payload.finalUrl);
+  const internos = linksMemo(payload).filter((l) => l.internal);
   const mostrados = internos.slice(0, limite);
   if (mostrados.length === 0) {
     return `Nenhum sitemap encontrado em ${origin} e a página inicial não tem links internos. Use extract_links ou passe a URL diretamente.`;
@@ -605,10 +683,12 @@ export async function toolDiscoverUrls(args) {
 /**
  * Filtra os links internos uteis para seguir num crawl: mesmo dominio, nao a
  * propria pagina e fora dos padroes de navegacao (login, tag, paginacao...).
+ * Opera sobre a lista MEMOIZADA do payload: a extracao roda uma vez por
+ * conteudo baixado, nao uma vez por chamada.
  */
-function linksParaCrawl(html, finalUrl) {
-  return extractLinks(html, finalUrl)
-    .filter((l) => l.internal && l.href !== finalUrl && !isNavigationUrl(l.href))
+function linksParaCrawl(payload) {
+  return linksMemo(payload)
+    .filter((l) => l.internal && l.href !== payload.finalUrl && !isNavigationUrl(l.href))
     .map((l) => l.href);
 }
 
@@ -619,20 +699,21 @@ function linksParaCrawl(html, finalUrl) {
  */
 async function lerPaginaCompleta(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
-  const { text: html, finalUrl, contentType } = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
     return {
       conteudo: conteudoBrutoResult(html, finalUrl, maxChars),
-      links: linksParaCrawl(html, finalUrl),
+      links: linksParaCrawl(payload),
     };
   }
-  const meta = extractMeta(html);
-  const markdown = htmlToMarkdown(html, finalUrl);
+  const meta = metaMemo(payload);
+  const markdown = markdownMemo(payload);
   const { text, truncated } = truncate(markdown, maxChars);
   return {
     conteudo: formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length }),
-    links: linksParaCrawl(html, finalUrl),
+    links: linksParaCrawl(payload),
   };
 }
 

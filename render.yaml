@@ -31,3 +31,10 @@ services:
       # continua sendo a admissao (MAX_INFLIGHT_REQUESTS -> 503).
       - key: RATE_LIMIT_MAX
         value: "10000"
+      # Cache: entradas vencidas são servidas na hora e revalidadas atrás
+      # (stale-while-revalidate). Junto com a junção de buscas em voo (código),
+      # é o que impede uma rajada nas MESMAS URLs de virar uma rajada de
+      # downloads: quem chega no vencimento recebe a versão em cache sem
+      # esperar, e a atualização acontece uma vez só, atrás.
+      - key: CACHE_SWR
+        value: "1"
