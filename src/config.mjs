@@ -48,8 +48,10 @@ export const FETCH_CONCURRENCY = Math.max(
   Math.min(32, Math.floor(Number(process.env.FETCH_CONCURRENCY) || 32))
 );
 
-// Busca automática de APIs internas.
-export const API_MAX_CANDIDATES = Math.max(0, Math.floor(Number(process.env.API_MAX_CANDIDATES || 2)));
+// Busca automática de APIs internas. Aceita 0 (desliga) e qualquer inteiro
+// >= 0 (sem teto artificial). Um env não numérico cai no padrão — antes
+// virava NaN e a busca desligava em silêncio.
+export const API_MAX_CANDIDATES = clampEnvZero(process.env.API_MAX_CANDIDATES, 2, 0, Number.MAX_SAFE_INTEGER);
 export const API_TOTAL_BUDGET_MS = Math.max(250, Math.floor(Number(process.env.API_TOTAL_BUDGET_MS) || 1500));
 
 // Controle de admissão HTTP.

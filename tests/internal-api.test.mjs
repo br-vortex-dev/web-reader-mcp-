@@ -146,3 +146,21 @@ test("API_MAX_CANDIDATES=0 desliga a busca automatica", { timeout: 60000 }, asyn
     mcp.close();
   }
 });
+
+/* ------- env invalida nao desliga a busca em silencio ------- */
+
+test("env nao numerica de API_MAX_CANDIDATES cai no padrao (busca continua)", { timeout: 60000 }, async () => {
+  const mcp = await startMcp({ ALLOW_PRIVATE_HOSTS: "1", API_MAX_CANDIDATES: "abc" });
+  try {
+    const url = paginaCom(["/api/probe/um", "/api/probe/dois", "/api/probe/tres"]);
+    const r = await mcp.call("read_page", { url, maxChars: 4000, timeoutMs: 10000 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(
+      fixture.probes.length,
+      2,
+      `com env invalida o padrao (2) tem de valer — buscou: ${fixture.probes.join(", ") || "nada"}`
+    );
+  } finally {
+    mcp.close();
+  }
+});

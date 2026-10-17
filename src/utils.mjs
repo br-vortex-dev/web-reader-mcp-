@@ -20,7 +20,10 @@ export function criarFila() {
   };
 
   const peek = () => {
-    while (cabeca < itens.length && itens[cabeca].decidido) {
+    // A posicao tambem pode estar VAZIA (remover() apaga a entrada no lugar):
+    // sem a guarda, ler .decidido de um buraco quebrava com TypeError e
+    // derrubava o liberar() seguinte.
+    while (cabeca < itens.length && (!itens[cabeca] || itens[cabeca].decidido)) {
       itens[cabeca] = undefined;
       cabeca++;
     }
@@ -61,13 +64,22 @@ export function criarFila() {
         pendentes--;
       }
     },
-    // Tira uma entrada especifica da fila. So pode ser chamado DEPOIS de
-    // marcar a entrada como decidida: sem isso o item rejeitado continuaria na
-    // fila e um liberar() futuro chamaria o resolve() dele de novo.
+    // Tira uma entrada especifica da fila e desconta a contagem UMA vez.
+    // Quem desiste da espera (teto estourado) tem de sair de verdade: sem o
+    // desconto, a entrada rejeitada continuava contando em stats.naFila e a
+    // fila so PARECIA cheia; com o buraco no array, o peek() seguinte ainda
+    // quebrava com TypeError.
     remover: (item) => {
+      if (!item.decidido) {
+        item.decidido = true;
+        pendentes--;
+      }
       const posicao = itens.indexOf(item, cabeca);
-      if (posicao === -1) return;
-      itens[posicao] = undefined;
+      if (posicao !== -1) itens[posicao] = undefined;
+      if (pendentes === 0) {
+        itens = [];
+        cabeca = 0;
+      }
     },
   };
 }

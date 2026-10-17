@@ -8,7 +8,8 @@
 // Uso: node --test tests/...
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startFixture, startMcp } from "./helpers.mjs";
+import { startFixture, startMcp, sleep } from "./helpers.mjs";
+import { criarLimitador } from "../src/utils.mjs";
 
 let fixture;
 
@@ -186,6 +187,71 @@ test("o /health informa fila, recusas e memoria", { timeout: 60000 }, async () =
     assert.match(texto, /memoria de download: \d+ MB de \d+ MB/);
     assert.match(texto, /conexoes: \d+/);
     assert.match(texto, /rss: \d+ MB/);
+  } finally {
+    mcp.close();
+  }
+});
+
+/* ----------- desistencias da fila nao deixam fantasma ----------- */
+
+test("quem desiste da espera sai da contagem da fila (e o liberar nao quebra)", { timeout: 60000 }, async () => {
+  const lim = criarLimitador({ limite: 1, filaMax: 10, nome: "teste", esperaMaxMs: 40 });
+  await lim.adquirir(); // ocupa a unica vaga
+  const desistiu = lim.adquirir().then(
+    () => null,
+    (err) => err
+  );
+  assert.equal(lim.stats.naFila, 1, "o pedido deveria estar esperando");
+  const err = await desistiu;
+  assert.equal(err && err.name, "ServidorOcupadoError", `deveria desistir com erro claro: ${err}`);
+  assert.equal(lim.stats.naFila, 0, "a desistencia tem de sair da contagem da fila");
+  lim.liberar(); // antes quebrava aqui: o buraco deixado pela desistencia nao era pulado
+  await lim.adquirir(); // a vaga liberada tem de ser reaproveitada
+  lim.liberar();
+});
+
+test("desistencias da fila nao derrubam o servidor nem travam a admissao", { timeout: 60000 }, async () => {
+  const mcp = await startMcp({
+    ALLOW_PRIVATE_HOSTS: "1",
+    MAX_INFLIGHT_REQUESTS: "1",
+    MAX_WAITING_REQUESTS: "8",
+    MAX_WAIT_MS: "250",
+  });
+  try {
+    // ocupa a unica vaga com uma leitura que demora
+    const ocupado = mcp
+      .call("read_page", { url: lento(1200, 1), maxChars: 200, timeoutMs: 20000 })
+      .catch(() => null);
+    await sleep(200);
+
+    // rajada: as 3 esperam a vaga e desistem no teto de espera (250 ms)
+    const rajada = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        mcp.raw({
+          jsonrpc: "2.0",
+          id: i,
+          method: "tools/call",
+          params: { name: "read_page", arguments: { url: lento(50, 10 + i), maxChars: 200, timeoutMs: 20000 } },
+        })
+      )
+    );
+    assert.ok(
+      rajada.every((r) => r.status === 503),
+      `as 3 deveriam ser recusadas apos a espera: ${rajada.map((r) => r.status).join(",")}`
+    );
+
+    // quando a vaga e liberada, o servidor tem de continuar no ar e com a fila zerada
+    await ocupado;
+    await sleep(300);
+    const health = await fetch(`${mcp.base}/health`)
+      .then(async (r) => ({ status: r.status, texto: await r.text() }))
+      .catch((err) => ({ status: 0, texto: err.message }));
+    assert.equal(health.status, 200, `o servidor deveria seguir no ar: ${health.texto}`);
+    const naFila = Number((health.texto.match(/requisicoes: \d+ ativas, (\d+) na fila/) || [])[1]);
+    assert.equal(naFila, 0, `a fila deveria ter esvaziado: ${health.texto}`);
+
+    const depois = await mcp.call("read_page", { url: lento(30, 99), maxChars: 200, timeoutMs: 10000 });
+    assert.equal(depois.isError, false, `a admissao deveria voltar a atender: ${depois.text}`);
   } finally {
     mcp.close();
   }
