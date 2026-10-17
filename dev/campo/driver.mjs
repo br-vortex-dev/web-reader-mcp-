@@ -1,6 +1,6 @@
-// campo/driver.mjs - bateria de campo do web-reader-mcp (somente teste).
+// dev/campo/driver.mjs - bateria de campo do web-reader-mcp (somente teste).
 // Sobe o server.js local em modo HTTP e chama as ferramentas MCP por JSON-RPC,
-// como uma IA faria. NAO altera o produto. Saidas brutas em campo/raw/.
+// como uma IA faria. NAO altera o produto. Saidas brutas em dev/campo/raw/.
 //
 // Desvio de config documentado: RATE_LIMIT_MAX=1000000 nesta instancia local,
 // para que a propria bateria (+-65 chamadas) nao seja travada pelo limite de
@@ -118,10 +118,10 @@ async function esperarServidor(url, tempoMs = 30000) {
 }
 
 async function main() {
-  await rm(path.join(RAIZ, "campo", "raw"), { recursive: true, force: true });
-  await mkdir(path.join(RAIZ, "campo", "raw"), { recursive: true });
+  await rm(path.join(RAIZ, "dev", "campo", "raw"), { recursive: true, force: true });
+  await mkdir(path.join(RAIZ, "dev", "campo", "raw"), { recursive: true });
 
-  const log = await (await import("node:fs/promises")).open(path.join(RAIZ, "campo", "server.log"), "w");
+  const log = await (await import("node:fs/promises")).open(path.join(RAIZ, "dev", "campo", "server.log"), "w");
   const { ALLOW_PRIVATE_HOSTS: _descarta, ...envLimpo } = process.env; // garantia: nunca ativa
   const filho = spawn(process.execPath, [path.join(RAIZ, "server.js")], {
     env: {
@@ -183,7 +183,7 @@ async function main() {
 
     const arq = `${String(i + 1).padStart(2, "0")}-${slug(cat + "-" + nome)}.md`;
     await writeFile(
-      path.join(RAIZ, "campo", "raw", arq),
+      path.join(RAIZ, "dev", "campo", "raw", arq),
       [
         `# caso ${i + 1}: [${cat}] ${nome}`,
         `ferramenta: ${tool}`,
@@ -210,7 +210,7 @@ async function main() {
   }
 
   const healthFim = await (await fetch(BASE + "/health", { signal: AbortSignal.timeout(10000) })).text();
-  await writeFile(path.join(RAIZ, "campo", "resultados.json"), JSON.stringify({ health0, healthFim, casos: resultados }, null, 2));
+  await writeFile(path.join(RAIZ, "dev", "campo", "resultados.json"), JSON.stringify({ health0, healthFim, casos: resultados }, null, 2));
   console.log("\n/health final:", healthFim.slice(0, 160));
 
   /* --- teste de rate limit: segunda instancia, limite padrao (60/min) --- */
@@ -240,7 +240,7 @@ async function main() {
     }
   }
   console.log(`  primeira resposta 429 na chamada: ${primeira429} | total de 429: ${cont429}/65`);
-  await writeFile(path.join(RAIZ, "campo", "ratelimit.json"), JSON.stringify({ primeira429, cont429, banner: log2.join("") }, null, 2));
+  await writeFile(path.join(RAIZ, "dev", "campo", "ratelimit.json"), JSON.stringify({ primeira429, cont429, banner: log2.join("") }, null, 2));
 
   filho2.kill();
   filho.kill();

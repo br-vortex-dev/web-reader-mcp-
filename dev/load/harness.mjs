@@ -5,7 +5,7 @@
 // keep-alive, cada um com 1 requisicao em voo, ate acabar o tempo.
 //
 // Uso:
-//   node load/harness.mjs --concurrency 10000 --seconds 20 --mode read
+//   node dev/load/harness.mjs --concurrency 10000 --seconds 20 --mode read
 //
 // Modos:
 //   tools      -> tools/list (nao faz I/O): mede a camada HTTP pura

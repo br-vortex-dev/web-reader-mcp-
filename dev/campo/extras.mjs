@@ -1,4 +1,4 @@
-// campo/extras.mjs - chamadas extras da bateria de campo (somente teste).
+// dev/campo/extras.mjs - chamadas extras da bateria de campo (somente teste).
 // Fecha lacunas deixadas pela bateria principal:
 //   - PDF com URL viva (a original caiu: africau.edu devolveu 404)
 //   - endpoint JSON via read_dynamic_page (a original so testou read_page)
@@ -8,7 +8,7 @@
 //   - tabela complexa com colspan/rowspan (Copa do Mundo FIFA) e
 //     tabela periodica com maxChars bem maior (além da grade-em-imagem)
 //   - site BR legado em ISO-8859-1 de verdade (BCB virou SPA: 0 chars)
-// NAO altera o produto. Saidas brutas em campo/raw/ (numeracao 64+).
+// NAO altera o produto. Saidas brutas em dev/campo/raw/ (numeracao 64+).
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -46,7 +46,7 @@ async function esperarServidor(url, tempoMs = 30000) {
 }
 
 async function main() {
-  await mkdir(path.join(RAIZ, "campo", "raw"), { recursive: true });
+  await mkdir(path.join(RAIZ, "dev", "campo", "raw"), { recursive: true });
   const { ALLOW_PRIVATE_HOSTS: _descarta, ...envLimpo } = process.env; // garantia: nunca ativa
   const filho = spawn(process.execPath, [path.join(RAIZ, "server.js")], {
     env: { ...envLimpo, PORT: String(PORTA), MCP_AUTH_TOKEN: TOKEN, RATE_LIMIT_MAX: "1000000", TRUST_PROXY_HOPS: "0" },
@@ -88,7 +88,7 @@ async function main() {
 
     const arq = `${String(num).padStart(2, "0")}-${slug(cat + "-" + nome)}.md`;
     await writeFile(
-      path.join(RAIZ, "campo", "raw", arq),
+      path.join(RAIZ, "dev", "campo", "raw", arq),
       [
         `# caso ${num}: [${cat}] ${nome}`,
         `ferramenta: ${tool}`,
@@ -114,7 +114,7 @@ async function main() {
     console.log(`${sinal} ${String(num).padStart(2)} [${cat}] ${nome.padEnd(24)} ${String(ms).padStart(6)} ms  ${String(texto.length).padStart(6)} chars${truncado ? " TRUNC" : ""}${mojibake ? " MOJIBAKE" : ""}`);
   }
 
-  await writeFile(path.join(RAIZ, "campo", "extras.json"), JSON.stringify({ casos: resultados }, null, 2));
+  await writeFile(path.join(RAIZ, "dev", "campo", "extras.json"), JSON.stringify({ casos: resultados }, null, 2));
   filho.kill();
   await sleep(300);
   filho.kill("SIGKILL");

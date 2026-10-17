@@ -157,8 +157,9 @@ web-reader-mcp/
 ├── README.md
 ├── RELATORIO-CAMPO.md <- relatorio da rodada de campo na web real
 ├── tests/             <- testes automatizados (node:test, sem dependencias)
-├── campo/             <- bateria de campo: driver + saidas brutas de 70 casos
-├── load/              <- harness de carga e script k6
+├── dev/               <- material de desenvolvimento (nao e produto)
+│   ├── campo/         <- bateria de campo: driver + saidas brutas de 70 casos
+│   └── load/          <- harness de carga e script k6
 └── scripts/           <- clientes MCP manuais (smoke-test, live-test, benchmarks)
 ```
 
@@ -429,7 +430,7 @@ isso é feature nova, não correção, e não está implementado.
 O teto deste serviço é **CPU de um núcleo**: ~310 req/s por núcleo, porque cada
 página custa ~3 ms de `tokenize` + `htmlToMarkdown`. Não é HTTP, cache nem fila.
 
-Curva medida (`node load/harness.mjs --mode read --delay 150`):
+Curva medida (`node dev/load/harness.mjs --mode read --delay 150`):
 
 | Concorrência | Vazão | p50 | Sucesso |
 | --- | --- | --- | --- |
@@ -447,8 +448,8 @@ resto, sem estourar a memória.
 Para testar carga:
 
 ```bash
-node load/harness.mjs --concurrency 64 --seconds 15 --mode read --delay 150
-k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t load/k6.js
+node dev/load/harness.mjs --concurrency 64 --seconds 15 --mode read --delay 150
+k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t dev/load/k6.js
 ```
 
 O `k6` não é dependência do projeto — instale à parte (`winget`/`brew`/`apt`).

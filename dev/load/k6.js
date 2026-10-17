@@ -9,13 +9,13 @@
 //   sudo apt install k6      (Linux)
 //
 // Rodar contra um deploy:
-//   k6 run -e MCP_URL=https://SEU-APP.onrender.com/mcp -e MCP_TOKEN=xxx load/k6.js
+//   k6 run -e MCP_URL=https://SEU-APP.onrender.com/mcp -e MCP_TOKEN=xxx dev/load/k6.js
 //
 // Rodar local (suba antes: MCP_AUTH_TOKEN=t RATE_LIMIT_MAX=1000000 node server.js --http):
-//   k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t load/k6.js
+//   k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t dev/load/k6.js
 //
 // Escala do teste (padrao: rampa ate 10.000 VUs):
-//   k6 run -e VUS_MAX=10000 -e DURACAO=2m load/k6.js
+//   k6 run -e VUS_MAX=10000 -e DURACAO=2m dev/load/k6.js
 //
 // ATENCAO sobre o rate limit: o servidor limita 60 requisicoes/min por cliente
 // (RATE_LIMIT_MAX). Um teste de carga realista precisa de varios IPs de saida,
