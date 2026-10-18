@@ -75,12 +75,14 @@ console.log(`alvo: ${base}\n`);
   );
   check(r.status === 200 && !r.isError, "YouTube: chamada respondida sem erro");
   check(/Plataforma: YouTube/.test(r.texto), "YouTube: plataforma identificada");
-  check(/Canal: Rick Astley/.test(r.texto), "YouTube: metadados completos (canal)");
+  const temCanal = /Canal: Rick Astley/.test(r.texto);
+  const temFallback = /Aviso: metadados parciais \(via oEmbed\)/.test(r.texto);
+  check(temCanal, "YouTube: metadados presentes (canal)" + (temFallback ? " — via fallback oEmbed" : ""));
   check(/Transcricao: /.test(r.texto), "YouTube: campo de transcrição sempre presente");
   const linha = (r.texto.match(/Transcricao: [^\n]*/) || [""])[0].trim();
   if (linha) console.log(`   ${linha.slice(0, 140)}`);
   if (/indisponivel/.test(linha)) {
-    check(/robots|vazio/i.test(linha), "YouTube: motivo declarado (robots/corpo vazio)");
+    check(/robots|vazio|recusada/i.test(linha), "YouTube: motivo declarado (robots/corpo vazio/página recusada)");
   }
 }
 
