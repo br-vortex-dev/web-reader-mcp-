@@ -248,6 +248,115 @@ function renderTable(rows) {
 }
 
 /* ===================================================================== *
+ * Rastreio incremental do buffer                                          *
+ *                                                                         *
+ * O fecho de <pre> precisa, a cada bloco de código, da última cerca        *
+ * "```\n" do buffer e do buffer sem os "\n" finais. Fazer isso varrendo    *
+ * `out` inteiro a cada fecho custava O(n) por bloco — O(n²) na página      *
+ * (o perfil apontou ~48% do CPU do parser aí). O estado mantido por estes  *
+ * helpers responde às duas perguntas sem varredura:                        *
+ *   - `cercas`: posições das cercas "```\n" no buffer, em ordem crescente; *
+ *   - `tail`:   os últimos 3 caracteres do buffer (pega a cerca que cruza *
+ *               a junção de dois chunks);                                  *
+ *   - `nlMat`:  "\n" finais contíguos do buffer;                          *
+ *   - `pend`:   "\n" finais ainda não materializados no buffer (o strip do *
+ *               </pre> os descarta de graça).                              *
+ * ===================================================================== */
+
+/** Anexa um pedaço ao buffer lógico, mantendo o rastreio em sincronia. */
+function empurrar(st, chunk) {
+  if (!chunk) return;
+  // Cerca "```\n" que cruza a fronteira deste pedaço com o anterior.
+  const base = st.outLen - st.prevTail.length;
+  const combinado = st.prevTail + chunk;
+  for (let idx = combinado.indexOf("```\n"); idx !== -1; idx = combinado.indexOf("```\n", idx + 1)) {
+    st.cercas.push(base + idx);
+  }
+  st.chunks.push(chunk);
+  st.outLen += chunk.length;
+  st.prevTail = combinado.slice(-3);
+  let j = chunk.length;
+  while (j > 0 && chunk.charCodeAt(j - 1) === 10) j--;
+  st.nlFim = j === 0 ? st.nlFim + chunk.length : chunk.length - j;
+}
+
+/** Recalcula `prevTail` e `nlFim` a partir dos pedaços (após um corte). */
+function sincronizarFim(st) {
+  let nl = 0;
+  for (let i = st.chunks.length - 1; i >= 0; i--) {
+    const c = st.chunks[i];
+    let j = c.length;
+    while (j > 0 && c.charCodeAt(j - 1) === 10) j--;
+    nl += c.length - j;
+    if (j > 0) break;
+  }
+  st.nlFim = nl;
+  let tail = "";
+  for (let i = st.chunks.length - 1; i >= 0; i--) {
+    const c = st.chunks[i];
+    const falta = 3 - tail.length;
+    if (c.length >= falta) {
+      tail = c.slice(-falta) + tail;
+      break;
+    }
+    tail = c + tail;
+  }
+  st.prevTail = tail;
+}
+
+/** Corta o buffer lógico para `novoLen` caracteres e sincroniza o rastreio. */
+function truncarPara(st, novoLen) {
+  if (novoLen >= st.outLen) return;
+  if (novoLen < 0) novoLen = 0;
+  let excesso = st.outLen - novoLen;
+  while (excesso > 0) {
+    const ult = st.chunks[st.chunks.length - 1];
+    if (ult.length <= excesso) {
+      st.chunks.pop();
+      excesso -= ult.length;
+    } else {
+      st.chunks[st.chunks.length - 1] = ult.slice(0, ult.length - excesso);
+      excesso = 0;
+    }
+  }
+  st.outLen = novoLen;
+  while (st.cercas.length > 0 && st.cercas[st.cercas.length - 1] + 4 > novoLen) {
+    st.cercas.pop();
+  }
+  sincronizarFim(st);
+}
+
+/** Extrai do buffer lógico o trecho de `inicio` até o fim: `out.slice(inicio)`. */
+function extrairDe(st, inicio) {
+  if (inicio >= st.outLen) return "";
+  let fim = st.outLen;
+  const partes = [];
+  for (let i = st.chunks.length - 1; i >= 0 && fim > inicio; i--) {
+    const c = st.chunks[i];
+    const pi = fim - c.length;
+    if (pi >= inicio) {
+      partes.push(c);
+      fim = pi;
+    } else {
+      partes.push(c.slice(inicio - pi));
+      fim = inicio;
+    }
+  }
+  partes.reverse();
+  return partes.join("");
+}
+
+/** Junta o buffer lógico numa string (uma vez, no final). */
+function materializar(st) {
+  return st.chunks.length === 1 ? st.chunks[0] : st.chunks.join("");
+}
+
+/** Remove os "\n" finais do buffer lógico (o strip do fecho de <pre>). */
+function removerNovasLinhasFinais(st) {
+  if (st.nlFim > 0) truncarPara(st, st.outLen - st.nlFim);
+}
+
+/* ===================================================================== *
  * Estado da conversão                                                     *
  * ===================================================================== */
 
@@ -258,7 +367,15 @@ function renderTable(rows) {
  */
 function criarEstadoConversao() {
   return {
-    out: "",
+    // Buffer lógico em pedaços + rastreio incremental (ver "Rastreio
+    // incremental do buffer" acima): `chunks`/`outLen` são a saída;
+    // `cercas`, `nlFim` e `prevTail` respondem barato às perguntas do
+    // fecho de <pre> (última cerca, "\n" finais, junção de pedaços).
+    chunks: [],
+    outLen: 0,
+    prevTail: "",
+    nlFim: 0,
+    cercas: [],
     skipDepth: 0,
     preDepth: 0,
     openStack: [],
@@ -270,8 +387,8 @@ function criarEstadoConversao() {
     tableCell: null,
     ultimoBlocoCodigo: null,
     emit(chunk) {
-      if (this.tableCell) this.tableCell.text += chunk;
-      else this.out += chunk;
+      if (this.tableCell) { this.tableCell.text += chunk; return; }
+      empurrar(this, chunk);
     },
   };
 }
@@ -390,7 +507,7 @@ function fecharTabela(st, tag, emit) {
     if (st.tableDepth > 0) {
       st.tableDepth--;
       if (st.tableDepth === 0) {
-        st.out += renderTable(st.tableRows);
+        empurrar(st, renderTable(st.tableRows));
         st.tableRows = [];
         st.tableRow = null;
         st.tableCell = null;
@@ -434,10 +551,11 @@ function fecharInline(st, tag, emit) {
   }
   if (tag === "pre") {
     if (st.preDepth > 0) st.preDepth--;
-    if (!st.tableCell) st.out = st.out.replace(/\n+$/, "");
-    const blocoAtual = st.out.slice(st.out.lastIndexOf("```\n") + 4);
+    if (!st.tableCell) removerNovasLinhasFinais(st);
+    const cerca = st.cercas.length > 0 ? st.cercas[st.cercas.length - 1] : -1;
+    const blocoAtual = cerca === -1 ? materializar(st) : extrairDe(st, cerca + 4);
     if (blocoAtual === st.ultimoBlocoCodigo && blocoAtual.length > 0) {
-      st.out = st.out.slice(0, st.out.lastIndexOf("```\n"));
+      if (cerca !== -1) truncarPara(st, cerca);
       st.ultimoBlocoCodigo = null;
     } else {
       st.ultimoBlocoCodigo = blocoAtual;
@@ -470,14 +588,103 @@ function fecharNaPilha(st, tag) {
   }
 }
 
+// Parâmetros da parada antecipada (ver htmlToMarkdown). Números explicados:
+// a limpeza final ENCOLHE o texto, então a primeira verificação só acontece
+// com o buffer em `minimo + MARGEM_COMPRESSAO`; para liberar a parada, o
+// texto limpo tem de passar de `minimo + MARGEM_SEGURANCA` (a diferença
+// entre parcial e completo fica toda na cauda; essa folga cobre com sobra);
+// se a verificação falhar, o limiar avança PASSO_RECHECAGEM e depois de
+// MAX_RECHECAGENS sem atingir a garantia a conversão segue inteira (página
+// quase toda espaço em branco não tem ponto de parada seguro).
+const MARGEM_COMPRESSAO = 35000;
+const MARGEM_SEGURANCA = 2000;
+const PASSO_RECHECAGEM = 16384;
+const MAX_RECHECAGENS = 6;
+
+/**
+ * A conversão pode parar neste ponto sem cortar nada entregável?
+ * Exige: fora de <pre>, de tabela em montagem, de célula e de bloco
+ * ignorado — a saída termina num token inteiro, não no meio de estrutura —
+ * e as cercas "```\n" emparelhadas (o buffer termina depois de um bloco de
+ * código completo, não dentro dele) e sem backtick solto no fim (que mudaria
+ * o pareamento do mascaramento da limpeza final).
+ */
+function fronteiraSegura(st) {
+  return (
+    st.preDepth === 0 &&
+    st.tableDepth === 0 &&
+    !st.tableCell &&
+    st.skipDepth === 0 &&
+    st.aStack.length === 0 &&
+    st.cercas.length % 2 === 0 &&
+    !st.prevTail.endsWith("`")
+  );
+}
+
+/**
+ * Polimento final do texto (mesma cadeia de replaces do fim da conversão).
+ * Fica em função própria porque a verificação da parada antecipada precisa
+ * do comprimento FINAL — sem isso a folga de segurança seria medida num
+ * texto que ainda vai encolher.
+ */
+function polirTexto(texto) {
+  let resultado = texto
+    .replace(/\[\s*\]/g, "")
+    .replace(/\[\s*\n\s*\]/g, "")
+    .replace(/\[\s*\|\s*\]/g, "");
+  resultado = resultado
+    .replace(/^\[Skip to content\]\([^)]*\)\n*/i, "")
+    .replace(/^\[Minha [^\]]+\]\([^)]*\)\n*/i, "")
+    .replace(/\?utm_[^)\s]*/g, "");
+  return resultado;
+}
+
+/** Fecha a conversão: tabela pendente, limpeza e polimento final. */
+function finalizarConversao(st) {
+  if (st.tableDepth > 0) empurrar(st, renderTable(st.tableRows));
+  return polirTexto(cleanMarkdown(materializar(st)));
+}
+
 /**
  * Converte o HTML em markdown enxuto.
+ *
+ * `opcoes.minCharsEntregaveis` (número > 0) liga a PARADA ANTECIPADA: quando
+ * o caller não consegue receber mais que isso (HARD_MAX_CHARS é o teto de
+ * saída do servidor), páginas gigantes param de ser convertidas assim que
+ * os caracteres entregáveis estão garantidos — o prefixo devolvido é byte a
+ * byte igual ao da conversão completa (verificação de limpeza + margens
+ * acima), então a fidelidade do texto não muda; o que muda é o trabalho
+ * jogado fora, que chega a 97% em páginas de 1 MB. A parada só ocorre em
+ * fronteira segura e `opcoes.diagnostico.interrompida` fica `true` quando
+ * acontecer. Sem opções, o comportamento histórico: converte tudo.
  */
-export function htmlToMarkdown(html, baseUrl) {
+export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
   const st = criarEstadoConversao();
   const emit = (chunk) => st.emit(chunk);
+  const minimo = Number(opcoes.minCharsEntregaveis) > 0 ? Math.floor(opcoes.minCharsEntregaveis) : 0;
+  const diagnostico = opcoes.diagnostico || null;
+  let paradaAtiva = minimo > 0;
+  let limiar = minimo + MARGEM_COMPRESSAO;
+  let reChecagens = 0;
 
   for (const token of tokenize(html)) {
+    if (paradaAtiva && st.outLen >= limiar && fronteiraSegura(st)) {
+      // A limpeza final (máscara de cercas + polimento) só é fiel ao prefixo
+      // completo se as cercas "```" estiverem TODAS emparelhadas no buffer:
+      // com uma cerca ímpar, a máscara da limpeza mudaria de comportamento
+      // dentro do trecho exibido. Paridade par = mascaramento idêntico.
+      const bruto = materializar(st);
+      const cercasPareadas = (bruto.match(/```/g) || []).length % 2 === 0;
+      if (cercasPareadas) {
+        const limpo = polirTexto(cleanMarkdown(bruto));
+        if (limpo.length >= minimo + MARGEM_SEGURANCA) {
+          if (diagnostico) diagnostico.interrompida = true;
+          return finalizarConversao(st);
+        }
+      }
+      if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
+      else limiar = st.outLen + PASSO_RECHECAGEM;
+    }
     const isSkipped = SKIP_TAGS.has(token.tag);
 
     // ---- texto -------------------------------------------------------
@@ -559,18 +766,7 @@ export function htmlToMarkdown(html, baseUrl) {
     }
   }
 
-  if (st.tableDepth > 0) st.out += renderTable(st.tableRows);
-
-  let resultado = cleanMarkdown(st.out);
-  resultado = resultado
-    .replace(/\[\s*\]/g, "")
-    .replace(/\[\s*\n\s*\]/g, "")
-    .replace(/\[\s*\|\s*\]/g, "");
-  resultado = resultado
-    .replace(/^\[Skip to content\]\([^)]*\)\n*/i, "")
-    .replace(/^\[Minha [^\]]+\]\([^)]*\)\n*/i, "")
-    .replace(/\?utm_[^)\s]*/g, "");
-  return resultado;
+  return finalizarConversao(st);
 }
 
 /**

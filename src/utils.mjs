@@ -234,6 +234,126 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
 }
 
 /**
+ * Limitador de concorrência POR CHAVE (ex.: por host): cada chave tem o seu
+ * próprio teto de simultaneidade e a sua própria fila. É a garantia de
+ * justiça entre sites — um site lento não consome todas as vagas de download
+ * enquanto os outros esperam (o teto global continua valendo por cima).
+ *
+ * Contratos:
+ * - `executar(chave, fn)`: espera a vaga DA CHAVE e roda `fn`.
+ * - Fila cheia para a chave -> ServidorOcupadoError na hora (não trava).
+ * - `esperaMaxMs` > 0: quem espera demais desiste com o mesmo erro (e sai
+ *   da contagem da fila, como no limitador simples).
+ * - Chave sem ninguém ativo nem esperando sai do mapa: o estado não cresce
+ *   com hosts que passaram por aqui.
+ */
+export function criarLimitadorPorChave({ limite, filaMax, nome, esperaMaxMs = 0 }) {
+  const porChave = new Map();
+  const stats = {
+    nome,
+    limite,
+    filaMax,
+    chaves: 0,
+    ativos: 0,
+    naFila: 0,
+    recusados: 0,
+    atendidos: 0,
+    picoAtivos: 0,
+    picoFila: 0,
+  };
+
+  const ajustar = (dAtivos, dFila) => {
+    stats.ativos += dAtivos;
+    stats.naFila += dFila;
+    stats.picoAtivos = Math.max(stats.picoAtivos, stats.ativos);
+    stats.picoFila = Math.max(stats.picoFila, stats.naFila);
+  };
+
+  const estado = (chave) => {
+    let entrada = porChave.get(chave);
+    if (!entrada) {
+      entrada = { ativos: 0, fila: criarFila() };
+      porChave.set(chave, entrada);
+      stats.chaves = porChave.size;
+    }
+    return entrada;
+  };
+
+  const limparSeOcioso = (chave, entrada) => {
+    if (entrada.ativos === 0 && entrada.fila.tamanho === 0) {
+      porChave.delete(chave);
+      stats.chaves = porChave.size;
+    }
+  };
+
+  const ocupado = (chave, entrada) =>
+    new ServidorOcupadoError(`${nome} (${chave})`, entrada.ativos, entrada.fila.tamanho);
+
+  const atender = (chave, entrada) => {
+    const item = entrada.fila.shift();
+    if (!item) return;
+    if (item.timer) clearTimeout(item.timer);
+    item.decidido = true;
+    entrada.ativos++;
+    ajustar(+1, -1);
+    item.resolve();
+  };
+
+  const liberar = (chave) => {
+    const entrada = porChave.get(chave);
+    if (!entrada) return;
+    if (entrada.ativos > 0) {
+      entrada.ativos--;
+      ajustar(-1, 0);
+      atender(chave, entrada);
+    }
+    limparSeOcioso(chave, entrada);
+  };
+
+  const adquirir = (chave) => {
+    const entrada = estado(chave);
+    if (entrada.ativos < limite) {
+      entrada.ativos++;
+      ajustar(+1, 0);
+      return Promise.resolve();
+    }
+    if (entrada.fila.tamanho >= filaMax) {
+      stats.recusados++;
+      return Promise.reject(ocupado(chave, entrada));
+    }
+    return new Promise((resolve, reject) => {
+      const item = { decidido: false, timer: null, resolve, reject };
+      if (esperaMaxMs > 0) {
+        item.timer = setTimeout(() => {
+          if (item.decidido) return;
+          entrada.fila.remover(item);
+          stats.recusados++;
+          ajustar(0, -1);
+          limparSeOcioso(chave, entrada);
+          reject(ocupado(chave, entrada));
+        }, esperaMaxMs);
+        item.timer.unref();
+      }
+      entrada.fila.push(item);
+      ajustar(0, +1);
+    });
+  };
+
+  const executar = async (chave, fn) => {
+    await adquirir(chave);
+    try {
+      const resultado = await fn();
+      stats.atendidos++;
+      return resultado;
+    } finally {
+      liberar(chave);
+    }
+  };
+
+  return { executar, adquirir, liberar, stats };
+}
+
+/**
  * Coalescedor de buscas em voo (single-flight).
  *
  * Vários pedidos da MESMA chave feitos enquanto a busca ainda está em

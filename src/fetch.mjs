@@ -18,15 +18,23 @@ import {
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
   OUTBOUND_MEMORY_BUDGET,
+  HOST_MAX_CONCURRENCY,
+  HOST_MAX_QUEUE,
   MAX_WAIT_MS,
   MAX_INFLIGHT_REQUESTS,
   MAX_WAITING_REQUESTS,
   DEFAULT_MAX_CHARS,
   HARD_MAX_CHARS,
 } from "./config.mjs";
-import { criarLimitador, criarLimitadorDeBytes, CacheLRU, criarCoalescedorDeBuscas } from "./utils.mjs";
+import {
+  criarLimitador,
+  criarLimitadorDeBytes,
+  criarLimitadorPorChave,
+  CacheLRU,
+  criarCoalescedorDeBuscas,
+} from "./utils.mjs";
 import { assertPublicHost, agentValidado, checarRobots } from "./security.mjs";
-import { extractMeta } from "./html-parser.mjs";
+import { extractMeta, hostOf } from "./html-parser.mjs";
 import {
   UrlInvalidaError,
   ProtocoloNaoSuportadoError,
@@ -49,6 +57,15 @@ export const admissaoHttp = criarLimitador({
 export const limiteSaida = criarLimitador({
   limite: OUTBOUND_MAX_CONCURRENCY,
   filaMax: OUTBOUND_MAX_QUEUE,
+  nome: "downloads",
+});
+// Justiça entre hosts: cada site tem o seu próprio teto de downloads
+// simultâneos, por cima do teto global. Sem isso, um host lento (ou um lote
+// inteiro de URLs do mesmo site) monopoliza as vagas de saída.
+export const limitesPorHost = criarLimitadorPorChave({
+  limite: HOST_MAX_CONCURRENCY,
+  filaMax: HOST_MAX_QUEUE,
+  esperaMaxMs: MAX_WAIT_MS,
   nome: "downloads",
 });
 export const orcamentoSaida = criarLimitadorDeBytes({
@@ -473,8 +490,15 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
 
   await Promise.all([assertPublicHost(url), checarRobots(url)]);
 
-  const payload = await limiteSaida.executar(() =>
-    fetchTextWithFallback(url, { timeoutMs, signal, retries })
+  // Ordem importa: o teto POR HOST vem por fora e o global por dentro. Assim,
+  // quem espera na fila do próprio host NÃO segura vaga global — no pior caso,
+  // um único site com centenas de pedidos em fila não entope a concorrência
+  // dos outros. (Invertido, os pedidos em fila do host consumiriam vagas
+  // globais enquanto esperam e a justiça entre sites iria por água abaixo.)
+  const payload = await limitesPorHost.executar(hostOf(url), () =>
+    limiteSaida.executar(() =>
+      fetchTextWithFallback(url, { timeoutMs, signal, retries })
+    )
   );
   const bytes = payloadBytes(payload);
   if (bytes <= CACHE_MAX_ENTRY_BYTES) {

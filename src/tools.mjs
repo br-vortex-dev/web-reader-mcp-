@@ -10,6 +10,7 @@ import {
   MULTI_MAX_TOTAL_CHARS,
   FETCH_CONCURRENCY,
   DEFAULT_MAX_CHARS,
+  HARD_MAX_CHARS,
   MEMO_CONVERSAO,
 } from "./config.mjs";
 import {
@@ -75,14 +76,52 @@ function metaMemo(payload) {
   return memo.meta;
 }
 
+/**
+ * Opções da conversão para exibição. `minCharsEntregaveis = HARD_MAX_CHARS`
+ * liga a PARADA ANTECIPADA do parser: nenhuma leitura entrega mais que o teto
+ * (clampMaxChars limita a HARD_MAX_CHARS), então páginas gigantes param de ser
+ * convertidas assim que os caracteres entregáveis estão garantidos. O prefixo
+ * exibido continua byte a byte idêntico ao da conversão completa — o que deixa
+ * de ser feito é o parse do rabo que nunca sairia daqui (chega a 97% do custo
+ * em páginas de 1 MB). A memoização compartilha UMA conversão entre todos os
+ * usos do payload, então as opções são fixas aqui e valem para todos.
+ */
+const OPCOES_MARKDOWN_EXIBIVEL = { minCharsEntregaveis: HARD_MAX_CHARS };
+
+// A parada antecipada pode interromper a conversão de páginas gigantes no teto
+// de saída. O texto entregue continua idêntico (prefixo byte a byte), mas o
+// número `Conteudo: N caracteres` não pode subnotificar a página: quando a
+// conversão foi interrompida, ele sai como `N+` (havia mais além do teto).
+const conversaoInterrompidaDe = new WeakMap();
+
+function markdownInterrompida(payload) {
+  return conversaoInterrompidaDe.get(payload) === true;
+}
+
+/** Valor do campo `Conteudo:` — com `+` quando a conversão foi interrompida. */
+function fullLengthDe(payload, markdown) {
+  return markdownInterrompida(payload) ? `${markdown.length}+` : markdown.length;
+}
+
 function markdownMemo(payload) {
   const memo = memoDoPayload(payload);
   if (!memo) {
     conversoesMemo.realizadas++;
-    return htmlToMarkdown(payload.text, payload.finalUrl);
+    const diagnostico = { interrompida: false };
+    const markdown = htmlToMarkdown(payload.text, payload.finalUrl, {
+      ...OPCOES_MARKDOWN_EXIBIVEL,
+      diagnostico,
+    });
+    conversaoInterrompidaDe.set(payload, Boolean(diagnostico.interrompida));
+    return markdown;
   }
   if (!("markdown" in memo)) {
-    memo.markdown = htmlToMarkdown(payload.text, payload.finalUrl);
+    const diagnostico = { interrompida: false };
+    memo.markdown = htmlToMarkdown(payload.text, payload.finalUrl, {
+      ...OPCOES_MARKDOWN_EXIBIVEL,
+      diagnostico,
+    });
+    conversaoInterrompidaDe.set(payload, Boolean(diagnostico.interrompida));
     conversoesMemo.realizadas++;
   } else {
     conversoesMemo.caronas++;
@@ -422,10 +461,12 @@ export async function toolReadPage(args) {
   }
   const meta = metaMemo(payload);
   let markdown = markdownMemo(payload);
+  let interrompida = markdownInterrompida(payload);
   if (markdown.replace(/\s+/g, " ").trim().length < 300 && isDynamicPage(html, markdown)) {
     const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
       markdown = dynamicMarkdown;
+      interrompida = false;
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
@@ -433,7 +474,7 @@ export async function toolReadPage(args) {
     markdown.trim().length === 0
       ? "Aviso: 0 caracteres de conteudo estatico — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page."
       : undefined;
-  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length, extraLabel });
+  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: interrompida ? `${markdown.length}+` : markdown.length, extraLabel });
 }
 
 /**
@@ -560,7 +601,7 @@ export async function toolReadDynamicPage(args) {
       meta,
       text,
       truncated,
-      fullLength: markdown.length,
+      fullLength: fullLengthDe(payload, markdown),
       extraLabel: "Pagina estatica (nao precisa de JavaScript)",
     });
   }
@@ -575,7 +616,7 @@ export async function toolReadDynamicPage(args) {
       meta,
       text,
       truncated,
-      fullLength: markdown.length,
+      fullLength: fullLengthDe(payload, markdown),
       extraLabel: "Conteudo estatico do HTML usado (dados embutidos nao substituiram — markdown completo)",
     });
   }
@@ -600,7 +641,7 @@ export async function toolReadDynamicPage(args) {
     meta,
     text,
     truncated,
-    fullLength: markdown.length,
+    fullLength: fullLengthDe(payload, markdown),
     extraLabel: "Página dinâmica detectada, mas não foi possível extrair dados embutidos. Conteúdo estático abaixo.",
   });
 }
@@ -712,7 +753,7 @@ async function lerPaginaCompleta(url, maxChars, timeoutMs) {
   const markdown = markdownMemo(payload);
   const { text, truncated } = truncate(markdown, maxChars);
   return {
-    conteudo: formatReadResult({ finalUrl, meta, text, truncated, fullLength: markdown.length }),
+    conteudo: formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown) }),
     links: linksParaCrawl(payload),
   };
 }

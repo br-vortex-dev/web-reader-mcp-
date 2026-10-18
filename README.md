@@ -416,7 +416,10 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `MAX_WAIT_MS` | `15000` (15 s) | Teto de espera por uma vaga; depois disso, **503 com `Retry-After`**. Deve ser menor que o timeout do seu cliente MCP. |
 | `OUTBOUND_MAX_CONCURRENCY` | `128` | Downloads simultâneos (limita sockets/tarefas). |
 | `OUTBOUND_MAX_QUEUE` | `100` | Quantos downloads esperam por vaga. Fila cheia = erro claro e imediato. |
+| `HOST_MAX_CONCURRENCY` | `64` | Downloads simultâneos **por host**: um site lento não consome todas as vagas enquanto os outros esperam. Calibrado pelo joelho da curva (com 32, o harness mediu 52 req/s num host único estrangulado; com 64, os mesmos 76 req/s de antes). |
+| `HOST_MAX_QUEUE` | `256` | Quantos pedidos do mesmo host esperam por vaga. Fila cheia = erro claro e imediato. Quem espera na fila do host **não** segura vaga global. |
 | `OUTBOUND_MEMORY_BUDGET` | `67108864` (64 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, MAX_RESPONSE_BYTES)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. |
+| `WEB_CONCURRENCY` | `1` | Quantos workers do cluster (um servidor por worker, mesma porta). **Opt-in**: sem a variável, processo único como sempre. Em máquina com núcleos sobrando, `2`/`4` multiplicam o teto de CPU (medido: +35% com 2 workers quando a CPU ainda sobra). |
 | `HTTP_KEEPALIVE_TIMEOUT_MS` | `32500` | Keep-alive do servidor. O padrão do Node é 5 s, o que causa **churn de conexão** sob carga; e precisa ser **maior que o idle timeout do balanceador**, senão dá 502. |
 | `HTTP_HEADERS_TIMEOUT_MS` | `33000` | Precisa ser ≥ keep-alive. |
 | `HTTP_REQUEST_TIMEOUT_MS` | `150000` | Precisa ser ≥ headers. |
@@ -439,23 +442,54 @@ isso é feature nova, não correção, e não está implementado.
 
 ### Capacidade e carga
 
-O teto deste serviço é **CPU de um núcleo**: ~310 req/s por núcleo, porque cada
-página custa ~3 ms de `tokenize` + `htmlToMarkdown`. Não é HTTP, cache nem fila.
+O teto deste serviço é **CPU de um núcleo**. Até a rodada de otimização de
+outubro de 2026, cada página custava ~3 ms de `tokenize` + `htmlToMarkdown` e
+páginas grandes pagavam caro: o fecho de `<pre>` varria e copiava o buffer
+inteiro a cada bloco de código (O(n²)) e a conversão só parava no fim da página,
+mesmo quando a saída ia ser truncada em 25 mil caracteres de qualquer jeito.
 
-Curva medida (`node dev/load/harness.mjs --mode read --delay 150`):
+O que mudou (tudo medido):
+
+| O quê | Antes | Depois |
+| --- | --- | --- |
+| Fecho de `<pre>` (fim do O(n²)) | 48% do CPU do parse | 0,7% |
+| `htmlToMarkdown` numa página de 236 KB | 59 ms | 22,5 ms (2,6x) |
+| Conversão de página de 1 MB (só os ~58 KB entregáveis) | 1249 ms | 80 ms (15x) |
+| Página gigante: download + parse do rabo que nunca sai | tudo baixado e convertido | para no teto entregável, com prefixo byte a byte idêntico |
+
+A **parada antecipada** é conservadora por construção: a conversão só para numa
+fronteira segura (fora de `<pre>`, de tabela e de bloco ignorado, com as cercas
+de código emparelhadas) e só quando a limpeza final já garante os caracteres
+entregáveis inteiros — o que o cliente vê é o mesmo prefixo da conversão
+completa, o que muda é o trabalho jogado fora. Quando a conversão é
+interrompida, o cabeçalho marca `Conteudo: N+ caracteres` (havia mais além do
+teto). `HARD_MAX_CHARS` é o teto entregável por leitura; a parada usa ele como
+referência.
+
+O **teto por host** (`HOST_MAX_CONCURRENCY`) garante justiça entre sites: um
+host lento ou com muitos pedidos não monopoliza as vagas globais de download —
+os outros sites continuam sendo atendidos em paralelo, e quem espera na fila do
+host não segura vaga global.
+
+Curva medida com o servidor atual (`node dev/load/harness.mjs --mode read --delay 0`):
 
 | Concorrência | Vazão | p50 | Sucesso |
 | --- | --- | --- | --- |
-| 32 | 182 req/s | 171 ms | 100% |
-| **64** | **309 req/s** | **189 ms** | 100% |
-| 128 | 311 req/s | 364 ms | 100% |
-| 2.000 | 293 req/s | 6,3 s | 100% |
+| 64 | 94 req/s | 687 ms | 100% |
+| 128 | 91 req/s | 1124 ms | 100% |
+| 256 | 80 req/s | 2716 ms | 100% |
 
-O **joelho está em ~64 simultâneas**. Repare que 10.000 clientes respeitando o
+O **joelho está em ~64–128 simultâneas** (com o harness dividindo a mesma CPU —
+o número absoluto varia com a máquina; o que importa é a forma da curva).
+Cache quente entrega **205 req/s**. Repare que 10.000 clientes respeitando o
 rate limit (60/min cada) geram apenas **166 req/s** — isso é o caso real, e cai
 confortavelmente à esquerda do joelho. Já 10.000 requisições *em voo* não cabem
 numa instância: o servidor atende o que pode e responde **503 explícito** para o
 resto, sem estourar a memória.
+
+**Mais núcleos:** com `WEB_CONCURRENCY=2` o mesmo harness mediu **103 req/s**
+(+35% sobre 76 no mesmo momento) — o worker extra só ajuda até a CPU da máquina
+acabar; em host de 1 núcleo efetivo (como o plano free do Render), deixe em 1.
 
 #### Rajada nas mesmas URLs: o trabalho não se multiplica
 
@@ -499,6 +533,10 @@ node dev/load/harness.mjs --concurrency 64 --seconds 15 --mode read --delay 150
 node dev/load/rajada.mjs   # prova de rajada: mesmos sites, muitos leitores, antes × depois
 k6 run -e MCP_URL=http://127.0.0.1:3000/mcp -e MCP_TOKEN=t dev/load/k6.js
 ```
+
+O harness aceita `--server <caminho>` para apontar a outra cópia — é assim que
+se compara o servidor atual com o baseline congelado (`dev/_baseline/`) sob a
+mesma carga: `node dev/load/harness.mjs --concurrency 64 --seconds 8 --mode read --server dev/_baseline/server.js`.
 
 O `rajada.mjs` compara o servidor atual com a cópia em `dev/_baseline/` sob a
 **mesma carga** — é ele que produz os números de "acessos ao site" citados

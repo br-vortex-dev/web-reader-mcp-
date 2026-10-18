@@ -268,6 +268,38 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /gigante -> pagina MUITO maior que o teto entregavel (HARD_MAX_CHARS).
+    // Tem duas marcas: INICIO-GIGANTE aparece antes do teto e FIM-GIGANTE
+    // fica bem depois — e a marca de que a conversao NAO deve ser completada
+    // so para joga-la fora (parada antecipada). O teste exige o inicio e
+    // aceita a ausencia do fim (que era lixo, nunca ia ao cliente).
+    if (path === "/gigante") {
+      const blocos = Array.from(
+        { length: 900 },
+        (_, i) =>
+          `<p>Paragrafo ${i} de enchimento para empurrar a pagina muito alem do teto de saida do servidor. ` +
+          `Texto repetido de proposito para o markdown passar de 250 mil caracteres sem esforco. ` +
+          `${"palavra ".repeat(6)}</p>`
+      ).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!DOCTYPE html><html><head><title>Pagina Gigante</title></head><body>` +
+          `<h1>INICIO-GIGANTE</h1>${blocos}<h1>FIM-GIGANTE</h1></body></html>`
+      );
+      return;
+    }
+
+    // /enorme -> corpo MUITO maior que MAX_RESPONSE_BYTES (o teste sobe o
+    // servidor com o teto baixo): o download tem de abortar em streaming.
+    // Sem content-length (chunked) de proposito: o corte do cliente so pode
+    // vir da contagem REAL do streaming, que e o que este teste prova.
+    if (path === "/enorme") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      // 1 MB de corpo de verdade, num envio so.
+      res.end("<!DOCTYPE html><html><body>" + "x".repeat(1024 * 1024) + "</body></html>");
+      return;
+    }
+
     // /longchain/N -> N redirects ABSOLUTOS e depois /pagina. Serve para travar
     // o padrao de redirects (uma cadeia de 5 passa, uma de 6 e recusada).
     if (path.startsWith("/longchain/")) {
@@ -518,11 +550,19 @@ export async function startFixture({ robots = "regras" } = {}) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(FIXTURE_HTML);
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // Escuta em TODAS as interfaces IPv4: o mesmo fixture atende 127.0.0.1 e
+  // 127.0.0.2 — dois "hosts" distintos para os testes de limite por host,
+  // sem passar por "localhost" (que no Windows paga tentativas IPv6 antes
+  // de cair no IPv4).
+  await new Promise((resolve) => server.listen(0, "0.0.0.0", resolve));
   const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}`,
     port,
+    // Variante com outro LOOPBACK (127.0.0.2 e valido): mesma porta, "host"
+    // diferente para os limites por host dos testes. Evita "localhost", que
+    // no Windows paga tentativas IPv6 antes de cair no IPv4.
+    urlAlt: `http://127.0.0.2:${port}`,
     probes,
     clearProbes: () => {
       probes.length = 0;

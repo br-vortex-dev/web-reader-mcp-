@@ -1,0 +1,61 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "read",
+  "quando": "2026-10-17T21:38:34.106Z",
+  "resultados": [
+    {
+      "conc": 16,
+      "enviados": 145,
+      "ok": 144,
+      "reqPorSeg": 13.61,
+      "uteisPorSeg": 13.51,
+      "latP50": 918,
+      "latP95": 2454,
+      "latP99": 4154,
+      "latMax": 4331,
+      "http": {},
+      "erros": {
+        "isError: Erro: fetch failed: ETIMEDOUT; ENETUNREACH": 1
+      },
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "67",
+        "cache": "0"
+      },
+      "healthDepois": {
+        "rss": "99",
+        "cache": "100",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 64,
+      "enviados": 278,
+      "ok": 278,
+      "reqPorSeg": 19.33,
+      "uteisPorSeg": 19.33,
+      "latP50": 2729,
+      "latP95": 6604,
+      "latP99": 7398,
+      "latMax": 7696,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "99",
+        "cache": "100"
+      },
+      "healthDepois": {
+        "rss": "107",
+        "cache": "100",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "multi",
+  "quando": "2026-10-17T21:47:11.401Z",
+  "resultados": [
+    {
+      "conc": 1,
+      "enviados": 1,
+      "ok": 1,
+      "reqPorSeg": 0.31,
+      "uteisPorSeg": 0.31,
+      "latP50": 3253,
+      "latP95": 3253,
+      "latP99": 3253,
+      "latMax": 3253,
+      "http": {},
+      "erros": {},
+      "paginasOK": 12,
+      "paginasTotal": 20,
+      "chamadas": 1,
+      "healthAntes": {
+        "rss": "176",
+        "cache": "59"
+      },
+      "healthDepois": {
+        "rss": "178",
+        "cache": "63",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 4,
+      "enviados": 4,
+      "ok": 4,
+      "reqPorSeg": 4.73,
+      "uteisPorSeg": 4.73,
+      "latP50": 838,
+      "latP95": 844,
+      "latP99": 844,
+      "latMax": 844,
+      "http": {},
+      "erros": {},
+      "paginasOK": 48,
+      "paginasTotal": 80,
+      "chamadas": 4,
+      "healthAntes": {
+        "rss": "178",
+        "cache": "63"
+      },
+      "healthDepois": {
+        "rss": "179",
+        "cache": "63",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 8,
+      "enviados": 8,
+      "ok": 8,
+      "reqPorSeg": 5.48,
+      "uteisPorSeg": 5.48,
+      "latP50": 1071,
+      "latP95": 1449,
+      "latP99": 1449,
+      "latMax": 1449,
+      "http": {},
+      "erros": {},
+      "paginasOK": 96,
+      "paginasTotal": 160,
+      "chamadas": 8,
+      "healthAntes": {
+        "rss": "179",
+        "cache": "63"
+      },
+      "healthDepois": {
+        "rss": "178",
+        "cache": "63",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 16,
+      "enviados": 16,
+      "ok": 16,
+      "reqPorSeg": 14.48,
+      "uteisPorSeg": 14.48,
+      "latP50": 1086,
+      "latP95": 1099,
+      "latP99": 1099,
+      "latMax": 1099,
+      "http": {},
+      "erros": {},
+      "paginasOK": 192,
+      "paginasTotal": 320,
+      "chamadas": 16,
+      "healthAntes": {
+        "rss": "178",
+        "cache": "63"
+      },
+      "healthDepois": {
+        "rss": "179",
+        "cache": "63",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

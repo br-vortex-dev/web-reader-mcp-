@@ -30,7 +30,7 @@ const arg = (nome, padrao) => {
   return i === -1 ? padrao : args[i + 1];
 };
 // --server permite apontar para outra copia (usado para comparar antes/depois)
-const SERVER = arg("server", join(__dirname, "..", "server.js"));
+const SERVER = arg("server", join(__dirname, "..", "..", "server.js"));
 const CONCURRENCY = Number(arg("concurrency", 1000));
 const SECONDS = Number(arg("seconds", 15));
 const MODE = arg("mode", "read");

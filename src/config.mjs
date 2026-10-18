@@ -67,6 +67,17 @@ export const OUTBOUND_MEMORY_BUDGET = clampEnv(
   4 * 1024 * 1024,
   512 * 1024 * 1024
 );
+// Teto de concorrência POR HOST: um site lento não pode consumir todas as
+// vagas de download enquanto os outros esperam. O teto global (acima) segue
+// valendo por cima; este é a garantia de justiça entre sites. Sem sinal
+// explícito na URL, a chave é o host — antes disso, um único host pendurado
+// ocupava a fila inteira e os outros sites ficavam atrás dele.
+// Calibrado pelo joelho da curva (~64, mesma referência de MAX_INFLIGHT):
+// com 32, o harness mediu 52 req/s (host único estrangulado); com 64, os
+// mesmos 76 req/s do baseline — e um host no pior caso fica com metade
+// das vagas globais, nunca com todas.
+export const HOST_MAX_CONCURRENCY = clampEnv(process.env.HOST_MAX_CONCURRENCY, 64, 1, 2048);
+export const HOST_MAX_QUEUE = clampEnvZero(process.env.HOST_MAX_QUEUE, 256, 0, 50000);
 
 // Tuning do servidor HTTP (keep-alive, timeouts, conexões).
 export const HTTP_REQUEST_TIMEOUT_MS = clampEnv(process.env.HTTP_REQUEST_TIMEOUT_MS, 150000, 500, 300000);

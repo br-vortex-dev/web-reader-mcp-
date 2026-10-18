@@ -21,7 +21,7 @@ import {
   OUTBOUND_MAX_QUEUE,
   clampEnv,
 } from "./config.mjs";
-import { admissaoHttp, limiteSaida, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes } from "./fetch.mjs";
+import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes } from "./fetch.mjs";
 import { conversoesMemo } from "./tools.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
@@ -165,6 +165,8 @@ export async function montarTextoHealth(server) {
     `(max ${req_.limite}/${req_.filaMax}, recusadas ${req_.recusados}) | `,
     `downloads: ${out.ativos} ativos, ${out.naFila} na fila `,
     `(max ${out.limite}/${out.filaMax}, recusados ${out.recusados}) | `,
+    `por host: ${limitesPorHost.stats.chaves} host(s), ${limitesPorHost.stats.ativos} ativos, `,
+    `${limitesPorHost.stats.naFila} na fila (max ${limitesPorHost.stats.limite}/${limitesPorHost.stats.filaMax}) | `,
     `memoria de download: ${Math.round(orcamentoSaida.stats.usado / 1024 / 1024)} MB de `,
     `${Math.round(orcamentoSaida.stats.orcamentoBytes / 1024 / 1024)} MB `,
     `(pico ${Math.round(orcamentoSaida.stats.picoUsado / 1024 / 1024)} MB, `,
@@ -445,8 +447,61 @@ export function ligarServidor(server, { port, host, rateLimitWindowMs, rateLimit
 
 /**
  * Inicia o servidor em modo HTTP Streamable (para o Render).
+ *
+ * Clusters: com WEB_CONCURRENCY > 1, o processo principal vira o coordenador
+ * e sobe N workers, cada um com um servidor na MESMA porta (o compartilhamento
+ * de porta do cluster distribui as conexões entre os processos). É o que
+ * multiplica o teto de CPU — o gargalo medido é um núcleo. Sem a variável (ou
+ * com 1), comportamento idêntico ao de sempre: processo único. Quando um
+ * worker morre sem ser por encerramento pedido, o coordenador sobe outro:
+ * um crash isolado não derruba o serviço.
  */
 export async function startHttp() {
+  // import("node:cluster") devolve o namespace; o objeto cluster em si vem
+  // no default (é ele que tem isPrimary/fork/on). Sem o fallback, cl.on
+  // estoura "is not a function" no ESM.
+  const namespaceCluster = await import("node:cluster");
+  const cl = namespaceCluster.default ?? namespaceCluster;
+  // SEM a variável, tudo igual a hoje: processo único. O cluster é opt-in —
+  // quem tem núcleos de sobra define WEB_CONCURRENCY (ex.: 4) e o serviço
+  // passa a usar um worker por núcleo. Valor 0, inválido ou ausente = 1.
+  const querWorkers = clampEnv(process.env.WEB_CONCURRENCY, 1, 1, 64);
+
+  if (cl.isPrimary && querWorkers > 1) {
+    console.error(
+      `[${SERVER_NAME}] modo cluster: ${querWorkers} workers (WEB_CONCURRENCY=${process.env.WEB_CONCURRENCY})`
+    );
+    let saindo = false;
+    const subir = () => cl.fork();
+    for (let i = 0; i < querWorkers; i++) subir();
+    cl.on("exit", () => {
+      if (saindo) {
+        // Encerramento pedido: quando o último worker sair, o coordenador sai.
+        if (Object.keys(cl.workers).length === 0) process.exit(0);
+        return;
+      }
+      console.error(`[${SERVER_NAME}] um worker caiu — subindo outro.`);
+      subir();
+    });
+    for (const sinal of ["SIGTERM", "SIGINT"]) {
+      process.on(sinal, () => {
+        saindo = true;
+        for (const id in cl.workers) {
+          try {
+            cl.workers[id]?.kill(sinal);
+          } catch {
+            // worker já saiu
+          }
+        }
+        // Rede de segurança: se algum worker travar, o coordenador sai de
+        // qualquer jeito depois do mesmo prazo do encerramento individual.
+        const prazo = setTimeout(() => process.exit(0), 6000);
+        prazo.unref();
+      });
+    }
+    return;
+  }
+
   const port = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || undefined;
 

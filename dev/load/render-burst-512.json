@@ -1,0 +1,33 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "read-cache",
+  "quando": "2026-10-17T21:54:34.119Z",
+  "resultados": [
+    {
+      "conc": 512,
+      "enviados": 512,
+      "ok": 512,
+      "reqPorSeg": 132.71,
+      "uteisPorSeg": 132.71,
+      "latP50": 3181,
+      "latP95": 3297,
+      "latP99": 3341,
+      "latMax": 3352,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "179",
+        "cache": "63"
+      },
+      "healthDepois": {
+        "rss": "180",
+        "cache": "63",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}
