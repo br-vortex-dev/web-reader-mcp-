@@ -136,7 +136,7 @@ test("200: tools/list via POST /mcp com o token", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("access-control-allow-origin"), "*");
   const json = JSON.parse(r.body);
-  assert.equal(json.result.tools.length, 6);
+  assert.equal(json.result.tools.length, 7);
 });
 
 test("202: notificacao (sem id) nao gera resposta", async () => {

@@ -6,7 +6,7 @@
 //   ROTAS     GET / e /health (200), GET /mcp (405), POST /mcp sem token (401),
 //             token errado (401), JSON invalido (400), corpo > 1 MB (413),
 //             metodo e ferramenta inexistentes (erro limpo, sem 5xx)
-//   FERRAM.   as 6 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
+//   FERRAM.   as 7 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
 //             redirect http->https, fidelidade (tabela GFM, acentos,
 //             indentacao de codigo) e cache (2a leitura mais rapida)
 //
@@ -133,9 +133,9 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     const r = await mcpCall("tools/list", undefined, 5);
     const tools = r.json?.result?.tools || [];
     const nomes = tools.map((t) => t.name).sort();
-    const seis = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page"];
-    check(seis.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 6 ferramentas com schema", nomes.join(", "));
-  } catch (e) { check(false, "tools/list traz as 6 ferramentas com schema", e.message); }
+    const sete = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video"];
+    check(sete.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 7 ferramentas com schema", nomes.join(", "));
+  } catch (e) { check(false, "tools/list traz as 7 ferramentas com schema", e.message); }
 
   // read_page numa pagina real e complexa (tabelas, links, acentos)
   try {
@@ -236,6 +236,19 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     check(!toolIsError(r) && t.length > 200, "read_dynamic_page em site dinamico (nextjs.org)", encurta(rotulo || t, 70));
     if (/nao foi possivel extrair/.test(t)) aviso("read_dynamic_page nao achou dados embutidos no nextjs.org", "caiu no conteudo estatico - comportamento previsto, vale investigar se repetir em outros sites");
   } catch (e) { check(false, "read_dynamic_page em site dinamico (nextjs.org)", e.message); }
+
+  // read_video: metadados de uma pagina de video real (Vimeo, estavel).
+  // Se a legenda vier, otimo; se nao, a saida TEM de declarar isso — nunca
+  // devolver silencio.
+  try {
+    const r = await mcpCall("tools/call", { name: "read_video", arguments: { url: "https://vimeo.com/76979871", maxChars: 4000 } }, 22);
+    const t = toolText(r);
+    const rotulo = (t.match(/\nPlataforma: (.+)/) || [])[1] || "";
+    const temMeta = /\nCanal: /.test(t) && /\nDuracao: /.test(t);
+    const transcricaoDeclarada = /Transcricao: /.test(t);
+    check(!toolIsError(r) && temMeta && transcricaoDeclarada, "read_video le metadados de video (Vimeo)", `${encurta(rotulo, 20)}; ${transcricaoDeclarada ? "transcricao declarada" : "sem campo de transcricao"}`);
+    if (/Transcricao: indisponivel/.test(t)) aviso("read_video: transcricao indisponivel agora", encurta((t.match(/Transcricao: indisponivel.*/) || [""])[0], 90));
+  } catch (e) { check(false, "read_video le metadados de video (Vimeo)", e.message); }
 
   // cache: mesma URL duas vezes -> 2a leitura sai do cache (muito mais rapida)
   try {

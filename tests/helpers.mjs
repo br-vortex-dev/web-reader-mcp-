@@ -76,6 +76,10 @@ export const FIXTURE_HTML = `<!DOCTYPE html><html><head><title>Fixture Parser</t
 //   /termo                      -> MARCADO-TERMO     (Disallow: /termo$)
 //   /termo-extra                -> MARCADO-TERMO-EXTRA (nao casa com /termo$)
 //   /livre                      -> MARCADO-LIVRE     (controle permitido)
+//   /video/com-track            -> pagina com <video> + <track> -> /video/legenda.vtt
+//   /video/legenda.vtt          -> legenda WebVTT de verdade (3 falas)
+//   /video/legenda-bloqueada    -> pagina cujo <track> aponta para /privado/* (robots)
+//   /video/sem-video            -> pagina HTML comum, sem sinal nenhum de video
 export async function startFixture({ robots = "regras" } = {}) {
   // Contador de requisicoes por id: deixa visivel de FORA se a resposta veio do
   // cache (mesmo contador) ou foi baixada de novo (contador maior).
@@ -603,6 +607,65 @@ export async function startFixture({ robots = "regras" } = {}) {
     if (path === "/termo") return paginaMarcador("MARCADO-TERMO");
     if (path === "/termo-extra") return paginaMarcador("MARCADO-TERMO-EXTRA");
     if (path === "/livre") return paginaMarcador("MARCADO-LIVRE");
+
+    // ---- fixtures do read_video ----
+
+    // Legenda WebVTT de verdade: outro caminho de transcricao do read_video
+    // roda por aqui (pagina -> <track> -> legenda -> blocos com timestamp).
+    if (path === "/video/legenda.vtt") {
+      res.writeHead(200, { "content-type": "text/vtt; charset=utf-8" });
+      res.end(
+        "WEBVTT\n\n" +
+          "1\n00:00:01.000 --> 00:00:03.000\nBem-vindo ao video de teste.\n\n" +
+          "2\n00:00:03.000 --> 00:00:06.000\nEsta e a segunda fala da legenda.\n\n" +
+          "3\n00:00:06.000 --> 00:00:09.500\nTerceira e ultima fala do fixture.\n"
+      );
+      return;
+    }
+
+    // Pagina com <video> + <track>: o caminho generico (qualquer plataforma)
+    // do read_video — metadados por og tags e transcricao pela legenda ao lado.
+    if (path === "/video/com-track") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Pagina com video</title>" +
+          '<meta property="og:title" content="Documentario de teste">' +
+          '<meta property="og:description" content="Um video de fixture para os testes.">' +
+          '<meta property="og:type" content="video.other">' +
+          "</head><body><h1>Assista</h1>" +
+          '<video controls poster="/capa.jpg"><source src="/video/clipe.mp4" type="video/mp4">' +
+          '<track kind="subtitles" src="/video/legenda.vtt" srclang="pt" label="Portugues">' +
+          "</video></body></html>"
+      );
+      return;
+    }
+
+    // Mesma pagina, mas o <track> aponta para /privado/* — caminho que o
+    // robots.txt do fixture bloqueia (Disallow: /privado). A leitura tem de
+    // devolver os metadados e avisar que a transcricao foi bloqueada.
+    if (path === "/video/legenda-bloqueada") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Bloqueada</title>" +
+          '<meta property="og:title" content="Video com legenda bloqueada">' +
+          '<meta property="og:type" content="video.other">' +
+          "</head><body><video controls>" +
+          '<track kind="subtitles" src="/privado/video.vtt" srclang="pt" label="Portugues">' +
+          "</video></body></html>"
+      );
+      return;
+    }
+
+    // Pagina comum, sem sinal nenhum de video: o read_video tem de dizer que
+    // nao identificou video e apontar o read_page.
+    if (path === "/video/sem-video") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Texto</title></head><body>" +
+          "<h1>Noticia</h1><p>Uma pagina normal, sem video embutido.</p></body></html>"
+      );
+      return;
+    }
 
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(FIXTURE_HTML);

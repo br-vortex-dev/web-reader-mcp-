@@ -65,7 +65,7 @@ const NAMED_ENTITIES = {
 /**
  * Decodifica entidades HTML (&amp;, &lt;, &#123;, etc.) para texto puro.
  */
-function decodeEntities(input) {
+export function decodeEntities(input) {
   if (!input || input.indexOf("&") === -1) return input;
   return input.replace(
     /&(#[Xx][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);/g,

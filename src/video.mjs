@@ -1,0 +1,878 @@
+/**
+ * Leitura de vídeo (read_video): metadados e transcrição.
+ *
+ * O que a ferramenta faz — sobre caminhos provados na web real (dev/_probe-*):
+ * - YouTube: extrai o ytInitialPlayerResponse da página /watch (título, canal,
+ *   duração, visualizações, descrição, capas) e lista as faixas de legenda.
+ *   O download da legenda mora em /api/timedtext — bloqueado pelo robots.txt
+ *   do próprio YouTube ("Disallow: /api/") e servido vazio para acesso
+ *   anônimo. A ferramenta TENTA e devolve o motivo exato quando não consegue;
+ *   nunca finge que leu.
+ * - Vimeo: lê o config público do player (metadados + text_tracks) e baixa a
+ *   legenda VTT de captions.vimeo.com (provado acessível).
+ * - Qualquer outra plataforma: og tags + JSON-LD (VideoObject) + <video>/
+ *   <track>. Se a página publica a legenda como VTT/SRT acessível, ela vem
+ *   transcrita; se não, vêm só os metadados — com aviso claro.
+ * - Link direto de legenda (.vtt/.srt): baixa e converte.
+ *
+ * O que NÃO faz (por escolha de projeto): não baixa o vídeo, não decodifica
+ * quadros e não adiciona dependência nenhuma. O que a plataforma não publica
+ * como texto acessível, não entra — e o resultado diz isso.
+ *
+ * Toda URL tocada por este módulo passa pelo fetchTextCached: SSRF, robots,
+ * cache, junção de buscas em voo e teto por host valem igual às outras
+ * ferramentas.
+ */
+import {
+  fetchTextCached,
+  validateHttpUrl,
+  clampMaxChars,
+  clampTimeoutMs,
+  truncate,
+} from "./fetch.mjs";
+import { decodeEntities } from "./html-parser.mjs";
+import { RobotsBloqueadoError } from "./errors.mjs";
+
+/* ===================================================================== *
+ * Detecção da plataforma                                                  *
+ * ===================================================================== */
+
+const RE_ID_YOUTUBE = /^[\w-]{11}$/;
+
+/** Extrai o ID de um vídeo do YouTube de qualquer forma de URL aceita. */
+export function youtubeIdDe(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase().replace(/^(?:www|m|music)\./, "");
+  if (host === "youtu.be") {
+    const id = u.pathname.slice(1).split("/")[0];
+    return RE_ID_YOUTUBE.test(id) ? id : null;
+  }
+  if (host === "youtube.com" || host === "youtube-nocookie.com") {
+    if (u.pathname === "/watch") {
+      const id = u.searchParams.get("v") || "";
+      return RE_ID_YOUTUBE.test(id) ? id : null;
+    }
+    const m = u.pathname.match(/^\/(?:shorts|live|embed|v)\/([\w-]{11})(?:[/?]|$)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Extrai { id, hash } de uma URL do Vimeo (inclusive player e link privado). */
+export function vimeoDe(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase().replace(/^www\./, "");
+  if (host === "vimeo.com") {
+    const m = u.pathname.match(/^\/(\d+)(?:\/([\w-]+))?/);
+    if (!m) return null;
+    return { id: m[1], hash: m[2] || u.searchParams.get("h") || null };
+  }
+  if (host === "player.vimeo.com") {
+    const m = u.pathname.match(/^\/video\/(\d+)/);
+    if (!m) return null;
+    return { id: m[1], hash: u.searchParams.get("h") || null };
+  }
+  return null;
+}
+
+const RE_EXTENSAO_LEGENDA = /\.(vtt|srt|webvtt)$/i;
+
+/** Classifica a URL de entrada: youtube | vimeo | legenda | pagina. */
+export function detectarVideo(url) {
+  const idYt = youtubeIdDe(url);
+  if (idYt) return { tipo: "youtube", id: idYt };
+  const v = vimeoDe(url);
+  if (v) return { tipo: "vimeo", id: v.id, hash: v.hash };
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return { tipo: "pagina" };
+  }
+  if (RE_EXTENSAO_LEGENDA.test(u.pathname)) return { tipo: "legenda" };
+  return { tipo: "pagina" };
+}
+
+/**
+ * Procura um iframe de YouTube/Vimeo embutido no HTML — o caso clássico de
+ * blog/notícia com vídeo incorporado. Devolve { tipo, id, hash } ou null.
+ */
+export function procurarEmbedDeVideo(html) {
+  const re = /<iframe[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const src = decodeEntities(m[1]);
+    const idYt = youtubeIdDe(src);
+    if (idYt) return { tipo: "youtube", id: idYt };
+    const v = vimeoDe(src);
+    if (v) return { tipo: "vimeo", id: v.id, hash: v.hash };
+  }
+  return null;
+}
+
+/* ===================================================================== *
+ * Extração de JSON embutido no HTML                                       *
+ * ===================================================================== */
+
+/**
+ * Extrai o objeto balanceado que começa após um marcador (ex.:
+ * "ytInitialPlayerResponse"). Feito à mão de propósito: o JSON do YouTube tem
+ * urls, chaves e strings com chaves balanceadas dentro — regex não daria conta.
+ */
+export function extrairObjetoApos(texto, marcador) {
+  const pos = String(texto).indexOf(marcador);
+  if (pos === -1) return null;
+  const i = String(texto).indexOf("{", pos + marcador.length);
+  if (i === -1) return null;
+  let depth = 0;
+  let emString = false;
+  let escape = false;
+  let j = i;
+  for (; j < texto.length; j++) {
+    const c = texto[j];
+    if (emString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') emString = false;
+      continue;
+    }
+    if (c === '"') emString = true;
+    else if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        j++;
+        break;
+      }
+    }
+  }
+  try {
+    return JSON.parse(texto.slice(i, j));
+  } catch {
+    return null;
+  }
+}
+
+/** Extrai o ytInitialPlayerResponse da página do YouTube. */
+export function extrairPlayerResponse(html) {
+  return extrairObjetoApos(html, "ytInitialPlayerResponse");
+}
+
+/** Metadados de um playerResponse do YouTube (formato validado na web real). */
+export function metadadosYouTube(player) {
+  const vd = (player && player.videoDetails) || {};
+  const mf = (player && player.microformat && player.microformat.playerMicroformatRenderer) || {};
+  const caps =
+    ((player && player.captions && player.captions.playerCaptionsTracklistRenderer) || {}).captionTracks ||
+    [];
+  const thumbs =
+    (vd.thumbnail && vd.thumbnail.thumbnails) || (mf.thumbnail && mf.thumbnail.thumbnails) || [];
+  const capa = thumbs.length ? thumbs[thumbs.length - 1].url || "" : "";
+  return {
+    videoId: vd.videoId || "",
+    titulo: vd.title || "",
+    canal: vd.author || mf.ownerChannelName || "",
+    duracaoSeg: Number(vd.lengthSeconds) || 0,
+    views: vd.viewCount ? Number(vd.viewCount) : 0,
+    publicado: String(mf.publishDate || "").slice(0, 10),
+    categoria: mf.category || "",
+    descricao: String(vd.shortDescription || ""),
+    tags: Array.isArray(vd.keywords) ? vd.keywords.slice(0, 10) : [],
+    capa,
+    isLive: Boolean(vd.isLiveContent),
+    playability: (player && player.playabilityStatus && player.playabilityStatus.status) || "",
+    tracks: caps.map((t) => ({
+      lang: t.languageCode || "",
+      kind: t.kind || "manual",
+      nome:
+        (t.name && (t.name.simpleText || (t.name.runs || []).map((r) => r.text).join(""))) ||
+        t.languageCode ||
+        "",
+      url: t.baseUrl || "",
+    })),
+  };
+}
+
+/** Metadados do config público do player do Vimeo (estrutura validada). */
+export function metadadosVimeo(config) {
+  const v = (config && config.video) || {};
+  const tracks = ((config && config.request && config.request.text_tracks) || []).map((t) => ({
+    lang: t.lang || "",
+    kind: t.kind === "captions" ? "captions" : t.kind || "subtitles",
+    nome: t.label || t.lang || "",
+    url: t.url || "",
+  }));
+  return {
+    titulo: v.title || "",
+    canal: (v.owner && v.owner.name) || "",
+    duracaoSeg: Number(v.duration) || 0,
+    descricao: String(v.description || ""),
+    publicado: String(v.release_time || v.upload_date || "").slice(0, 10),
+    capa: v.thumbnail_url || "",
+    tracks,
+  };
+}
+
+/* ===================================================================== *
+ * Metadados de página genérica (og tags + JSON-LD + <video>/<track>)      *
+ * ===================================================================== */
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Lê o content de uma meta tag por property/name (qualquer ordem de atributo). */
+function metaTagConteudo(html, chave) {
+  const re = new RegExp(`<meta\\b[^>]*(?:property|name)\\s*=\\s*["']${escapeRegExp(chave)}["'][^>]*>`, "i");
+  const m = html.match(re);
+  if (!m) return "";
+  const c = m[0].match(/content\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
+  if (!c) return "";
+  return decodeEntities(c[1] ?? c[2] ?? c[3] ?? "").trim();
+}
+
+/** Todos os VideoObject de JSON-LD da página (inclusive dentro de @graph). */
+export function extrairVideoObjects(html) {
+  const achados = [];
+  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    let dados;
+    try {
+      dados = JSON.parse(m[1].trim());
+    } catch {
+      continue;
+    }
+    coletarVideoObjects(dados, achados);
+  }
+  return achados;
+}
+
+function coletarVideoObjects(no, saida, prof = 0) {
+  if (prof > 8 || !no || typeof no !== "object") return;
+  if (Array.isArray(no)) {
+    for (const x of no) coletarVideoObjects(x, saida, prof + 1);
+    return;
+  }
+  const tipo = no["@type"];
+  if (tipo === "VideoObject" || (Array.isArray(tipo) && tipo.includes("VideoObject"))) {
+    saida.push(no);
+  }
+  for (const valor of Object.values(no)) {
+    if (valor && typeof valor === "object") coletarVideoObjects(valor, saida, prof + 1);
+  }
+}
+
+/** Duração em segundos: aceita número puro ou ISO 8601 ("PT4M13S"). */
+export function segundosDeDuracao(texto) {
+  const s = String(texto || "").trim();
+  if (/^\d+$/.test(s)) return Number(s);
+  const m = s.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i);
+  if (m) return (Number(m[1]) || 0) * 3600 + (Number(m[2]) || 0) * 60 + (Number(m[3]) || 0);
+  return 0;
+}
+
+/** Collecta <track> de legendas (src absoluto, kind de texto). */
+export function extrairTracksDeHtml(html, baseUrl) {
+  const tracks = [];
+  const re = /<track\b[^>]*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const tag = m[0];
+    const attr = (nome) => {
+      const a = tag.match(new RegExp(`${nome}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
+      return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
+    };
+    const src = attr("src");
+    if (!src) continue;
+    const kind = (attr("kind") || "subtitles").toLowerCase();
+    if (kind !== "subtitles" && kind !== "captions" && kind !== "descriptions") continue;
+    let abs;
+    try {
+      abs = new URL(src, baseUrl).href;
+    } catch {
+      continue;
+    }
+    tracks.push({
+      lang: attr("srclang") || "",
+      kind: "manual",
+      nome: attr("label") || attr("srclang") || "",
+      url: abs,
+    });
+  }
+  return tracks;
+}
+
+/** Metadados de uma página que talvez seja de vídeo. */
+export function metadadosPagina(html, baseUrl) {
+  const jsonLd = extrairVideoObjects(html);
+  const vo = jsonLd[0] || {};
+  const tracksHtml = extrairTracksDeHtml(html, baseUrl);
+  const mVideo = html.match(/<video\b[^>]*>/i);
+  const attrVideo = (nome) => {
+    if (!mVideo) return "";
+    const a = mVideo[0].match(new RegExp(`${nome}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
+    return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
+  };
+
+  const autorJsonLd =
+    (vo.author && (vo.author.name || vo.author)) ||
+    (vo.publisher && (vo.publisher.name || vo.publisher)) ||
+    "";
+
+  return {
+    titulo: metaTagConteudo(html, "og:title") || metaTagConteudo(html, "twitter:title") || String(vo.name || ""),
+    descricao:
+      metaTagConteudo(html, "og:description") || metaTagConteudo(html, "twitter:description") || String(vo.description || ""),
+    site: metaTagConteudo(html, "og:site_name"),
+    canal: String(autorJsonLd || ""),
+    publicado: String(vo.uploadDate || "").slice(0, 10) || metaTagConteudo(html, "article:published_time").slice(0, 10),
+    duracaoSeg:
+      segundosDeDuracao(metaTagConteudo(html, "video:duration")) ||
+      segundosDeDuracao(metaTagConteudo(html, "og:video:duration")) ||
+      segundosDeDuracao(vo.duration),
+    capa:
+      metaTagConteudo(html, "og:image") ||
+      metaTagConteudo(html, "twitter:image") ||
+      String(vo.thumbnailUrl || "") ||
+      attrVideo("poster"),
+    tracks: tracksHtml,
+    temVideo: Boolean(
+      mVideo ||
+        tracksHtml.length > 0 ||
+        jsonLd.length > 0 ||
+        /^video/i.test(metaTagConteudo(html, "og:type")) ||
+        metaTagConteudo(html, "og:video") ||
+        metaTagConteudo(html, "twitter:player")
+    ),
+  };
+}
+
+/* ===================================================================== *
+ * Conversão de legendas (VTT/SRT) e do json3 do YouTube                   *
+ * ===================================================================== */
+
+const CHARS_POR_BLOCO_LEGENDA = 180;
+
+/** "00:01:05.200" (ou SRT "00:01:05,200") -> 65 segundos. */
+export function segundosDeTempo(ts) {
+  const partes = String(ts)
+    .trim()
+    .replace(",", ".")
+    .split(":")
+    .map((p) => parseFloat(p) || 0);
+  let s = 0;
+  for (const p of partes) s = s * 60 + p;
+  return Math.floor(s);
+}
+
+/** Limpa marcação das legendas: <i>, <c.cor>, <v Nome>, {\an8}, entidades. */
+function limparTextoDeLegenda(s) {
+  return decodeEntities(
+    String(s || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\{\\[^}]*\}/g, " ")
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Junta cues curtas em blocos legíveis: fim de frase ou ~180 caracteres. */
+function acumularBlocos(cues) {
+  const blocos = [];
+  let buffer = "";
+  let segInicio = null;
+  const fechar = () => {
+    const texto = buffer.trim();
+    if (texto) blocos.push({ seg: segInicio ?? 0, texto });
+    buffer = "";
+    segInicio = null;
+  };
+  for (const cue of cues) {
+    const texto = String(cue.texto || "").trim();
+    if (!texto) continue;
+    if (segInicio === null) segInicio = cue.seg;
+    buffer += (buffer ? " " : "") + texto;
+    if (cue.quebra || /[.!?]$/.test(texto) || buffer.length >= CHARS_POR_BLOCO_LEGENDA) fechar();
+  }
+  fechar();
+  return blocos;
+}
+
+/**
+ * Converte uma legenda WebVTT (ou SRT — o formato é o mesmo a menos do
+ * separador decimal) em blocos com timestamp.
+ */
+export function converterVtt(texto) {
+  const normalizado = String(texto || "").replace(/\r\n?/g, "\n").trim();
+  if (!normalizado) return { blocos: [], cues: 0, caracteres: 0 };
+  const blocosBrutos = normalizado.split(/\n{2,}/);
+  const cues = [];
+  for (const bruto of blocosBrutos) {
+    const linhas = bruto.split("\n");
+    let idxTempo = -1;
+    for (let i = 0; i < linhas.length; i++) {
+      if (linhas[i].includes("-->")) {
+        idxTempo = i;
+        break;
+      }
+    }
+    if (idxTempo === -1) continue; // WEBVTT, NOTE, STYLE, REGION, número solto
+    const seg = segundosDeTempo(linhas[idxTempo].split("-->")[0].trim());
+    const textoLimpo = limparTextoDeLegenda(linhas.slice(idxTempo + 1).join(" "));
+    if (textoLimpo) cues.push({ seg, texto: textoLimpo });
+  }
+  const blocos = acumularBlocos(cues);
+  return { blocos, cues: cues.length, caracteres: blocos.reduce((n, b) => n + b.texto.length, 0) };
+}
+
+/** Converte o formato json3 (timedtext do YouTube), com quebras de linha. */
+export function converterJson3(corpo) {
+  let dados;
+  try {
+    dados = JSON.parse(String(corpo || ""));
+  } catch {
+    return { blocos: [], cues: 0, caracteres: 0 };
+  }
+  const eventos = Array.isArray(dados.events) ? dados.events : [];
+  const cues = [];
+  for (const ev of eventos) {
+    if (!ev || !ev.segs) continue;
+    const t = Math.max(0, Math.floor((Number(ev.tStartMs) || 0) / 1000));
+    const texto = ev.segs.map((s) => s.utf8 || "").join("");
+    if (!texto) continue;
+    if (texto.includes("\n")) {
+      const partes = texto.split(/\n+/).filter(Boolean);
+      partes.forEach((p, i) => {
+        if (p.trim()) cues.push({ seg: t, texto: p.trim(), quebra: i < partes.length - 1 });
+      });
+      continue;
+    }
+    cues.push({ seg: t, texto });
+  }
+  const blocos = acumularBlocos(cues);
+  return { blocos, cues: cues.length, caracteres: blocos.reduce((n, b) => n + b.texto.length, 0) };
+}
+
+/**
+ * Despacha pelo formato (ou pela cara do texto): json3, vtt/srt ou texto puro.
+ */
+export function converterLegenda(texto, formato = null) {
+  const amostra = String(texto || "").trim();
+  let fmt = formato;
+  if (!fmt) {
+    if (/^WEBVTT/mi.test(amostra)) fmt = "vtt";
+    else if (/^\{/.test(amostra)) fmt = "json3";
+    else if (amostra.includes("-->")) fmt = "srt";
+    else fmt = "texto";
+  }
+  if (fmt === "json3") return converterJson3(amostra);
+  if (fmt === "texto") {
+    const textoLimpo = limparTextoDeLegenda(amostra);
+    const blocos = textoLimpo ? [{ seg: 0, texto: textoLimpo }] : [];
+    return { blocos, cues: blocos.length, caracteres: textoLimpo.length };
+  }
+  return converterVtt(amostra);
+}
+
+/** "213" -> "3:33"; "3725" -> "1:02:05". */
+export function formatarTempo(seg) {
+  const s = Math.max(0, Math.floor(Number(seg) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const resto = s % 60;
+  const dois = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${dois(m)}:${dois(resto)}` : `${m}:${dois(resto)}`;
+}
+
+/** "1828046215" -> "1.828.046.215". */
+export function formatarNumero(n) {
+  const s = String(Math.floor(Number(n) || 0));
+  return s.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+/* ===================================================================== *
+ * Escolha de faixa por idioma                                             *
+ * ===================================================================== */
+
+/** Preferências de idioma: o pedido pela pessoa primeiro, depois pt-BR, pt, en. */
+export function preferenciasDeIdioma(lang) {
+  const base = [];
+  if (lang) base.push(String(lang));
+  for (const p of ["pt-BR", "pt", "en"]) {
+    if (!base.some((b) => b.toLowerCase() === p.toLowerCase())) base.push(p);
+  }
+  return base.map((p) => p.toLowerCase());
+}
+
+/** Escolhe a melhor faixa de legenda para as preferências (manual ganha de ASR). */
+export function escolherTrack(tracks, preferencias = []) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return null;
+  const pontuar = (t) => {
+    const lang = String(t.lang || "").toLowerCase();
+    const baseLang = lang.split("-")[0];
+    let score = 0;
+    preferencias.forEach((p, i) => {
+      const pl = String(p).toLowerCase();
+      const pBase = pl.split("-")[0];
+      if (lang === pl) score = Math.max(score, 1000 - i * 100);
+      else if (pBase && baseLang === pBase) score = Math.max(score, 500 - i * 50);
+    });
+    if (t.kind !== "asr" && t.kind !== "automatica") score += 20;
+    return score;
+  };
+  let melhor = tracks[0];
+  let melhorScore = -Infinity;
+  for (const t of tracks) {
+    const s = pontuar(t);
+    if (s > melhorScore) {
+      melhorScore = s;
+      melhor = t;
+    }
+  }
+  return melhor;
+}
+
+/* ===================================================================== *
+ * Download da legenda                                                     *
+ * ===================================================================== */
+
+function comFormato(url, fmt) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("fmt", fmt);
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Baixa uma legenda e converte. Devolve { blocos, caracteres, lang } em caso
+ * de sucesso ou { indisponivel: motivo } — nunca lança: a ferramenta de vídeo
+ * devolve metadados mesmo quando a transcrição não vem.
+ */
+async function baixarTranscricao(track, { timeoutMs, forcarFormato = null } = {}) {
+  if (!track || !track.url) return { indisponivel: "esta plataforma não lista legendas para o vídeo" };
+  const alvo = forcarFormato ? comFormato(track.url, forcarFormato) : track.url;
+  try {
+    const { text, contentType } = await fetchTextCached(alvo, { timeoutMs, retries: 0 });
+    if (!String(text || "").trim()) {
+      return {
+        indisponivel:
+          "a plataforma respondeu com corpo vazio (legenda não servida para acesso anônimo)",
+      };
+    }
+    const fmt = forcarFormato === "json3" ? "json3" : /json/i.test(contentType || "") ? "json3" : null;
+    const convertido = converterLegenda(text, fmt);
+    if (!convertido.blocos.length) {
+      return { indisponivel: "a legenda veio, mas sem falas legíveis" };
+    }
+    return { ...convertido, lang: track.lang || "" };
+  } catch (err) {
+    if (err instanceof RobotsBloqueadoError) {
+      return {
+        indisponivel: `bloqueado pelo robots.txt do site (o caminho da legenda está em Disallow)`,
+      };
+    }
+    return { indisponivel: `falha ao baixar a legenda (${err.message})` };
+  }
+}
+
+/* ===================================================================== *
+ * Saída                                                                   *
+ * ===================================================================== */
+
+const MAX_CHARS_DESCRICAO = 600;
+
+function encurtarDescricao(texto) {
+  const limpo = String(texto || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (limpo.length <= MAX_CHARS_DESCRICAO) return limpo;
+  return `${limpo.slice(0, MAX_CHARS_DESCRICAO).replace(/\s+\S*$/, "")}...`;
+}
+
+/**
+ * Monta a saída final em markdown: cabeçalho de metadados + transcrição com
+ * timestamps, respeitando o teto de caracteres.
+ */
+export function montarSaidaVideo({
+  urlFinal,
+  plataforma,
+  titulo,
+  canal,
+  duracaoSeg,
+  publicado,
+  views,
+  capa,
+  descricao,
+  tags,
+  tracks,
+  transcricao,
+  maxChars,
+}) {
+  const linhas = [];
+  linhas.push(`# ${titulo || "(sem título)"}`);
+  linhas.push(`URL: ${urlFinal}`);
+  linhas.push(`Plataforma: ${plataforma}`);
+  if (canal) linhas.push(`Canal: ${canal}`);
+  if (duracaoSeg) linhas.push(`Duracao: ${formatarTempo(duracaoSeg)}`);
+  if (publicado) linhas.push(`Publicado: ${publicado}`);
+  if (views) linhas.push(`Visualizacoes: ${formatarNumero(views)}`);
+  if (capa) linhas.push(`Capa: ${capa}`);
+  if (Array.isArray(tags) && tags.length) linhas.push(`Tags: ${tags.join(", ")}`);
+  const descricaoCurta = encurtarDescricao(descricao);
+  if (descricaoCurta) linhas.push(`Descricao: ${descricaoCurta}`);
+  if (Array.isArray(tracks) && tracks.length) {
+    const listadas = tracks
+      .slice(0, 12)
+      .map((t) => `${t.lang}${t.kind === "asr" || t.kind === "automatica" ? " (automatica)" : " (manual)"}`)
+      .join(", ");
+    linhas.push(`Legendas na plataforma: ${listadas}`);
+  }
+  if (transcricao && transcricao.blocos && transcricao.blocos.length) {
+    linhas.push(
+      `Transcricao: ${transcricao.blocos.length} blocos em ${transcricao.lang || "(idioma não informado)"} (~${transcricao.caracteres} caracteres)`
+    );
+  } else if (transcricao && transcricao.indisponivel) {
+    linhas.push(`Transcricao: indisponivel — ${transcricao.indisponivel}`);
+  }
+  linhas.push("");
+  if (transcricao && transcricao.blocos && transcricao.blocos.length) {
+    for (const b of transcricao.blocos) {
+      linhas.push(`[${formatarTempo(b.seg)}] ${b.texto}`);
+    }
+    linhas.push("");
+    linhas.push("(Transcrição vinda da legenda publicada pela plataforma; não descreve as imagens do vídeo.)");
+  } else {
+    linhas.push("(Esta ferramenta extrai metadados e transcrição textual; não baixa o vídeo nem gera quadros.)");
+  }
+  const montado = linhas.join("\n");
+  const { text } = truncate(montado, maxChars);
+  return text;
+}
+
+/* ===================================================================== *
+ * Orquestração por plataforma                                             *
+ * ===================================================================== */
+
+async function metadadosYouTubeViaOembed(id, { timeoutMs }) {
+  const alvo = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+    `https://www.youtube.com/watch?v=${id}`
+  )}&format=json`;
+  try {
+    const { text } = await fetchTextCached(alvo, { timeoutMs, retries: 0 });
+    const j = JSON.parse(text);
+    return { titulo: j.title || "", canal: j.author_name || "", capa: j.thumbnail_url || "" };
+  } catch {
+    return null;
+  }
+}
+
+async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
+  const urlPagina = `https://www.youtube.com/watch?v=${id}`;
+  const { text: html, finalUrl } = await fetchTextCached(urlPagina, { timeoutMs });
+  const player = extrairPlayerResponse(html);
+
+  if (!player || !(player.videoDetails && player.videoDetails.title)) {
+    const oembed = await metadadosYouTubeViaOembed(id, { timeoutMs });
+    if (oembed && oembed.titulo) {
+      return montarSaidaVideo({
+        urlFinal: finalUrl,
+        plataforma: "YouTube",
+        titulo: oembed.titulo,
+        canal: oembed.canal,
+        capa: oembed.capa,
+        transcricao: { indisponivel: "metadados mínimos (oEmbed) — a página não entregou os dados completos do player" },
+        maxChars,
+      });
+    }
+    const status = player && player.playabilityStatus ? player.playabilityStatus.status : "";
+    return montarSaidaVideo({
+      urlFinal: finalUrl,
+      plataforma: "YouTube",
+      titulo: "(vídeo não acessível)",
+      transcricao: {
+        indisponivel: status
+          ? `o YouTube não liberou este vídeo para acesso anônimo (status: ${status})`
+          : "o YouTube não entregou os dados do vídeo nesta leitura (consentimento, idade ou bloqueio temporário)",
+      },
+      maxChars,
+    });
+  }
+
+  const meta = metadadosYouTube(player);
+  const track = escolherTrack(meta.tracks, preferenciasDeIdioma(lang));
+  const transcricao = track
+    ? await baixarTranscricao(track, { timeoutMs, forcarFormato: "json3" })
+    : { indisponivel: "este vídeo não lista legendas na página" };
+  if (transcricao && transcricao.blocos && track) transcricao.lang = track.lang;
+
+  return montarSaidaVideo({
+    urlFinal: finalUrl,
+    plataforma: "YouTube",
+    titulo: meta.titulo,
+    canal: meta.canal,
+    duracaoSeg: meta.duracaoSeg,
+    publicado: meta.publicado,
+    views: meta.views,
+    capa: meta.capa,
+    descricao: meta.descricao,
+    tags: meta.tags,
+    tracks: meta.tracks,
+    transcricao,
+    maxChars,
+  });
+}
+
+async function lerVimeo(id, hash, { timeoutMs, maxChars, lang }) {
+  const urlConfig = `https://player.vimeo.com/video/${id}/config${hash ? `?h=${encodeURIComponent(hash)}` : ""}`;
+  const preferencias = preferenciasDeIdioma(lang);
+
+  try {
+    const { text } = await fetchTextCached(urlConfig, { timeoutMs });
+    const config = JSON.parse(text);
+    const meta = metadadosVimeo(config);
+    const track = escolherTrack(meta.tracks, preferencias);
+    let transcricao = track
+      ? await baixarTranscricao(track, { timeoutMs })
+      : { indisponivel: "este vídeo não lista legendas no player" };
+    if (transcricao && transcricao.blocos && track) transcricao.lang = track.lang;
+    return montarSaidaVideo({
+      urlFinal: `https://vimeo.com/${id}`,
+      plataforma: "Vimeo",
+      titulo: meta.titulo,
+      canal: meta.canal,
+      duracaoSeg: meta.duracaoSeg,
+      publicado: meta.publicado,
+      capa: meta.capa,
+      descricao: meta.descricao,
+      tracks: meta.tracks,
+      transcricao,
+      maxChars,
+    });
+  } catch (err) {
+    // Fallback: página pública (og tags) — sem transcrição, mas com metadados.
+    try {
+      const { text: html, finalUrl } = await fetchTextCached(`https://vimeo.com/${id}`, { timeoutMs });
+      const meta = metadadosPagina(html, finalUrl);
+      return montarSaidaVideo({
+        urlFinal: finalUrl,
+        plataforma: "Vimeo",
+        titulo: meta.titulo,
+        canal: meta.canal,
+        duracaoSeg: meta.duracaoSeg,
+        capa: meta.capa,
+        descricao: meta.descricao,
+        tracks: meta.tracks,
+        transcricao: {
+          indisponivel: `o config do player não respondeu (${err.message}); sem acesso às faixas de legenda`,
+        },
+        maxChars,
+      });
+    } catch {
+      throw err;
+    }
+  }
+}
+
+async function lerLegendaDireta(url, { timeoutMs, maxChars }) {
+  const { text, contentType, finalUrl } = await fetchTextCached(url, { timeoutMs });
+  const transcricao = converterLegenda(text, /json/i.test(contentType || "") ? "json3" : null);
+  const nome = (() => {
+    try {
+      return new URL(finalUrl).pathname.split("/").pop() || "legenda";
+    } catch {
+      return "legenda";
+    }
+  })();
+  if (!transcricao.blocos.length) {
+    return montarSaidaVideo({
+      urlFinal: finalUrl,
+      plataforma: "Arquivo de legenda",
+      titulo: `Legenda: ${nome}`,
+      transcricao: { indisponivel: "o arquivo não tinha falas legíveis no formato VTT/SRT/json3" },
+      maxChars,
+    });
+  }
+  return montarSaidaVideo({
+    urlFinal: finalUrl,
+    plataforma: "Arquivo de legenda",
+    titulo: `Legenda: ${nome}`,
+    tracks: [{ lang: "", kind: "manual", nome, url: finalUrl }],
+    transcricao: { ...transcricao, lang: "" },
+    maxChars,
+  });
+}
+
+async function lerPaginaGenerica(url, { timeoutMs, maxChars, lang }) {
+  const { text: html, finalUrl } = await fetchTextCached(url, { timeoutMs });
+
+  // Página que incorpora um vídeo conhecido (blog com embed): segue o vídeo.
+  const embed = procurarEmbedDeVideo(html);
+  if (embed && embed.tipo === "youtube") return lerYouTube(embed.id, { timeoutMs, maxChars, lang });
+  if (embed && embed.tipo === "vimeo") return lerVimeo(embed.id, embed.hash, { timeoutMs, maxChars, lang });
+
+  const meta = metadadosPagina(html, finalUrl);
+  if (!meta.temVideo) {
+    return [
+      "# (sem vídeo identificado)",
+      `URL: ${finalUrl}`,
+      "",
+      "Não identifiquei um vídeo nesta página (sem og:video, JSON-LD VideoObject ou <video>).",
+      "Use read_page para ler o conteúdo da página, ou passe a URL direta do vídeo.",
+    ].join("\n");
+  }
+
+  const track = escolherTrack(meta.tracks, preferenciasDeIdioma(lang));
+  const transcricao = track
+    ? await baixarTranscricao(track, { timeoutMs })
+    : { indisponivel: "a página não publica legenda em formato acessível (<track> ausente)" };
+  if (transcricao && transcricao.blocos && track) transcricao.lang = track.lang;
+
+  return montarSaidaVideo({
+    urlFinal: finalUrl,
+    plataforma: meta.site || "Página com vídeo",
+    titulo: meta.titulo,
+    canal: meta.canal,
+    duracaoSeg: meta.duracaoSeg,
+    publicado: meta.publicado,
+    capa: meta.capa,
+    descricao: meta.descricao,
+    tracks: meta.tracks,
+    transcricao,
+    maxChars,
+  });
+}
+
+/* ===================================================================== *
+ * Ferramenta                                                              *
+ * ===================================================================== */
+
+/**
+ * Lê um vídeo (YouTube, Vimeo ou página com vídeo): metadados publicados e a
+ * transcrição da legenda, quando acessível. Nunca baixa mídia.
+ */
+export async function toolReadVideo(args) {
+  const parsed = validateHttpUrl(args.url);
+  const maxChars = clampMaxChars(args.maxChars);
+  const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  const lang = args.lang ? String(args.lang) : null;
+
+  const deteccao = detectarVideo(parsed.href);
+  if (deteccao.tipo === "youtube") return lerYouTube(deteccao.id, { timeoutMs, maxChars, lang });
+  if (deteccao.tipo === "vimeo") return lerVimeo(deteccao.id, deteccao.hash, { timeoutMs, maxChars, lang });
+  if (deteccao.tipo === "legenda") return lerLegendaDireta(parsed.href, { timeoutMs, maxChars });
+  return lerPaginaGenerica(parsed.href, { timeoutMs, maxChars, lang });
+}

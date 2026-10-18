@@ -21,7 +21,8 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache, **junção de buscas em voo**, revalidação em segundo plano (SWR), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. |
+| `tools.mjs` | As 7 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. A `read_video` mora em `video.mjs`. |
+| `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, handlers, `/health` e shutdown limpo. |
 | `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
@@ -49,6 +50,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)                  |
 | `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL                  |
 | `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript extraindo os dados embutidos no HTML (sem navegador) |
+| `read_video(url, lang?)`    | Lê um vídeo (YouTube, Vimeo, página com vídeo ou legenda .vtt/.srt): metadados publicados + transcrição da legenda com timestamps, quando acessível |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
@@ -75,6 +77,7 @@ Roda dezenove arquivos em `tests/` (16 suítes + 1 helpers + snapshots, ~60 s, s
 | `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
 | `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
 | `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |
+| `tests/video.test.mjs` | `read_video`: metadados + transcrição de `<track>` com timestamps, bloqueio pelo robots declarado, legenda direta `.vtt` e página sem vídeo |
 | `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
 | `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
@@ -100,7 +103,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 6 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 7 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 ```
 
@@ -155,7 +158,8 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 6 ferramentas do MCP
+│   ├── tools.mjs      <- as 7 ferramentas do MCP
+│   ├── video.mjs      <- read_video: metadados + transcricao de legendas
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
 │   ├── http-transport.mjs<- HTTP: rate limit, auth, /health, handlers
 │   └── server.mjs     <- roteador JSON-RPC, stdio e montagem do HTTP
@@ -249,7 +253,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.1.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.2.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -646,6 +650,41 @@ Quando o `read_page` dispara essa extração, ele também tenta as rotas `/api/.
 - deduplicados e priorizados: caminho com cara de dados (`json`, `graphql`, `api`)
   ganha pontos, asset estático (`.png`, `.css`, `.js`, `.woff`) perde e não ocupa vaga.
 
+## read_video (metadados + transcrição)
+
+Para saber **o que é** um vídeo e **o que é falado nele**, sem baixar mídia.
+Aceita quatro entradas:
+
+| Entrada | O que ela tenta |
+| --- | --- |
+| URL de vídeo do YouTube (`watch`, `youtu.be`, `shorts`, `live`, `embed`) | metadados + legendas da própria página |
+| URL do Vimeo (vídeo ou player) | metadados + faixas do player — a transcrição funciona |
+| Qualquer página com vídeo embutido (blog, notícia) | segue o embed conhecido, ou lê og tags/JSON-LD/`<track>` da própria página |
+| Link direto de legenda (`.vtt`/`.srt`) | baixa e converte em blocos com timestamps |
+
+O que sai: título, canal, duração, visualização, publicação, capa, descrição e a
+**transcrição** — cada bloco com timestamp (`[3:33] texto`), no idioma preferido
+(`lang`) ou na ordem `pt-BR`, `pt`, `en`.
+
+**O que ela não faz — e por quê.** Não baixa o vídeo, não decodifica quadros e não
+gera resumo de imagem: isso exigiria `yt-dlp`/`ffmpeg` (quebraria a restrição de
+zero dependências) e estouraria a memória do plano free. Só entra o que a
+plataforma publica como **texto acessível**.
+
+**YouTube, a parte honesta:** a página do vídeo entrega os metadados completos,
+mas o download de legenda do YouTube mora em `/api/timedtext` — que o robots.txt
+do próprio YouTube bloqueia (`Disallow: /api/`) e que, mesmo fora dele, devolve
+corpo vazio para acesso anônimo (testado também por curl). O `read_video` tenta,
+e quando não consegue **declara o motivo exato** no campo `Transcricao:` em vez
+de fingir que leu. Para vídeo sem sessão, é isso que existe: metadados fiéis.
+
+**Vimeo e páginas com legenda publicada** rodam de ponta a ponta: o módulo baixa
+o VTT/SRT (ou o `json3` do YouTube, quando ele responde), converte em blocos
+legíveis, junta cues curtas em frases e limpa a marcação (`<i>`, `<c.cor>`, `{\an8}`).
+
+Toda URL tocada pela `read_video` passa pelo mesmo caminho das outras ferramentas:
+validação SSRF, robots.txt, cache, junção de buscas em voo e teto por host.
+
 ## Como as falhas aparecem na saída
 
 A saída é consumida por uma IA, então **uma falha nunca pode parecer "página
@@ -654,6 +693,7 @@ vazia"**. O contrato é:
 | Situação | O que a ferramenta devolve |
 | --- | --- |
 | `read_page` / `extract_links` / `read_dynamic_page` com URL bloqueada, DNS, timeout ou HTTP ruim | `isError: true` com a mensagem do motivo |
+| `read_video` sem acesso à legenda (robots, corpo vazio ou faixa ausente) | **não** é erro: devolve os metadados e o campo `Transcricao: indisponivel — <motivo>`. Sem vídeo identificável na página, devolve mensagem explicando e apontando o `read_page` |
 | `crawl_site` com a **URL inicial** ruim | `isError: true` — `Nao foi possivel iniciar o crawl em <url>: <motivo>` |
 | `crawl_site` com falha **no meio** do crawl | continua e devolve o que leu, com `RESULTADO PARCIAL: N pagina(s) falharam — 2 com HTTP 404, 1 com timeout`, e cada página ruim marcada com `# Erro ao ler <url>` |
 | `read_multiple_pages` com falha em alguma URL | a chamada **não** é erro (o isolamento por URL é proposital); o resumo traz `N paginas OK` e cada falha vem marcada com `# Erro ao ler <url>` |

@@ -1,6 +1,6 @@
 /**
  * Ferramentas do MCP: read_page, extract_links, read_multiple_pages,
- * read_dynamic_page, discover_urls, crawl_site.
+ * read_dynamic_page, discover_urls, crawl_site, read_video.
  */
 
 import {
@@ -25,6 +25,7 @@ import {
   conteudoBrutoResult,
 } from "./fetch.mjs";
 import { htmlToMarkdown, extractMeta, extractLinks, hostOf } from "./html-parser.mjs";
+import { toolReadVideo } from "./video.mjs";
 import {
   ParametroInvalidoError,
   LimiteExcedidoError,
@@ -870,6 +871,8 @@ export async function callTool(name, args) {
       return await toolCrawlSite(args || {});
     case "read_dynamic_page":
       return await toolReadDynamicPage(args || {});
+    case "read_video":
+      return await toolReadVideo(args || {});
     default:
       throw new FerramentaDesconhecidaError(name);
   }

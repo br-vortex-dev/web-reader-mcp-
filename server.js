@@ -8,11 +8,12 @@
  * - Protocolo MCP (stdio, JSON-RPC newline-delimited) implementado à mão.
  * - Parser de HTML → markdown também implementado à mão (tokenizer próprio).
  *
- * Ferramentas (6):
+ * Ferramentas (7):
  *   read_page(url)               -> lê uma página e devolve título + conteúdo em markdown
  *   extract_links(url)           -> lista os links de uma página
  *   read_multiple_pages(urls)    -> lê várias páginas por chamada
  *   read_dynamic_page(url)       -> lê páginas que dependem de JavaScript (sem Playwright)
+ *   read_video(url)              -> lê vídeo (metadados + transcrição da legenda)
  *   discover_urls(url)           -> descobre URLs do site (sitemap.xml ou links internos)
  *   crawl_site(url)              -> lê um site sozinho (BFS pelos links internos)
  */

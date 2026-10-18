@@ -114,4 +114,33 @@ export const TOOLS = [
       required: ["url"],
     },
   },
+  {
+    name: "read_video",
+    description:
+      "Lê um vídeo de plataformas conhecidas (YouTube, Vimeo) ou de qualquer página com vídeo embutido: " +
+      "devolve os metadados publicados (título, canal, duração, visualizações, descrição, capa) e a " +
+      "TRANSCRIÇÃO da legenda, com timestamps, quando a plataforma publica legenda acessível. " +
+      "Aceita também link direto de legenda (.vtt/.srt). Não baixa o vídeo nem gera quadros — " +
+      "só o que existe como texto acessível. Para YouTube, se as legendas estiverem bloqueadas " +
+      "para acesso anônimo, devolve os metadados com o motivo explícito no campo Transcricao.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "URL do vídeo (YouTube, Vimeo), de página com vídeo, ou link direto .vtt/.srt",
+        },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres da saída (padrão 8000, max 25000)",
+        },
+        lang: {
+          type: "string",
+          description: "Idioma preferido da legenda (ex.: pt, pt-BR, en). Sem ele, tenta pt-BR, pt, en",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
 ];
