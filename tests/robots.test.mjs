@@ -4,7 +4,7 @@
 // Uso: node --test tests/
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startFixture, startMcp } from "./helpers.mjs";
+import { startFixture, startMcp, sleep } from "./helpers.mjs";
 
 let fixture;
 let mcp;
@@ -88,6 +88,32 @@ test("robots.txt inacessivel (HTTP 500) = fail-open", { timeout: 30000 }, async 
   } finally {
     mcpRobo.close();
     await fixtureQuebrado.close();
+  }
+});
+
+test("robots.txt que estaciona o corpo nao prende a requisicao (teto cobre o corpo)", { timeout: 60000 }, async () => {
+  // Regressao vista em producao: o robots.txt manda os cabecalhos e nunca
+  // termina o corpo. O teto era cancelado ANTES de ler o corpo, entao a
+  // busca ficava pendurada para sempre — e a vaga de admissao da requisicao
+  // ia junto (128 vagas presas por >100 minutos no Render).
+  const fixtureTravado = await startFixture({ robots: "estaciona" });
+  const mcpRobo = await startMcp({ ALLOW_PRIVATE_HOSTS: "1", ROBOTS_TIMEOUT_MS: "1500" });
+  try {
+    const t0 = Date.now();
+    const r = await mcpRobo.call("read_page", { url: `${fixtureTravado.url}/livre`, maxChars: 500, timeoutMs: 5000 });
+    const dt = Date.now() - t0;
+    assert.ok(dt < 20000, `nao pode ficar pendurado (levou ${dt} ms)`);
+    // Fail-open: sem regra para cumprir, a pagina e lida normalmente.
+    assert.equal(r.isError, false, `fail-open: ${r.text}`);
+
+    // E a vaga de admissao volta ao zero — era isso que vazava.
+    await sleep(300);
+    const texto = await (await fetch(`${mcpRobo.base}/health`)).text();
+    const m = texto.match(/requisicoes: (\d+) ativas/);
+    assert.equal(Number(m[1]), 0, `a admissao tem de voltar a zero: ${texto}`);
+  } finally {
+    mcpRobo.close();
+    await fixtureTravado.close();
   }
 });
 

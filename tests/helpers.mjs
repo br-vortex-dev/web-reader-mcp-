@@ -519,6 +519,14 @@ export async function startFixture({ robots = "regras" } = {}) {
         res.end("falhou");
         return;
       }
+      if (robots === "estaciona") {
+        // Manda os cabecalhos e um pedaco do corpo, e NUNCA termina: e o caso
+        // que prendia a busca do robots.txt (e a vaga de admissao da
+        // requisicao) para sempre — o teto tem de cobrir a leitura do corpo.
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+        res.write("User-agent: *\n");
+        return;
+      }
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       res.end(
         "User-agent: *\n" +

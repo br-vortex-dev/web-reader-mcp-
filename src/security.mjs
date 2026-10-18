@@ -330,18 +330,26 @@ async function robotsDaOrigem(origem) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), ROBOTS_TIMEOUT_MS);
-      const res = await fetch(`${origem}/robots.txt`, {
-        signal: controller.signal,
-        headers: { "User-Agent": "web-reader-mcp" },
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        const text = await lerRobotsComTeto(res);
-        // null = passou do teto: sem regra para cumprir, fica o fail-open.
-        if (text !== null) entrada = { at: Date.now(), grupos: robotsGruposDoTexto(text) };
+      try {
+        const res = await fetch(`${origem}/robots.txt`, {
+          signal: controller.signal,
+          headers: { "User-Agent": "web-reader-mcp" },
+        });
+        if (res.ok) {
+          const text = await lerRobotsComTeto(res);
+          // null = passou do teto: sem regra para cumprir, fica o fail-open.
+          if (text !== null) entrada = { at: Date.now(), grupos: robotsGruposDoTexto(text) };
+        }
+      } finally {
+        // O teto cobre TAMBEM a leitura do corpo. Cancelar antes do
+        // `lerRobotsComTeto` deixava uma resposta que manda os cabecalhos e
+        // estaciona o corpo pendurada para sempre — e a vaga de admissao da
+        // requisicao ia junto (visto em producao: 128 vagas presas por mais
+        // de 100 minutos depois de uma rajada).
+        clearTimeout(timer);
       }
     } catch {
-      // inacessível/4xx/5xx/grande demais: fica o fail-open
+      // inacessível/4xx/5xx/grande demais/tempo esgotado: fica o fail-open
     }
     robotsEmVoo.delete(origem);
     robotsCache.set(origem, entrada);
