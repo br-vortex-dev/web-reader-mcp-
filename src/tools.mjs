@@ -417,8 +417,21 @@ function isNavigationUrl(url) {
     const s = segmentos[i].toLowerCase();
     if ((s === "page" || s === "p") && /^\d+$/.test(segmentos[i + 1] || "")) return true;
   }
-  if (segmentos.some((s) => NAVIGATION_SEGMENTS.has(decodeURIComponent(s).toLowerCase()))) return true;
+  // decodeURIComponent LANÇA com percent-encoding malformado ("100%",
+  // "%zz" — URLs que existem na web real). Sem a guarda, UMA URL assim
+  // derrubava a extração inteira (extract_links, crawl e discover_urls).
+  if (segmentos.some((s) => NAVIGATION_SEGMENTS.has(decodificarSegmento(s)))) return true;
   return url.includes("#");
+}
+
+/** Decodifica um segmento de URL sem lançar: % malformado fica como veio. */
+function decodificarSegmento(segmento) {
+  const minúsculo = segmento.toLowerCase();
+  try {
+    return decodeURIComponent(minúsculo);
+  } catch {
+    return minúsculo;
+  }
 }
 
 /**

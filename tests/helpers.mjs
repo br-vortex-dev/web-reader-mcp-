@@ -5,6 +5,7 @@
 // em `test/`), para o `node --test` nao tentar executa-lo como teste.
 import { spawn } from "node:child_process";
 import http from "node:http";
+import zlib from "node:zlib";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -309,6 +310,54 @@ export async function startFixture({ robots = "regras" } = {}) {
         res.end();
         return;
       }
+    }
+
+    // /gzip e /br -> pagina comprimida de verdade: o transporte de saída tem
+    // de descomprimir sozinho (o fetch global fazia isso de graça; o pinado
+    // precisa fazer explícito).
+    if (path === "/gzip" || path === "/br") {
+      const corpo = Buffer.from(
+        "<!DOCTYPE html><html><head><title>Comprimida</title></head><body>" +
+          "<h1>MARCADO-COMPRIMIDA</h1><p>texto de enchimento para passar da marca de 300 caracteres deste caso.</p></body></html>"
+      );
+      const buffer = path === "/gzip" ? zlib.gzipSync(corpo) : zlib.brotliCompressSync(corpo);
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-encoding": path === "/gzip" ? "gzip" : "br",
+      });
+      res.end(buffer);
+      return;
+    }
+
+    // /redir-cuspe -> 302 que manda os cabecalhos, cospe um pedaco do corpo e
+    // NUNCA termina. Drenar o corpo do redirect por inteiro pendurava o salto
+    // (e a vaga de admissao); agora o corpo e descartado na hora.
+    if (path === "/redir-cuspe") {
+      res.writeHead(302, { location: "/pagina" });
+      res.write("lixo".repeat(500));
+      return; // nunca res.end()
+    }
+
+    // /erro-cuspe -> 404 que manda cabecalhos, cospe corpo e NUNCA termina:
+    // o descarte do corpo de erro tem de ser imediato (sem drenar).
+    if (path === "/erro-cuspe") {
+      res.writeHead(404, { "content-type": "text/html" });
+      res.write("lixo".repeat(1000));
+      return; // nunca res.end()
+    }
+
+    // /porcento -> links com percent-encoding malformado ("/100%", "/perfil%zz").
+    // O decodeURIComponent do filtro de navegacao lancava URIError e derrubava
+    // o crawl inteiro; agora os links passam intactos.
+    if (path === "/porcento") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Porcento</title></head><body><h1>Links esquisitos</h1>" +
+          '<p><a href="/100%">porcento solto</a></p>' +
+          '<p><a href="/perfil%zz">zz solto</a></p>' +
+          "</body></html>"
+      );
+      return;
     }
 
     if (path === "/redirect-to-private") {

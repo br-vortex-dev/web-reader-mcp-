@@ -7,6 +7,7 @@ import {
   SERVER_NAME,
   SERVER_VERSION,
   PROTOCOL_VERSIONS,
+  STDIO_MAX_LINE_BYTES,
 } from "./config.mjs";
 import { TOOLS } from "./tool-schemas.mjs";
 import {
@@ -98,21 +99,48 @@ registrarHandleMessage(handleMessage);
  */
 export function startStdio() {
   let buffer = "";
+  let descartandoLinha = false; // linha gigante em descarte: ignora até o \n
+  const encerrarLinha = (motivo) => {
+    process.stdout.write(
+      JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: motivo } }) + "\n"
+    );
+  };
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
     buffer += chunk;
+    // Teto do buffer: uma linha maior que isto estoura a memória do processo.
+    // Em vez de crescer sem limite, descarta a linha inteira (até o \n) e
+    // responde com Parse error — o cliente que inventar de mandar 1 GB numa
+    // linha recebe erro, não derruba o servidor.
+    if (descartandoLinha) {
+      const fim = buffer.indexOf("\n");
+      if (fim === -1) {
+        buffer = "";
+        return;
+      }
+      buffer = buffer.slice(fim + 1);
+      descartandoLinha = false;
+    }
+    if (buffer.length > STDIO_MAX_LINE_BYTES && buffer.indexOf("\n") === -1) {
+      buffer = "";
+      descartandoLinha = true;
+      encerrarLinha("Parse error");
+      return;
+    }
     let newlineIndex;
     while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
+      if (line.length > STDIO_MAX_LINE_BYTES) {
+        encerrarLinha("Parse error");
+        continue;
+      }
       let msg;
       try {
         msg = JSON.parse(line);
       } catch {
-        process.stdout.write(
-          JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }) + "\n"
-        );
+        encerrarLinha("Parse error");
         continue;
       }
       handleMessage(msg, (message) => process.stdout.write(JSON.stringify(message) + "\n")).catch((err) => {

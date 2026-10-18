@@ -1,22 +1,21 @@
 /**
- * Segurança: proteção SSRF, robots.txt, DNS rebinding e agent validado.
+ * Segurança: proteção SSRF, robots.txt e DNS rebinding.
+ * (O Agent com IP fixado vive em net.mjs, junto do transporte que o usa.)
  */
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import https from "node:https";
-import http from "node:http";
 import {
   ALLOW_PRIVATE_HOSTS,
   HOST_CHECK_TTL_MS,
   HOST_CHECK_MAX_ENTRIES,
-  AGENT_CACHE_MAX,
   ROBOTS_RESPECT,
   ROBOTS_TTL_MS,
   ROBOTS_TIMEOUT_MS,
   ROBOTS_NEGATIVE_TTL_MS,
   ROBOTS_MAX_BYTES,
   ROBOTS_MAX_ORIGINS,
+  ROBOTS_MAX_CONCURRENCY,
   DNS_TIMEOUT_MS,
 } from "./config.mjs";
 import {
@@ -25,6 +24,8 @@ import {
   HostNaoResolvidoError,
   RobotsBloqueadoError,
 } from "./errors.mjs";
+import { criarLimitador } from "./utils.mjs";
+import { httpGetUmSalto, coletarComTeto, desembrulhar, descartarCorpo } from "./net.mjs";
 
 /* ===================================================================== *
  * Proteção SSRF                                                             *
@@ -32,16 +33,24 @@ import {
 
 /**
  * Verifica se um IPv4 é privado/reservado.
+ * Inclui as faixas de documentação/teste (TEST-NET-1/2/3 e benchmark):
+ * nenhum servidor real vive nelas — um host que resolve para lá só pode ser
+ * teste de SSRF ou configuração quebrada.
  */
 function isBlockedIpv4(ip) {
   const parts = ip.split(".").map(Number);
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b] = parts;
+  const [a, b, c] = parts;
   if (a === 0 || a === 10 || a === 127) return true;
   if (a === 169 && b === 254) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
   if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 (IETF)
+  if (a === 192 && b === 0 && c === 2) return true; // 192.0.2.0/24 (TEST-NET-1)
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 (benchmark)
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 (TEST-NET-2)
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 (TEST-NET-3)
   if (a >= 224) return true;
   return false;
 }
@@ -85,13 +94,18 @@ function embeddedIpv4(ip) {
 }
 
 /**
- * Verifica se um IPv6 é interno (:: e ::1, fe80::/10, fc00::/7, ff00::/8).
+ * Verifica se um IPv6 é interno (:: e ::1, fe80::/10, fc00::/7, ff00::/8),
+ * incluindo os IPv4 embutidos (mapeado, NAT64 e 6to4).
  */
 function isBlockedIpv6(ip) {
   const lower = ip.toLowerCase().split("%")[0];
   if (lower === "::" || lower === "::1") return true;
   const embedded = embeddedIpv4(lower);
   if (embedded) return isBlockedIpv4(embedded);
+  // Faixas especiais que nunca são destino de leitura legítima: NAT64 local
+  // (64:ff9b:1::/48) e os prefixos de documentação (2001:db8::/32).
+  if (/^64:ff9b:1:/.test(lower)) return true;
+  if (/^2001:db8:/.test(lower) || lower.startsWith("2001:db8::")) return true;
   if (/^fe[89ab]/.test(lower)) return true;
   const first = lower.split(":")[0];
   if (first.length >= 2) {
@@ -207,42 +221,8 @@ export async function assertPublicHost(url) {
   return addresses[0];
 }
 
-// Cache de agents HTTP/HTTPS por IP (keep-alive).
-const agentCache = new Map();
-
-/**
- * Cria ou reutiliza um Agent HTTP/HTTPS para um IP validado.
- * O Agent sobrescreve o lookup padrão para retornar sempre o IP validado.
- */
-export function agentValidado(url, ipValido) {
-  const family = isIP(ipValido);
-  const isHttps = url.startsWith("https:");
-  const cacheKey = `${isHttps ? "https" : "http"}:${ipValido}`;
-  let agent = agentCache.get(cacheKey);
-  if (agent) return agent;
-  const opts = {
-    lookup(hostname, options, callback) {
-      if (options.all) {
-        callback(null, [{ address: ipValido, family }]);
-      } else {
-        callback(null, ipValido, family);
-      }
-    },
-    maxSockets: 32,
-    maxFreeSockets: 16,
-    keepAlive: true,
-    keepAliveMsecs: 30000,
-  };
-  agent = isHttps ? new https.Agent(opts) : new http.Agent(opts);
-  if (agentCache.size >= AGENT_CACHE_MAX) {
-    const maisAntigo = agentCache.keys().next().value;
-    const old = agentCache.get(maisAntigo);
-    agentCache.delete(maisAntigo);
-    try { old.destroy(); } catch { /* já destruído */ }
-  }
-  agentCache.set(cacheKey, agent);
-  return agent;
-}
+// O Agent HTTP/HTTPS com o IP fixado (que ficava aqui) mora em net.mjs,
+// junto do transporte que de fato o usa — o fetch global não o usava.
 
 /* ===================================================================== *
  * robots.txt                                                                *
@@ -252,6 +232,15 @@ export function agentValidado(url, ipValido) {
 const robotsCache = new Map();
 const robotsEmVoo = new Map();
 const robotsRegexCache = new Map();
+
+// Teto de concorrência das buscas de robots.txt (uma por origem): uma rajada
+// em muitas origens novas não dispara N buscas simultâneas.
+const robotsLimiter = criarLimitador({
+  limite: ROBOTS_MAX_CONCURRENCY,
+  filaMax: 500,
+  esperaMaxMs: 3000,
+  nome: "robots",
+});
 
 /**
  * Processa o texto do robots.txt e extrai os grupos de regras.
@@ -329,38 +318,28 @@ function robotsPermite(regras, caminho) {
 }
 
 /**
- * Lê o corpo do robots.txt em streaming, cortando ao passar de ROBOTS_MAX_BYTES.
- * O `res.text()` carregaria o corpo inteiro antes de qualquer conferência; um
- * robots.txt gigante (ou uma resposta que nao e robots.txt) entao custaria
- * memoria a toa. Acima do teto devolve null, que o caller trata como fail-open.
+ * Lê o corpo do robots.txt em streaming, com teto de bytes e o sinal do teto
+ * de tempo. Acima do teto (ou leitura cortada) devolve null, que o caller
+ * trata como fail-open — o `res.text()` carregaria o corpo inteiro antes de
+ * qualquer conferência.
  */
-async function lerRobotsComTeto(res) {
-  const corpo = res.body;
-  if (!corpo) return null;
-  const reader = corpo.getReader();
-  const pedacos = [];
-  let total = 0;
+async function lerRobotsComTeto(stream, signal) {
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > ROBOTS_MAX_BYTES) return null;
-      pedacos.push(Buffer.from(value));
-    }
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // corpo ja encerrado
-    }
+    const buffer = await coletarComTeto(stream, { maxBytes: ROBOTS_MAX_BYTES, url: "robots.txt", signal });
+    return new TextDecoder("utf-8").decode(buffer);
+  } catch {
+    return null;
   }
-  return new TextDecoder("utf-8").decode(Buffer.concat(pedacos, total));
 }
 
 /**
  * Busca e processa o robots.txt de uma origem. Fail-open.
- * Usa fetch global diretamente para evitar dependência circular com fetch.mjs.
+ *
+ * Segurança: o host é validado ANTES de conectar (assertPublicHost) e a busca
+ * sai pelo transporte pinado (net.mjs) com o IP já validado — o robots.txt
+ * nunca toca um endereço interno (antes, o fetch global em paralelo escapava
+ * do bloqueio: ver dev/_probe-robots-ssrf.mjs). Redirect não é seguido: 3xx
+ * vale como inacessível (fail-open), o que também fecha SSRF via Location.
  */
 async function robotsDaOrigem(origem) {
   const agora = Date.now();
@@ -372,26 +351,41 @@ async function robotsDaOrigem(origem) {
   const busca = (async () => {
     let entrada = { at: Date.now(), grupos: null };
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), ROBOTS_TIMEOUT_MS);
-      try {
-        const res = await fetch(`${origem}/robots.txt`, {
-          signal: controller.signal,
-          headers: { "User-Agent": "web-reader-mcp" },
-        });
-        if (res.ok) {
-          const text = await lerRobotsComTeto(res);
-          // null = passou do teto: sem regra para cumprir, fica o fail-open.
-          if (text !== null) entrada = { at: Date.now(), grupos: robotsGruposDoTexto(text) };
+      await robotsLimiter.executar(async () => {
+        const urlRobots = `${origem}/robots.txt`;
+        let ipValido;
+        try {
+          ipValido = await assertPublicHost(urlRobots);
+        } catch {
+          return; // host interno/bloqueado: sem regra a cumprir, nada a buscar
         }
-      } finally {
-        // O teto cobre TAMBEM a leitura do corpo. Cancelar antes do
-        // `lerRobotsComTeto` deixava uma resposta que manda os cabecalhos e
-        // estaciona o corpo pendurada para sempre — e a vaga de admissao da
-        // requisicao ia junto (visto em producao: 128 vagas presas por mais
-        // de 100 minutos depois de uma rajada).
-        clearTimeout(timer);
-      }
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" })),
+          ROBOTS_TIMEOUT_MS
+        );
+        try {
+          const { statusCode, headers, stream } = await httpGetUmSalto(urlRobots, {
+            headers: { "User-Agent": "web-reader-mcp" },
+            ipValido,
+            signal: controller.signal,
+          });
+          if (statusCode >= 200 && statusCode < 300) {
+            const texto = await lerRobotsComTeto(desembrulhar(stream, headers), controller.signal);
+            // null = passou do teto ou leitura cortada: sem regra, fail-open.
+            if (texto !== null) entrada = { at: Date.now(), grupos: robotsGruposDoTexto(texto) };
+          } else {
+            // 3xx/4xx/5xx: inacessível. Descarta o corpo sem esperar por ele.
+            descartarCorpo(stream);
+          }
+        } finally {
+          // O teto cobre TAMBEM a leitura do corpo. Cancelar antes deixava
+          // uma resposta que manda os cabeçalhos e estaciona o corpo pendurada
+          // para sempre — e a vaga de admissão ia junto (visto em produção:
+          // 128 vagas presas por >100 min depois de uma rajada).
+          clearTimeout(timer);
+        }
+      });
     } catch {
       // inacessível/4xx/5xx/grande demais/tempo esgotado: fica o fail-open
     }

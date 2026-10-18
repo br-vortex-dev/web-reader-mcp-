@@ -85,6 +85,16 @@ export const HTTP_HEADERS_TIMEOUT_MS = clampEnv(process.env.HTTP_HEADERS_TIMEOUT
 export const HTTP_KEEPALIVE_TIMEOUT_MS = clampEnv(process.env.HTTP_KEEPALIVE_TIMEOUT_MS, 32500, 500, HTTP_HEADERS_TIMEOUT_MS);
 export const MAX_CONNECTIONS = clampEnvZero(process.env.MAX_CONNECTIONS, 0, 0, 1000000);
 
+// Teto de bytes de UMA linha no transporte stdio (JSON-RPC newline-delimited).
+// Linha maior que isto e descartada com Parse error: antes o buffer crescia
+// sem limite e uma unica linha gigante consumia a memoria do processo.
+export const STDIO_MAX_LINE_BYTES = clampEnv(
+  process.env.STDIO_MAX_LINE_BYTES,
+  4 * 1024 * 1024,
+  64 * 1024,
+  64 * 1024 * 1024
+);
+
 // Cache em memória (LRU + TTL).
 export const CACHE_TTL_MS = Math.max(500, Math.floor(Number(process.env.CACHE_TTL_MS) || 7.5 * 60 * 1000));
 export const CACHE_MAX_ENTRIES = 100;
@@ -136,6 +146,9 @@ export const ROBOTS_TIMEOUT_MS = Math.max(500, Math.min(15000, Math.floor(Number
 export const ROBOTS_NEGATIVE_TTL_MS = 60000;
 export const ROBOTS_MAX_BYTES = 512 * 1024;
 export const ROBOTS_MAX_ORIGINS = 1000;
+// Teto de concorrencia das buscas de robots.txt (uma por origem). Sem ele,
+// uma rajada em muitas origens novas dispararia N buscas ao mesmo tempo.
+export const ROBOTS_MAX_CONCURRENCY = clampEnv(process.env.ROBOTS_MAX_CONCURRENCY, 16, 1, 256);
 
 // Teto de saída somada em read_multiple_pages.
 export const MULTI_MAX_TOTAL_CHARS = Math.max(

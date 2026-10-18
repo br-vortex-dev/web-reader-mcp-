@@ -1,0 +1,225 @@
+/**
+ * Transporte de saída com IP fixado (node:http/https) + apoio de leitura.
+ *
+ * Por que não o fetch global: o fetch do Node IGNORA a opção `agent` — o DNS
+ * do host seria resolvido DE NOVO na hora de conectar, e a proteção contra
+ * DNS rebinding viraria enfeite (prova: dev/_probe-agent.mjs). Aqui a conexão
+ * sai por node:http/https com um Agent cujo lookup devolve SEMPRE o IP já
+ * validado por assertPublicHost: o nome nunca é resolvido uma segunda vez.
+ *
+ * O resto do módulo é o que o fetch fazia sozinho e agora fica explícito:
+ * descompressão (gzip/deflate/br), leitura com teto em bytes e descarte de
+ * corpos que não interessam (redirects e respostas de erro).
+ */
+
+import http from "node:http";
+import https from "node:https";
+import zlib from "node:zlib";
+import { isIP } from "node:net";
+import { AGENT_CACHE_MAX } from "./config.mjs";
+import { UrlInvalidaError, RedeError, RespostaMuitoGrandeError, WebReaderError } from "./errors.mjs";
+
+/* ===================================================================== *
+ * Agents (keep-alive, IP fixado)                                          *
+ * ===================================================================== */
+
+// Cache de agents HTTP/HTTPS por IP validado.
+const agentCache = new Map();
+
+// Agents sem pinagem (ALLOW_PRIVATE_HOSTS=1): um por protocolo.
+const agentesGenericos = new Map();
+
+/**
+ * Cria ou reutiliza um Agent HTTP/HTTPS para um IP validado.
+ * O Agent sobrescreve o lookup padrão para retornar sempre o IP validado.
+ */
+export function agentValidado(url, ipValido) {
+  const family = isIP(ipValido);
+  const isHttps = url.startsWith("https:");
+  const cacheKey = `${isHttps ? "https" : "http"}:${ipValido}`;
+  let agent = agentCache.get(cacheKey);
+  if (agent) return agent;
+  const opts = {
+    lookup(hostname, options, callback) {
+      if (options.all) {
+        callback(null, [{ address: ipValido, family }]);
+      } else {
+        callback(null, ipValido, family);
+      }
+    },
+    maxSockets: 32,
+    maxFreeSockets: 16,
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+  };
+  agent = isHttps ? new https.Agent(opts) : new http.Agent(opts);
+  if (agentCache.size >= AGENT_CACHE_MAX) {
+    const maisAntigo = agentCache.keys().next().value;
+    const old = agentCache.get(maisAntigo);
+    agentCache.delete(maisAntigo);
+    try { old.destroy(); } catch { /* já destruído */ }
+  }
+  agentCache.set(cacheKey, agent);
+  return agent;
+}
+
+/** Agent genérico (sem pinagem) — usado só com ALLOW_PRIVATE_HOSTS=1. */
+function agenteGenerico(url) {
+  const protocolo = url.startsWith("https:") ? "https" : "http";
+  let agent = agentesGenericos.get(protocolo);
+  if (!agent) {
+    const opts = { maxSockets: 32, maxFreeSockets: 16, keepAlive: true, keepAliveMsecs: 30000 };
+    agent = protocolo === "https" ? new https.Agent(opts) : new http.Agent(opts);
+    agentesGenericos.set(protocolo, agent);
+  }
+  return agent;
+}
+
+/* ===================================================================== *
+ * Requisição de um salto (sem seguir redirect)                            *
+ * ===================================================================== */
+
+/**
+ * GET de UM salto pelo transporte pinado. Não segue redirect: quem chama
+ * decide o próximo passo (e valida o destino antes de seguir).
+ *
+ * Devolve { statusCode, statusMessage, headers, stream } — `stream` é o
+ * corpo do node (ainda comprimido, se for o caso).
+ */
+export function httpGetUmSalto(url, { headers = {}, ipValido = null, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      reject(new UrlInvalidaError(url));
+      return;
+    }
+    const isHttps = parsed.protocol === "https:";
+    const lib = isHttps ? https : http;
+    let req;
+    try {
+      req = lib.get(
+        {
+          protocol: parsed.protocol,
+          // IPv6 literal vem entre colchetes na URL ("[::1]"); o socket
+          // espera o endereço cru — os colchetes voltam no header Host.
+          hostname: parsed.hostname.replace(/^\[|\]$/g, ""),
+          port: parsed.port || (isHttps ? 443 : 80),
+          path: `${parsed.pathname}${parsed.search}`,
+          headers,
+          agent: ipValido ? agentValidado(url, ipValido) : agenteGenerico(url),
+          signal,
+        },
+        (stream) => {
+          resolve({
+            statusCode: stream.statusCode || 0,
+            statusMessage: stream.statusMessage || "",
+            headers: stream.headers,
+            stream,
+          });
+        }
+      );
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    req.on("error", reject);
+  });
+}
+
+/* ===================================================================== *
+ * Leitura do corpo                                                        *
+ * ===================================================================== */
+
+const CODIGOS_ZLIB = new Set(["Z_DATA_ERROR", "Z_STREAM_ERROR", "Z_BUF_ERROR", "Z_NEED_DICT"]);
+
+/**
+ * Embrulha o stream no descompressor do content-encoding (headers à parte,
+ * porque quem chama já pode ter desacoplado o corpo da resposta).
+ * Encoding desconhecido sai como veio (mesmo comportamento do fetch).
+ */
+export function desembrulhar(stream, headers) {
+  const enc = String((headers && headers["content-encoding"]) || "").trim().toLowerCase();
+  if (!enc || enc === "identity") return stream;
+  let filtro = null;
+  if (enc === "gzip" || enc === "x-gzip") filtro = zlib.createGunzip();
+  else if (enc === "br") filtro = zlib.createBrotliDecompress();
+  else if (enc === "deflate" || enc === "x-deflate") filtro = zlib.createInflate();
+  else return stream;
+  // O erro é lido no for-await do coletor; o listener evita "unhandled error"
+  // na janela entre o pipe e a leitura começar.
+  filtro.on("error", () => {});
+  // Leitura interrompida no meio (abort, teto de bytes, erro): o filtro fecha
+  // sem ter terminado — solta o stream de baixo em vez de deixar pendurado.
+  filtro.on("close", () => {
+    if (!filtro.readableEnded && !stream.destroyed) stream.destroy();
+  });
+  stream.on("error", (err) => filtro.destroy(err));
+  stream.pipe(filtro);
+  return filtro;
+}
+
+/**
+ * Converte o erro cru de uma leitura para o vocabulário do projeto:
+ * abort (timeout/orçamento) vira AbortError com o motivo em `cause` — quem
+ * classifica é o classificarErro do fetch —, erro do zlib vira RedeError
+ * legível, e o resto passa como veio.
+ */
+function normalizarErroDeLeitura(err, signal, url) {
+  if (err instanceof WebReaderError) return err;
+  if (signal && signal.aborted) {
+    const abortado = new Error("abortado");
+    abortado.name = "AbortError";
+    abortado.cause = signal.reason;
+    return abortado;
+  }
+  if (err && CODIGOS_ZLIB.has(err.code)) {
+    return new RedeError(`falha ao descomprimir a resposta (${err.code})`, url, err);
+  }
+  return err;
+}
+
+/**
+ * Consome um stream com teto de bytes. `aoChunk(bytesLidos)` (opcional) é
+ * chamado ANTES de aceitar cada pedaço — é o gancho do orçamento de memória,
+ * que assim acompanha os bytes REAIS, sem confiar no content-length.
+ */
+export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida", signal, aoChunk } = {}) {
+  const chunks = [];
+  let total = 0;
+  try {
+    for await (const pedaco of fonte) {
+      const pedacoBuf = Buffer.isBuffer(pedaco) ? pedaco : Buffer.from(pedaco);
+      if (total + pedacoBuf.length > maxBytes) {
+        throw new RespostaMuitoGrandeError(maxBytes, url);
+      }
+      if (aoChunk) await aoChunk(total + pedacoBuf.length);
+      chunks.push(pedacoBuf);
+      total += pedacoBuf.length;
+    }
+  } catch (err) {
+    try {
+      fonte.destroy();
+    } catch {
+      // stream já destruído
+    }
+    throw normalizarErroDeLeitura(err, signal, url);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Descarta um corpo que não interessa (redirect, resposta de erro).
+ * Destruir em vez de drenar: um corpo de redirect é lixo — drenar por inteiro
+ * abria porta para um corpo infinito pendurar o salto (e a vaga de admissão).
+ * O listener no-op cobre o erro do socket derrubado no meio (já não importa).
+ */
+export function descartarCorpo(stream) {
+  try {
+    stream.on("error", () => {});
+    stream.destroy();
+  } catch {
+    // já fechado
+  }
+}

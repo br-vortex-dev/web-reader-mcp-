@@ -17,7 +17,8 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | `config.mjs` | **Toda** a configuração: tetos, timeouts, defaults e os clamps de variável de ambiente. Nenhum outro módulo lê `process.env` diretamente. |
 | `errors.mjs` | As 18 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
 | `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes), o cache LRU com TTL e a **junção de buscas em voo** (single-flight). |
-| `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado, NAT64, 6to4), DNS rebinding, Agent validado e robots.txt. |
+| `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado/reservado, NAT64, 6to4) e robots.txt. |
+| `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache, **junção de buscas em voo**, revalidação em segundo plano (SWR), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `tools.mjs` | As 6 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. |
@@ -150,7 +151,8 @@ web-reader-mcp/
 │   ├── config.mjs     <- todos os tetos, timeouts e defaults
 │   ├── errors.mjs     <- classes de erro e seus codigos
 │   ├── utils.mjs      <- fila FIFO, limitadores de carga, cache LRU
-│   ├── security.mjs   <- SSRF, DNS rebinding, agent validado, robots.txt
+│   ├── security.mjs   <- SSRF e robots.txt (guarda de segurança)
+│   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
 │   ├── tools.mjs      <- as 6 ferramentas do MCP
@@ -328,8 +330,11 @@ qualquer site público é acessível. O que é bloqueado é apenas **endereço p
 interno**, que não faz parte da web:
 
 - IPv4: `0.0.0.0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`, `169.254/16` (inclui o
-  metadata `169.254.169.254`), `172.16/12`, `192.168/16`, `224/4` (multicast) e acima.
-- IPv6: `::1`, `::`, `fe80::/10`, `fc00::/7`, `ff00::/8` e IPv4 mapeado/NAT64/6to4
+  metadata `169.254.169.254`), `172.16/12`, `192.168/16`, `192.0.0/24` (IETF),
+  `192.0.2/24`, `198.51.100/24` e `203.0.113/24` (faixas de documentação/teste),
+  `198.18/15` (benchmark), `224/4` (multicast) e acima.
+- IPv6: `::1`, `::`, `fe80::/10`, `fc00::/7`, `ff00::/8`, `2001:db8::/32`
+  (documentação) e `64:ff9b:1::/48` (NAT64 local), além de IPv4 mapeado/NAT64/6to4
   (nesses casos o IPv4 embutido é validado, e não o IPv6 inteiro).
 
 Redirects continuam funcionando normalmente (`http→https`, `www`, encurtadores), até
@@ -343,11 +348,14 @@ servida do cache.
 Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
 `Host bloqueado: endereco privado/interno (127.0.0.1)`.
 
-**Limitação conhecida:** sobra uma janela de DNS rebinding entre a resolução do nome e a
-conexão, porque o `fetch` do Node não permite fixar o IP de destino. Ela é fechada na
-prática por um Agent customizado que resolve **apenas** o IP já validado (`assertPublicHost`
-e `agentValidado` em `src/security.mjs`), e o teste `DNS rebinding` da suíte verifica o
-comportamento.
+**DNS rebinding (fechado de verdade):** a conexão de saída **não** usa o `fetch` global —
+ela sai por `node:http`/`node:https` com um Agent cujo `lookup` devolve **apenas** o IP já
+validado (`assertPublicHost` + `agentValidado`, agora em `src/net.mjs`). O nome do host
+nunca é resolvido uma segunda vez entre a validação e a conexão. Isso importa porque o
+`fetch` do Node **ignora** a opção `agent` (prova: `dev/_probe-agent.mjs`) — confiar nele
+deixava a janela de rebinding aberta. O teste
+`transporte pinado: conecta no IP validado mesmo com o DNS do host quebrado` conecta num
+hostname que nunca resolve e prova que a conexão chega mesmo assim.
 
 ### Respeito ao robots.txt
 
@@ -357,6 +365,11 @@ bloquear o cliente — o contrário de ler a web pública em paz. Por isso:
 
 - o `<origem>/robots.txt` é buscado **uma vez por origem**, com TTL (não entra no cache de
   páginas: é metadado de crawling, não conteúdo);
+- a busca **só acontece depois** da validação de host, sai pelo **transporte pinado**
+  (mesmo Agent com IP fixado) e **não segue redirect** (3xx conta como inacessível =
+  fail-open) — antes, um `fetch` global em paralelo escapava do bloqueio e tocava host
+  interno; a correção está travada pelo teste
+  `com o host bloqueado, o robots.txt não é buscado`;
 - vale o grupo **`User-agent: *`** — o User-Agent das requisições gira entre vários valores,
   então grupo por nome seria instável de pedido para pedido;
 - entre `Allow` e `Disallow` vence a **regra mais longa** que casar (padrão do Google), com
@@ -396,6 +409,8 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
 | `ROBOTS_MAX_BYTES` | `524288` (512 KB) | Corpo do `robots.txt` acima disso é descartado (fail-open). |
 | `ROBOTS_MAX_ORIGINS` | `1000` | Teto de origens com `robots.txt` em cache. |
+| `ROBOTS_MAX_CONCURRENCY` | `16` | Quantas buscas de `robots.txt` (uma por origem nova) rodam ao mesmo tempo. |
+| `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
 | `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
 | `FETCH_CONCURRENCY` | `32` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
@@ -650,7 +665,10 @@ vazia"**. O contrato é:
 - O conteúdo é truncado em **8000 caracteres** por padrão (ajustável via `maxChars`, teto de 25000).
 - Sites com proteção anti-bot muito agressiva podem barrar a requisição.
 - **DNS rebinding:** a janela entre resolver o nome (para checar se é
-  endereço interno) e conectar é fechada com um Agent customizado que retorna
-  apenas o IP já validado — o fetch nunca resolve DNS de novo.
+  endereço interno) e conectar está **fechada**: a conexão sai por
+  `node:http`/`node:https` com um Agent cujo `lookup` retorna apenas o IP já
+  validado (`src/net.mjs`) — o nome nunca é resolvido de novo. O teste
+  correspondente conecta num host que não resolve e prova que o IP fixado é
+  quem recebe a conexão.
 - Só o que o site embute no HTML é extraído: JavaScript que monta o conteúdo
   depois do carregamento (client-side puro) não aparece.

@@ -33,7 +33,8 @@ import {
   CacheLRU,
   criarCoalescedorDeBuscas,
 } from "./utils.mjs";
-import { assertPublicHost, agentValidado, checarRobots } from "./security.mjs";
+import { assertPublicHost, checarRobots } from "./security.mjs";
+import { httpGetUmSalto, coletarComTeto, desembrulhar, descartarCorpo } from "./net.mjs";
 import { extractMeta, hostOf } from "./html-parser.mjs";
 import {
   UrlInvalidaError,
@@ -41,10 +42,10 @@ import {
   RedirectError,
   HttpError,
   ConteudoNaoHtmlError,
-  RespostaMuitoGrandeError,
   RedeError,
   TimeoutError,
   RequisicaoCanceladaError,
+  WebReaderError,
 } from "./errors.mjs";
 
 // Limadores de admissão e saída.
@@ -125,21 +126,32 @@ function erroComCausa(err) {
 /**
  * Traduz o erro cru do Node para uma das classes de erro do projeto.
  *
- * O AbortController usado no timeout aborta com o motivo "AbortError", que nao
- * diz nada ao caller — sem esta traducao um timeout virava "Erro: fetch failed"
- * (a mesma mensagem de uma queda de DNS). Distinguimos os dois motivos de abort
- * pelo `cause`: o timer local cancela com ETIMEDOUT; o signal externo (orcamento
- * da busca de APIs internas) cancela com o motivo que o caller passou.
+ * Timeout x cancelamento: o timer local aborta com o motivo de código
+ * ETIMEDOUT; qualquer outro abort é cancelamento (orçamento externo, cliente
+ * que desistiu) e vira RequisicaoCanceladaError. O motivo real pode vir no
+ * `cause` (o AbortError do Node embrulha o signal.reason) ou ser o próprio
+ * erro (quando existe reason, o Node emite o reason direto).
  */
 function classificarErro(errBruto, url, timeoutMs) {
-  if (errBruto && errBruto.name === "AbortError") {
-    const motivo = errBruto.cause;
-    if (motivo && motivo.code !== "ETIMEDOUT" && motivo.name !== "AbortError") {
-      return new RequisicaoCanceladaError(
-        motivo && motivo.message ? motivo.message : "orcamento esgotado"
-      );
-    }
-    return new TimeoutError(url, timeoutMs);
+  const codigo = errBruto && errBruto.code;
+  const nome = errBruto && errBruto.name;
+  if (nome === "AbortError" || codigo === "ABORT_ERR" || codigo === "ETIMEDOUT" || codigo === "ABORT_EXTERNO") {
+    const motivo = errBruto.cause || errBruto;
+    if (motivo && motivo.code === "ETIMEDOUT") return new TimeoutError(url, timeoutMs);
+    return new RequisicaoCanceladaError(motivo && motivo.message ? motivo.message : "orçamento esgotado");
+  }
+  // Erros do projeto já saem prontos (RespostaMuitoGrande, ServidorOcupado...).
+  if (errBruto instanceof WebReaderError) return errBruto;
+  // Erros de rede do node:http/https: vêm com `code` (ECONNREFUSED,
+  // ENOTFOUND, SELF_SIGNED_CERT_IN_CHAIN...). O RedeError preserva código e
+  // mensagem — é o que o relatório de campo pediu (BUG-4: nada de "fetch
+  // failed" pelado). `errors` agregado (getaddrinfo) também é citado.
+  if (errBruto instanceof Error && (errBruto.code || errBruto.errors)) {
+    const detalhe = errBruto.code ? ` (${errBruto.code})` : "";
+    const agregado = Array.isArray(errBruto.errors)
+      ? `: ${errBruto.errors.map((e) => e.code || e.message).filter(Boolean).join("; ")}`
+      : "";
+    return new RedeError(`${errBruto.message}${detalhe}${agregado}`, url, errBruto);
   }
   if (errBruto instanceof TypeError && errBruto.cause && errBruto.status === undefined) {
     return erroComCausa(errBruto);
@@ -148,41 +160,39 @@ function classificarErro(errBruto, url, timeoutMs) {
 }
 
 /**
- * Lê o corpo em streaming e corta ao passar do teto.
+ * Lê o corpo do download com os dois tetos em cima:
+ *
+ * - teto de bytes por resposta (maxBytes): acima disso a leitura para;
+ * - orçamento de memória (orcamentoSaida), reservado ANTES de bufferizar.
+ *   A reserva inicial usa o content-length quando ele é confiável e, como
+ *   ele pode MENTIR (declarar pouco e mandar muito), cada pedaço novo que
+ *   passar da reserva pede a diferença antes de entrar no buffer — o teto
+ *   de memória acompanha os bytes REAIS, não a promessa do servidor.
+ *
+ * O que sobrou da reserva volta no finally, sempre.
  */
-async function readBodyWithLimit(res, maxBytes) {
-  const body = res.body;
-  if (!body) return Buffer.alloc(0);
-
-  const declarado = Number(res.headers.get("content-length"));
+async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal) {
+  const declarado = Number(headers["content-length"]);
   const estimativa = Number.isFinite(declarado) && declarado > 0 ? declarado : 256 * 1024;
-  const reserva = Math.min(maxBytes, estimativa);
-  await orcamentoSaida.adquirir(reserva);
-
+  let reservado = Math.min(maxBytes, estimativa);
+  await orcamentoSaida.adquirir(reservado);
   try {
-    const reader = body.getReader();
-    const chunks = [];
-    let total = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > maxBytes) {
-          throw new RespostaMuitoGrandeError(maxBytes, res.url || "URL desconhecida");
+    return await coletarComTeto(stream, {
+      maxBytes,
+      url,
+      signal,
+      aoChunk: async (bytesTotais) => {
+        const falta = bytesTotais - reservado;
+        if (falta > 0) {
+          // Pode esperar (e falhar com "Servidor ocupado" quando o orçamento
+          // global estourou): melhor erro claro do que memória sem limite.
+          await orcamentoSaida.adquirir(falta);
+          reservado = bytesTotais;
         }
-        chunks.push(Buffer.from(value));
-      }
-    } finally {
-      try {
-        await reader.cancel();
-      } catch {
-        // corpo já encerrado
-      }
-    }
-    return Buffer.concat(chunks, total);
+      },
+    });
   } finally {
-    orcamentoSaida.liberar(reserva);
+    orcamentoSaida.liberar(reservado);
   }
 }
 
@@ -217,12 +227,24 @@ async function decodeBuffer(buffer, contentType) {
  */
 export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES } = {}) {
   let lastError = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
+  // NaN) podia pular o laço inteiro e o throw final lançar `null`.
+  const maxTentativas = Math.max(0, Math.min(5, Math.floor(Number(retries)) || 0));
+  for (let attempt = 0; attempt <= maxTentativas; attempt++) {
     const controller = new AbortController();
     // O motivo ETIMEDOUT e o que distingue "estourou o timeout" de "foi
     // cancelado por orcamento externo" no catch (ver classificarErro).
     const timer = setTimeout(() => controller.abort(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" })), timeoutMs);
-    const abortarDeFora = () => controller.abort();
+    // O motivo do cancelamento externo é repassado ao AbortController local:
+    // sem isso o abort não diria de onde veio e a classificação chamaria um
+    // cancelamento de "timeout".
+    const abortarDeFora = () => {
+      controller.abort(
+        externo.reason && externo.reason.name !== "AbortError"
+          ? externo.reason
+          : Object.assign(new Error("orçamento esgotado"), { code: "ABORT_EXTERNO" })
+      );
+    };
     if (externo) {
       if (externo.aborted) {
         clearTimeout(timer);
@@ -245,21 +267,29 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
       };
-      const { res, finalUrl } = await fetchNoRedirect(url, headers, controller.signal);
-      if (!res.ok) {
-        const statusFrase = (res.statusText || "").replace(/\b([A-Z]{2,})\b/, (m) =>
+      const { resposta, finalUrl } = await buscarComRedirects(url, headers, controller.signal);
+      if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
+        const statusFrase = (resposta.statusMessage || "").replace(/\b([A-Z]{2,})\b/, (m) =>
           m.charAt(0) + m.slice(1).toLowerCase()
         );
-        const err = new HttpError(res.status, statusFrase.trim(), url);
-        err.retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+        const err = new HttpError(resposta.statusCode, statusFrase.trim(), url);
+        err.retryAfterMs = parseRetryAfter(resposta.headers["retry-after"]);
+        descartarCorpo(resposta.stream);
         throw err;
       }
-      const buffer = await readBodyWithLimit(res, maxBytes);
-      const text = await decodeBuffer(buffer, res.headers.get("content-type") || "");
+      const buffer = await lerCorpoComOrcamento(
+        desembrulhar(resposta.stream, resposta.headers),
+        resposta.headers,
+        maxBytes,
+        finalUrl,
+        controller.signal
+      );
+      const contentType = String(resposta.headers["content-type"] || "").toLowerCase();
+      const text = await decodeBuffer(buffer, contentType);
       return {
         text,
         finalUrl,
-        contentType: (res.headers.get("content-type") || "").toLowerCase(),
+        contentType,
       };
     } catch (errBruto) {
       // Nao reatribuir a variavel do catch: o `finally` roda depois do catch e
@@ -317,13 +347,15 @@ export function validateHttpUrl(url) {
 
 /**
  * GET seguindo redirects à mão, validando o destino de cada salto.
- * Otimização: reutiliza o IP/agent entre hops do mesmo host para evitar revalidação e reconexão.
+ *
+ * O transporte é o node:http/https com o Agent do IP validado (ver net.mjs):
+ * o DNS do host NUNCA é resolvido de novo — é o que fecha o DNS rebinding.
+ * Otimização: reutiliza o IP entre saltos do mesmo host para não revalidar.
  */
-async function fetchNoRedirect(url, headers, signal) {
+async function buscarComRedirects(url, headers, signal) {
   let currentUrl = url;
   let ultimoHost = null;
   let ultimoIp = null;
-  let ultimoAgent = undefined;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     let parsed;
@@ -339,20 +371,22 @@ async function fetchNoRedirect(url, headers, signal) {
     if (!mesmoHost) {
       ultimoHost = parsed.host;
       ultimoIp = ipValido;
-      ultimoAgent = ipValido ? agentValidado(currentUrl, ipValido) : undefined;
     }
-    const agent = mesmoHost ? ultimoAgent : ipValido ? agentValidado(currentUrl, ipValido) : undefined;
 
-    const res = await fetch(currentUrl, { method: "GET", headers, redirect: "manual", signal, agent });
-    const isRedirect = res.status >= 300 && res.status < 400;
-    const location = isRedirect ? res.headers.get("location") : null;
-    if (!isRedirect || !location) return { res, finalUrl: currentUrl };
-
-    try {
-      await res.arrayBuffer();
-    } catch {
-      // corpo do redirect irrelevante
+    const { statusCode, statusMessage, headers: respHeaders, stream } = await httpGetUmSalto(currentUrl, {
+      headers,
+      ipValido,
+      signal,
+    });
+    const isRedirect = statusCode >= 300 && statusCode < 400;
+    const location = isRedirect ? respHeaders.location : null;
+    if (!isRedirect || !location) {
+      return { resposta: { statusCode, statusMessage, headers: respHeaders, stream }, finalUrl: currentUrl };
     }
+
+    // Corpo de redirect é lixo: DESCARTA em vez de drenar. Drenar um corpo
+    // infinito prendia o salto (e a vaga de admissão) para sempre.
+    descartarCorpo(stream);
     if (hop === MAX_REDIRECTS) {
       throw new RedirectError(`excesso de saltos (mais de ${MAX_REDIRECTS})`, url);
     }
@@ -488,7 +522,13 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
     if (hitQuente && !hitQuente.stale) return hitQuente.payload;
   }
 
-  await Promise.all([assertPublicHost(url), checarRobots(url)]);
+  // Ordem importa: valida o SSRF do host ANTES de qualquer outra saída — e só
+  // depois checa o robots.txt (que revalida o host de novo e sai pelo
+  // transporte pinado). Antes os dois rodavam em Promise.all e o fetch do
+  // robots escapava do bloqueio, tocando endereço interno (prova em
+  // dev/_probe-robots-ssrf.mjs: o servidor interno recebia GET /robots.txt).
+  await assertPublicHost(url);
+  await checarRobots(url);
 
   // Ordem importa: o teto POR HOST vem por fora e o global por dentro. Assim,
   // quem espera na fila do próprio host NÃO segura vaga global — no pior caso,
