@@ -257,13 +257,15 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.3.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.4.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
    `coalescidas: N (em voo M)` (pedidos que caronaram na junção de buscas),
-   `revalidacoes: N (falhas M)` (atualizações em segundo plano) e
-   `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas).
+   `revalidacoes: N (falhas M)` (atualizações em segundo plano),
+   `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas)
+   e `video: N (reaproveitadas M)` (análises de vídeo executadas vs. reaproveitadas —
+   releitura do mesmo vídeo com cache quente não reanalisa).
 
 ### Conectar o MCP remoto
 
@@ -687,6 +689,20 @@ Além disso, para **IPs de datacenter** (o Render, por exemplo) a própria pági
 oEmbed público (título, canal, capa) e declara o bloqueio no campo `Aviso:` —
 devolve o que dá para ler, nunca falha inteiro nem finge leitura completa. Se
 até o oEmbed cair, aí sim é `isError` com o motivo.
+
+**Otimizações do módulo (medidas em `dev/_perfil-video*.mjs`):** a extração dos
+capítulos só toca o `ytInitialData` quando o HTML contém `chapterRenderer`
+(sentinela) — no caso comum (vídeo sem capítulos) isso custa ~0,3 ms em vez de
+~11 ms da extração+varredura completas; quando o vídeo **tem** capítulos, o
+caminho completo roda igual (paridade provada em `tests/video.test.mjs`). A
+análise da página fica **memoizada por conteúdo baixado** (mesmo padrão da
+conversão de HTML): reler o mesmo vídeo com cache quente custa ~0 ms em vez de
+~11 ms, e o efeito aparece no `/health` (`video: N (reaproveitadas M)`).
+Quando a página `/watch` recusa com 429, ela não é re-tentada (retries: 0) e
+entra numa quarentena de 60 s: as leituras seguintes vão direto ao oEmbed — o
+caminho do Render caiu de ~1,6 s para ~24 ms por leitura (`dev/_perfil-video.mjs`),
+mantendo o motivo declarado na saída. Nada disso muda o que sai: mesmos campos,
+mesmos avisos.
 
 **Caminhos testados e fechados** (sondas em `dev/_probe-*`), para não serem
 tentados de novo: o endpoint interno do player (`/youtubei/v1/player`) está

@@ -23,6 +23,7 @@ import {
 } from "./config.mjs";
 import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes } from "./fetch.mjs";
 import { conversoesMemo } from "./tools.mjs";
+import { analisesVideo } from "./video.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
 // Referência global ao servidor HTTP (para encerramento por erro fatal).
@@ -203,6 +204,7 @@ export async function montarTextoHealth(server) {
     ` | coalescidas: ${coalescedorDeBuscas.stats.colapsadas} (em voo ${coalescedorDeBuscas.stats.emVoo})`,
     ` | revalidacoes: ${revalidacoes.tentadas} (falhas ${revalidacoes.falhas})`,
     ` | conversoes: ${conversoesMemo.realizadas} (reaproveitadas ${conversoesMemo.caronas})`,
+    ` | video: ${analisesVideo.realizadas} (reaproveitadas ${analisesVideo.caronas})`,
   ].join("");
 }
 

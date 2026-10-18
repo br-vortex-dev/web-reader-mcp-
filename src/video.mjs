@@ -32,6 +32,128 @@ import {
 } from "./fetch.mjs";
 import { decodeEntities } from "./html-parser.mjs";
 import { RobotsBloqueadoError } from "./errors.mjs";
+import { MEMO_CONVERSAO } from "./config.mjs";
+
+/* ===================================================================== *
+ * Memoização da análise por conteúdo baixado                              *
+ * ===================================================================== */
+
+/**
+ * O custo alto da leitura de vídeo — extrair o ytInitialPlayerResponse,
+ * varrer o ytInitialData atrás de capítulos, converter a legenda — depende
+ * só do CONTEÚDO baixado. E o cache de páginas devolve o MESMO objeto de
+ * payload enquanto a entrada vale. Então a análise fica presa ao payload
+ * (WeakMap): releitura do mesmo vídeo (cache quente, rajada, várias
+ * ferramentas no mesmo conteúdo) não paga de novo. Os contadores
+ * `analisesVideo` aparecem no /health como `video: N (reaproveitadas M)`;
+ * MEMO_CONVERSAO=0 desliga, para depurar o módulo sem memo.
+ *
+ * Medido em dev/_perfil-video.mjs: uma análise fria de página /watch custa
+ * ~22 ms; a releitura com payload em cache reaproveita a análise inteira
+ * (reaproveitadas sobem, realizadas não).
+ */
+export const analisesVideo = { realizadas: 0, caronas: 0 };
+const memoDoConteudo = new WeakMap();
+
+function comMemoDeAnalise(payload, chave, calcular) {
+  if (!MEMO_CONVERSAO || !payload || typeof payload !== "object") {
+    analisesVideo.realizadas++;
+    return calcular();
+  }
+  let memo = memoDoConteudo.get(payload);
+  if (!memo) {
+    memo = new Map();
+    memoDoConteudo.set(payload, memo);
+  }
+  if (memo.has(chave)) {
+    analisesVideo.caronas++;
+    return memo.get(chave);
+  }
+  analisesVideo.realizadas++;
+  const valor = calcular();
+  memo.set(chave, valor);
+  return valor;
+}
+
+/**
+ * Capítulos a partir do HTML da página. A varredura do ytInitialData só roda
+ * quando a string "chapterRenderer" aparece no HTML: capítulo SÓ existe como
+ * chapterRenderer dentro do JSON, então sem a sentinela é impossível haver
+ * capítulo — e a extração do JSON gigante é pulada. Medido em
+ * dev/_perfil-video.mjs: o trecho que isto substitui — extrair o ytInitialData
+ * e varrê-lo — custa ~22 ms; no caso comum (sem capítulos) o custo vira um
+ * `includes` de ~0,05 ms. Paridade com a varredura direta é provada em
+ * tests/video.test.mjs.
+ */
+export function capitulosDeHtml(html) {
+  const texto = typeof html === "string" ? html : "";
+  if (!texto.includes("chapterRenderer")) return [];
+  const inicial = extrairObjetoApos(texto, "ytInitialData");
+  return inicial ? capitulosDe(inicial) : [];
+}
+
+/** Análise do payload de uma página /watch: player + capítulos (memoizada). */
+export function analiseYouTube(payload) {
+  return comMemoDeAnalise(payload, "youtube", () => ({
+    player: extrairPlayerResponse(payload.text),
+    capitulos: capitulosDeHtml(payload.text),
+  }));
+}
+
+/** Embed de vídeo de uma página comum (memoizado por payload). */
+export function embedDePagina(payload) {
+  return comMemoDeAnalise(payload, "embed", () => procurarEmbedDeVideo(payload.text));
+}
+
+/** Metadados de uma página comum (memoizados por payload). */
+export function metaDePagina(payload) {
+  return comMemoDeAnalise(payload, "meta", () => metadadosPagina(payload.text, payload.finalUrl));
+}
+
+/** Conversão do payload de uma legenda (memoizada por formato). */
+export function legendaConvertida(payload, formato = null) {
+  return comMemoDeAnalise(payload, `legenda:${formato || "auto"}`, () =>
+    converterLegenda(payload.text, formato)
+  );
+}
+
+/* ===================================================================== *
+ * Quarentena da página do YouTube                                         *
+ * ===================================================================== */
+
+/**
+ * Quando a página /watch recusa com 429 (o caso real em IP de datacenter,
+ * como o Render), insistir custa a rodada de retries inteira — ~1,6 a 2 s
+ * medidos em dev/_perfil-video.mjs — para receber a mesma recusa. Com retries
+ * desligados na página e quarentena curta, as leituras seguintes vão direto
+ * ao oEmbed (que responde) e o motivo continua declarado na saída; o caminho
+ * local (página abre) não é afetado.
+ */
+const RECUSA_PAGINA_TTL_MS = 60 * 1000;
+
+/**
+ * Quarentena da página /watch do YouTube. Exportada para os testes do
+ * mecanismo: `marcar` só age em recusa 429, `emQuarentena` aceita o relógio
+ * como parâmetro (teste não espera tempo real).
+ */
+export const quarentenaDaPagina = {
+  ttlMs: RECUSA_PAGINA_TTL_MS,
+  ate: 0,
+  motivo: null,
+  emQuarentena(agora = Date.now()) {
+    return agora < this.ate;
+  },
+  marcar(err, agora = Date.now()) {
+    if (!err || err.status !== 429) return false;
+    this.ate = agora + this.ttlMs;
+    this.motivo = err.message || "HTTP 429";
+    return true;
+  },
+  limpar() {
+    this.ate = 0;
+    this.motivo = null;
+  },
+};
 
 /* ===================================================================== *
  * Detecção da plataforma                                                  *
@@ -607,15 +729,15 @@ async function baixarTranscricao(track, { timeoutMs, forcarFormato = null } = {}
   if (!track || !track.url) return { indisponivel: "esta plataforma não lista legendas para o vídeo" };
   const alvo = forcarFormato ? comFormato(track.url, forcarFormato) : track.url;
   try {
-    const { text, contentType } = await fetchTextCached(alvo, { timeoutMs, retries: 0 });
-    if (!String(text || "").trim()) {
+    const payload = await fetchTextCached(alvo, { timeoutMs, retries: 0 });
+    if (!String(payload.text || "").trim()) {
       return {
         indisponivel:
           "a plataforma respondeu com corpo vazio (legenda não servida para acesso anônimo)",
       };
     }
-    const fmt = forcarFormato === "json3" ? "json3" : /json/i.test(contentType || "") ? "json3" : null;
-    const convertido = converterLegenda(text, fmt);
+    const fmt = forcarFormato === "json3" ? "json3" : /json/i.test(payload.contentType || "") ? "json3" : null;
+    const convertido = legendaConvertida(payload, fmt);
     if (!convertido.blocos.length) {
       return { indisponivel: "a legenda veio, mas sem falas legíveis" };
     }
@@ -743,20 +865,33 @@ export function motivoCurtoDeErro(err) {
 
 async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
   const urlPagina = `https://www.youtube.com/watch?v=${id}`;
-  let html = "";
+  let payload = null;
   let finalUrl = urlPagina;
   let erroPagina = null;
-  try {
-    const r = await fetchTextCached(urlPagina, { timeoutMs });
-    html = r.text;
-    finalUrl = r.finalUrl;
-  } catch (err) {
-    // IP de datacenter (Render incluso) costuma levar HTTP 429 na página
-    // /watch. Falhar inteiro perderia o que dá para ler: o oEmbed segue
-    // acessível e entrega os metadados básicos — com o bloqueio declarado.
-    erroPagina = err;
+  if (quarentenaDaPagina.emQuarentena()) {
+    // A página foi recusada há pouco (tipicamente 429 em IP de datacenter,
+    // como o do Render). Insistir custa a rodada de retries inteira para
+    // receber a mesma recusa — ~1,6 s medidos em dev/_perfil-video.mjs.
+    // Nesta janela a leitura vai direto ao oEmbed (que responde) e o motivo
+    // continua declarado na saída.
+    erroPagina = { message: quarentenaDaPagina.motivo || "HTTP 429 (pagina recusada ha pouco)" };
+  } else {
+    try {
+      // retries: 0 — a página do YouTube não melhora com insistência deste
+      // lado; a insistência só atrasa o fallback. No acesso local, onde a
+      // página abre, a primeira (e única) tentativa é a que vale.
+      payload = await fetchTextCached(urlPagina, { timeoutMs, retries: 0 });
+      finalUrl = payload.finalUrl;
+    } catch (err) {
+      // IP de datacenter (Render incluso) costuma levar HTTP 429 na página
+      // /watch. Falhar inteiro perderia o que dá para ler: o oEmbed segue
+      // acessível e entrega os metadados básicos — com o bloqueio declarado.
+      erroPagina = err;
+      quarentenaDaPagina.marcar(err);
+    }
   }
-  const player = html ? extrairPlayerResponse(html) : null;
+  const analise = payload ? analiseYouTube(payload) : null;
+  const player = analise ? analise.player : null;
 
   if (!player || !(player.videoDetails && player.videoDetails.title)) {
     const oembed = await metadadosYouTubeViaOembed(id, { timeoutMs });
@@ -798,8 +933,7 @@ async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
   }
 
   const meta = metadadosYouTube(player);
-  const inicial = html ? extrairObjetoApos(html, "ytInitialData") : null;
-  const capitulos = inicial ? capitulosDe(inicial) : [];
+  const capitulos = analise.capitulos;
   const track = escolherTrack(meta.tracks, preferenciasDeIdioma(lang));
   const transcricao = track
     ? await baixarTranscricao(track, { timeoutMs, forcarFormato: "json3" })
@@ -853,10 +987,10 @@ async function lerVimeo(id, hash, { timeoutMs, maxChars, lang }) {
   } catch (err) {
     // Fallback: página pública (og tags) — sem transcrição, mas com metadados.
     try {
-      const { text: html, finalUrl } = await fetchTextCached(`https://vimeo.com/${id}`, { timeoutMs });
-      const meta = metadadosPagina(html, finalUrl);
+      const payload = await fetchTextCached(`https://vimeo.com/${id}`, { timeoutMs });
+      const meta = metaDePagina(payload);
       return montarSaidaVideo({
-        urlFinal: finalUrl,
+        urlFinal: payload.finalUrl,
         plataforma: "Vimeo",
         titulo: meta.titulo,
         canal: meta.canal,
@@ -876,8 +1010,9 @@ async function lerVimeo(id, hash, { timeoutMs, maxChars, lang }) {
 }
 
 async function lerLegendaDireta(url, { timeoutMs, maxChars }) {
-  const { text, contentType, finalUrl } = await fetchTextCached(url, { timeoutMs });
-  const transcricao = converterLegenda(text, /json/i.test(contentType || "") ? "json3" : null);
+  const payload = await fetchTextCached(url, { timeoutMs });
+  const { finalUrl } = payload;
+  const transcricao = legendaConvertida(payload, /json/i.test(payload.contentType || "") ? "json3" : null);
   const nome = (() => {
     try {
       return new URL(finalUrl).pathname.split("/").pop() || "legenda";
@@ -905,14 +1040,15 @@ async function lerLegendaDireta(url, { timeoutMs, maxChars }) {
 }
 
 async function lerPaginaGenerica(url, { timeoutMs, maxChars, lang }) {
-  const { text: html, finalUrl } = await fetchTextCached(url, { timeoutMs });
+  const payload = await fetchTextCached(url, { timeoutMs });
+  const { finalUrl } = payload;
 
   // Página que incorpora um vídeo conhecido (blog com embed): segue o vídeo.
-  const embed = procurarEmbedDeVideo(html);
+  const embed = embedDePagina(payload);
   if (embed && embed.tipo === "youtube") return lerYouTube(embed.id, { timeoutMs, maxChars, lang });
   if (embed && embed.tipo === "vimeo") return lerVimeo(embed.id, embed.hash, { timeoutMs, maxChars, lang });
 
-  const meta = metadadosPagina(html, finalUrl);
+  const meta = metaDePagina(payload);
   if (!meta.temVideo) {
     return [
       "# (sem vídeo identificado)",
