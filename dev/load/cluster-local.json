@@ -1,0 +1,13 @@
+{
+  "medicao": "cluster local — mesmo harness, mesma maquina, so WEB_CONCURRENCY muda",
+  "maquina": "Windows, 2 nucleos fisicos / 4 logicos",
+  "comando": "node dev/load/harness.mjs --mode read --concurrency 64 --seconds 8",
+  "quando": "2026-10 (rodada pos-otimizacao, verificacao de escala por nucleos)",
+  "resultados": [
+    { "workers": 1, "run": "a", "reqPorSeg": 114, "p50": 519, "sucesso": "100%" },
+    { "workers": 1, "run": "b", "reqPorSeg": 94, "p50": 635, "sucesso": "100%" },
+    { "workers": 2, "reqPorSeg": 164, "p50": 283, "sucesso": "100%" },
+    { "workers": 4, "reqPorSeg": 167, "p50": 314, "sucesso": "100%" }
+  ],
+  "leitura": "2 workers: +58% sobre a media do baseline (104). 4 workers: platao — 167 vs 164. O teto e a CPU fisica (2 nucleos), nao o codigo. Em maquina com mais nucleos o multiplicador sobe junto; no Render free (0,1 CPU) workers nao ajudam."
+}
