@@ -122,6 +122,17 @@ export function readBody(req, maxBytes) {
     const chunks = [];
     let size = 0;
     let encerrado = false;
+
+    // O corpo pode já ter se encerrado ANTES de o handler chegar aqui: sob
+    // fila de admissão, a requisição espera a vez e o cliente pode morrer
+    // nesse meio tempo — e os eventos de abandono já passaram. Sem esta
+    // guarda síncrona, a promessa nunca resolve e a vaga fica presa para
+    // sempre (visto em produção: 128 vagas presas por >100 min).
+    if (req.destroyed || req.readableEnded || req.aborted) {
+      reject(new Error("conexão encerrada antes do corpo completo"));
+      return;
+    }
+
     req.on("data", (c) => {
       if (encerrado) return;
       size += c.length;
@@ -139,6 +150,22 @@ export function readBody(req, maxBytes) {
     });
     req.on("error", (err) => {
       if (!encerrado) reject(err);
+    });
+    // Cliente que morre no meio do corpo (abort) precisa REJEITAR: sem isto, a
+    // promessa nunca se resolve e a vaga de admissão fica presa para sempre.
+    // Visto em produção: atrás do proxy do Render a conexão pode ficar meio
+    // aberta (sem RST), o "end" nunca chega e o handler pendura — 128 vagas
+    // presas por mais de 100 minutos depois de uma rajada.
+    const abortar = () => {
+      if (encerrado) return;
+      encerrado = true;
+      reject(new Error("conexão encerrada antes do corpo completo"));
+    };
+    req.on("aborted", abortar);
+    req.on("close", () => {
+      // "close" também chega depois de um POST normal (req.complete = true);
+      // só é abandono quando o corpo ainda não foi lido por inteiro.
+      if (!req.complete) abortar();
     });
   });
 }
@@ -324,6 +351,38 @@ export async function handlerMcp(req, res, ctx) {
     return handlerAdmissaoRecusada(res, err.message);
   }
 
+  // A vaga é liberada UMA vez, aconteça o que acontecer. O watchdog cobre o
+  // caso em que o cliente some de um jeito que o Node não sinaliza (proxy que
+  // não propaga o abort): sem ele, o handler fica pendurado e a vaga nunca
+  // volta — foi o estado visto em produção (128 vagas presas por >100 min).
+  let liberado = false;
+  const liberarUmaVez = () => {
+    if (liberado) return;
+    liberado = true;
+    admissaoHttp.liberar();
+  };
+  const watchdog = setTimeout(() => {
+    liberarUmaVez();
+    if (res.writableEnded || res.destroyed) return;
+    try {
+      res.writeHead(503, {
+        "content-type": "application/json",
+        "retry-after": 1,
+        "access-control-allow-origin": "*",
+      });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32002, message: "Tempo de processamento excedido." },
+        })
+      );
+    } catch {
+      // a resposta já foi encerrada/derrubada; o que importa é a vaga liberada
+    }
+  }, HTTP_REQUEST_TIMEOUT_MS);
+  watchdog.unref();
+
   try {
     let parsed;
     try {
@@ -349,7 +408,8 @@ export async function handlerMcp(req, res, ctx) {
     });
     res.end(JSON.stringify(responses.length === 1 && !eraArray ? responses[0] : responses));
   } finally {
-    admissaoHttp.liberar();
+    clearTimeout(watchdog);
+    liberarUmaVez();
   }
 }
 

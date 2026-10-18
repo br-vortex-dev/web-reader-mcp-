@@ -17,6 +17,7 @@ import {
   ROBOTS_NEGATIVE_TTL_MS,
   ROBOTS_MAX_BYTES,
   ROBOTS_MAX_ORIGINS,
+  DNS_TIMEOUT_MS,
 } from "./config.mjs";
 import {
   UrlInvalidaError,
@@ -114,6 +115,48 @@ function blockedAddress(address) {
 // Cache curto das validações de host.
 const hostCheckCache = new Map();
 
+// Junção de resoluções de DNS em voo: N pedidos do MESMO host esperam o mesmo
+// getaddrinfo em vez de enfileirar N lookups na thread pool (4 threads). Sem
+// isso, uma rajada em hosts distintos satura o pool e o DNS vira gargalo.
+const dnsEmVoo = new Map();
+
+/**
+ * Resolve um host com teto de tempo e junção em voo.
+ *
+ * O `lookup` do Node não é cancelável: um resolver que não responde deixaria a
+ * promessa pendurada para sempre — e a vaga de admissão junto. Aqui quem
+ * espera desiste no teto e o handler é liberado, mesmo que o getaddrinfo
+ * original fique pendurado (ele não segura mais nada).
+ */
+function lookupComTeto(hostname) {
+  const emVoo = dnsEmVoo.get(hostname);
+  if (emVoo) return emVoo;
+
+  const busca = (async () => {
+    let timer;
+    try {
+      return await Promise.race([
+        lookup(hostname, { all: true }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new HostNaoResolvidoError(hostname)),
+            DNS_TIMEOUT_MS
+          );
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      dnsEmVoo.delete(hostname);
+    }
+  })();
+  // Rejeição compartilhada não pode virar "unhandled rejection" (neste projeto
+  // isso derruba o processo de propósito) quando os caronas já desistiram.
+  busca.catch(() => {});
+  dnsEmVoo.set(hostname, busca);
+  return busca;
+}
+
 /**
  * Resolve o host e recusa endereço privado/interno.
  * Proteção contra DNS rebinding: o fetch nunca resolve DNS de novo.
@@ -139,8 +182,9 @@ export async function assertPublicHost(url) {
     addresses = [hostname];
   } else {
     try {
-      addresses = (await lookup(hostname, { all: true })).map((entry) => entry.address);
-    } catch {
+      addresses = (await lookupComTeto(hostname)).map((entry) => entry.address);
+    } catch (err) {
+      if (err instanceof HostNaoResolvidoError) throw err;
       throw new HostNaoResolvidoError(hostname);
     }
   }

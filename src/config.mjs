@@ -114,6 +114,11 @@ export const MEMO_CONVERSAO = process.env.MEMO_CONVERSAO !== "0";
 // Cache de validação de host (SSRF).
 export const HOST_CHECK_TTL_MS = 5 * 60 * 1000;
 export const HOST_CHECK_MAX_ENTRIES = 500;
+// Teto do getaddrinfo (DNS) da validação SSRF. Sem ele, um resolver que não
+// responde (visto no Render: 128 vagas de admissão presas por >100 min) deixa
+// a promessa pendurada para sempre e a vaga nunca volta. É teto de espera, não
+// de download: o lookup em si não é cancelável, mas quem espera desiste.
+export const DNS_TIMEOUT_MS = clampEnv(process.env.DNS_TIMEOUT_MS, 5000, 500, 30000);
 
 // Cache de agents HTTP (keep-alive por IP).
 export const AGENT_CACHE_MAX = 256;

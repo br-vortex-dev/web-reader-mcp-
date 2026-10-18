@@ -197,3 +197,80 @@ test("batch: um array de mensagens devolve um array", async () => {
   assert.ok(Array.isArray(json));
   assert.equal(json.length, 2);
 });
+
+// Cliente que abre o POST /mcp, manda só PARTE do corpo (dentro do
+// content-length declarado) e morre. O servidor vê o fim da conexão sem "end".
+function corpoTruncado(porta, contentLength) {
+  return new Promise((resolve) => {
+    const sock = net.connect(porta, "127.0.0.1", () => {
+      sock.write(
+        `POST /mcp HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${porta}\r\n` +
+          `Authorization: Bearer ${TOKEN}\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${contentLength}\r\n` +
+          `\r\n` +
+          `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{`
+      );
+      setTimeout(() => {
+        sock.end(); // FIN educado, sem RST — o caso que pendurou o Render
+        resolve();
+      }, 120);
+    });
+    sock.on("error", () => resolve());
+  });
+}
+
+// REGRESSÃO (produção): um cliente que morre no meio do corpo pendurava o
+// handler no readBody (que só resolvia em "end" e só rejeitava em "error",
+// nunca no abandono). A vaga de admissão nunca voltava: depois de MAX_INFLIGHT
+// dessas, o servidor recusava tudo para sempre (visto no Render: 128 vagas
+// presas por >100 min após uma rajada). Com a correção, o abandono libera a
+// vaga e o servidor continua atendendo.
+test("cliente que morre no meio do corpo nao prende a vaga de admissao", { timeout: 30000 }, async () => {
+  const p = await freePort();
+  const filho = spawn(process.execPath, [SERVER_PATH, "--http"], {
+    env: {
+      ...process.env,
+      PORT: String(p),
+      HOST: "127.0.0.1",
+      MCP_AUTH_TOKEN: TOKEN,
+      MAX_INFLIGHT_REQUESTS: "1", // uma vaga só: o vazamento aparece no 1º abandono
+      MAX_WAITING_REQUESTS: "4",
+      MAX_WAIT_MS: "800",
+      TRUST_PROXY_HOPS: "0",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  filho.stderr.on("data", () => {});
+  const b = `http://127.0.0.1:${p}`;
+  try {
+    let subiu = false;
+    for (let i = 0; i < 100; i++) {
+      try { if ((await fetch(`${b}/health`)).ok) { subiu = true; break; } } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(subiu, "servidor auxiliar nao subiu");
+
+    const lerAtivas = async () => {
+      const t = await (await fetch(`${b}/health`)).text();
+      return Number((t.match(/requisicoes: (\d+) ativas/) || [])[1]);
+    };
+
+    // 3 clientes abandonam o corpo: mais que as vagas disponíveis.
+    await Promise.all([corpoTruncado(p, 100000), corpoTruncado(p, 100000), corpoTruncado(p, 100000)]);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    assert.equal(await lerAtivas(), 0, "as vagas deveriam voltar a 0 depois dos abandonos");
+
+    // E o servidor ainda atende um POST normal (a vaga nao ficou presa).
+    const res = await fetch(`${b}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(res.status, 200, "o servidor deveria seguir atendendo apos os abandonos");
+  } finally {
+    filho.kill();
+  }
+});
