@@ -674,9 +674,12 @@ plataforma publica como **texto acessível**.
 **YouTube, a parte honesta:** a página do vídeo entrega os metadados completos,
 mas o download de legenda do YouTube mora em `/api/timedtext` — que o robots.txt
 do próprio YouTube bloqueia (`Disallow: /api/`) e que, mesmo fora dele, devolve
-corpo vazio para acesso anônimo (testado também por curl). O `read_video` tenta,
-e quando não consegue **declara o motivo exato** no campo `Transcricao:` em vez
-de fingir que leu. Para vídeo sem sessão, é isso que existe: metadados fiéis.
+corpo vazio para acesso anônimo (testado também por curl). Além disso, para
+**IPs de datacenter** (o Render, por exemplo) a própria página `/watch` costuma
+responder **HTTP 429**. Nesses casos o `read_video` cai no oEmbed público
+(título, canal, capa) e declara o bloqueio no campo `Aviso:` — devolve o que
+dá para ler, nunca falha inteiro nem finge leitura completa. Se até o oEmbed
+cair, aí sim é `isError` com o motivo.
 
 **Vimeo e páginas com legenda publicada** rodam de ponta a ponta: o módulo baixa
 o VTT/SRT (ou o `json3` do YouTube, quando ele responde), converte em blocos
