@@ -617,6 +617,7 @@ export function montarSaidaVideo({
   views,
   capa,
   descricao,
+  aviso,
   tags,
   tracks,
   transcricao,
@@ -634,6 +635,7 @@ export function montarSaidaVideo({
   if (Array.isArray(tags) && tags.length) linhas.push(`Tags: ${tags.join(", ")}`);
   const descricaoCurta = encurtarDescricao(descricao);
   if (descricaoCurta) linhas.push(`Descricao: ${descricaoCurta}`);
+  if (aviso) linhas.push(`Aviso: ${aviso}`);
   if (Array.isArray(tracks) && tracks.length) {
     const listadas = tracks
       .slice(0, 12)
@@ -680,10 +682,29 @@ async function metadadosYouTubeViaOembed(id, { timeoutMs }) {
   }
 }
 
+/** Mensagem curta de um erro, sem a URL no rabo (para caber num aviso). */
+export function motivoCurtoDeErro(err) {
+  return String((err && err.message) || err || "")
+    .replace(/\s*ao acessar\s+\S+.*$/i, "")
+    .trim();
+}
+
 async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
   const urlPagina = `https://www.youtube.com/watch?v=${id}`;
-  const { text: html, finalUrl } = await fetchTextCached(urlPagina, { timeoutMs });
-  const player = extrairPlayerResponse(html);
+  let html = "";
+  let finalUrl = urlPagina;
+  let erroPagina = null;
+  try {
+    const r = await fetchTextCached(urlPagina, { timeoutMs });
+    html = r.text;
+    finalUrl = r.finalUrl;
+  } catch (err) {
+    // IP de datacenter (Render incluso) costuma levar HTTP 429 na página
+    // /watch. Falhar inteiro perderia o que dá para ler: o oEmbed segue
+    // acessível e entrega os metadados básicos — com o bloqueio declarado.
+    erroPagina = err;
+  }
+  const player = html ? extrairPlayerResponse(html) : null;
 
   if (!player || !(player.videoDetails && player.videoDetails.title)) {
     const oembed = await metadadosYouTubeViaOembed(id, { timeoutMs });
@@ -694,9 +715,21 @@ async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
         titulo: oembed.titulo,
         canal: oembed.canal,
         capa: oembed.capa,
-        transcricao: { indisponivel: "metadados mínimos (oEmbed) — a página não entregou os dados completos do player" },
+        aviso: erroPagina
+          ? `metadados parciais (via oEmbed): a página completa do vídeo não abriu para este servidor — ${motivoCurtoDeErro(erroPagina)}`
+          : undefined,
+        transcricao: {
+          indisponivel: erroPagina
+            ? "sem acesso às faixas de legenda (a página do vídeo foi recusada para este servidor)"
+            : "metadados mínimos (oEmbed) — a página não entregou os dados completos do player",
+        },
         maxChars,
       });
+    }
+    if (erroPagina) {
+      throw new Error(
+        `Não foi possível ler este vídeo do YouTube: a página do vídeo não abriu (${motivoCurtoDeErro(erroPagina)}) e o oEmbed não respondeu.`
+      );
     }
     const status = player && player.playabilityStatus ? player.playabilityStatus.status : "";
     return montarSaidaVideo({

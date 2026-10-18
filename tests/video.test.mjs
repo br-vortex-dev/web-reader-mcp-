@@ -11,6 +11,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startFixture, startMcp } from "./helpers.mjs";
+import { montarSaidaVideo, motivoCurtoDeErro } from "../src/video.mjs";
 
 let fixture;
 let mcp;
@@ -73,4 +74,33 @@ test("maxChars corta a saida com o aviso de truncamento", { timeout: 60000 }, as
   const r = await mcp.call("read_video", { url: `${fixture.url}/video/com-track`, maxChars: 200 });
   assert.equal(r.isError, false, r.text);
   assert.match(r.text, /conteudo truncado em 200 caracteres/, "o corte deve ser avisado");
+});
+
+test("metadados parciais (fallback) saem com o aviso visivel na saida", () => {
+  // Cenario real: a pagina do YouTube recusa (429 em IP de datacenter) e o
+  // oEmbed responde. A saida tem de trazer os metadados que existem E o aviso
+  // declarando o bloqueio — nunca parecer leitura completa nem vazio.
+  const saida = montarSaidaVideo({
+    urlFinal: "https://www.youtube.com/watch?v=abc",
+    plataforma: "YouTube",
+    titulo: "Titulo via oEmbed",
+    canal: "Canal",
+    capa: "https://img/capa.jpg",
+    aviso: "metadados parciais (via oEmbed): a página completa do vídeo não abriu para este servidor — HTTP 429 Too Many Requests",
+    transcricao: { indisponivel: "sem acesso às faixas de legenda" },
+    maxChars: 8000,
+  });
+  assert.match(saida, /^# Titulo via oEmbed/m);
+  assert.match(saida, /\nCanal: Canal/);
+  assert.match(saida, /\nAviso: metadados parciais \(via oEmbed\)/);
+  assert.match(saida, /HTTP 429/);
+  assert.match(saida, /Transcricao: indisponivel — sem acesso às faixas de legenda/);
+});
+
+test("motivoCurtoDeErro tira a URL do rabo da mensagem", () => {
+  const motivo = motivoCurtoDeErro(
+    new Error("HTTP 429 Too Many Requests ao acessar https://www.youtube.com/watch?v=x")
+  );
+  assert.equal(motivo, "HTTP 429 Too Many Requests");
+  assert.ok(!motivo.includes("http"), "a URL nao pode sobrar no motivo");
 });
