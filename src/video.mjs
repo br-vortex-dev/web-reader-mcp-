@@ -168,6 +168,47 @@ export function extrairPlayerResponse(html) {
   return extrairObjetoApos(html, "ytInitialPlayerResponse");
 }
 
+/**
+ * Capítulos do vídeo (título + minutagem). Moram no ytInitialData — o mesmo
+ * HTML que a leitura já baixou —, no markersMap que desenha a barra do player.
+ * Varredura com profundidade limitada em vez de caminho fixo: o YouTube já
+ * moveu esse caminho entre versões, e a varredura custa menos que uma segunda
+ * leitura. Sem capítulos publicados, devolve [] (o normal em vídeos curtos).
+ */
+export function capitulosDe(inicial) {
+  const saida = [];
+  const vistos = new Set();
+  const coletar = (no, prof) => {
+    if (prof > 16 || !no || typeof no !== "object") return;
+    if (Array.isArray(no)) {
+      for (const x of no) coletar(x, prof + 1);
+      return;
+    }
+    if (Array.isArray(no.chapters)) {
+      for (const c of no.chapters) {
+        const cr = c && c.chapterRenderer;
+        if (!cr) continue;
+        const seg = Math.floor((Number(cr.timeRangeStartMillis) || 0) / 1000);
+        const bruto = cr.title || {};
+        const titulo = String(
+          bruto.simpleText || (bruto.runs || []).map((r) => r.text || "").join("") || ""
+        ).trim();
+        if (!seg && !titulo) continue;
+        const chave = `${seg}|${titulo}`;
+        if (vistos.has(chave)) continue;
+        vistos.add(chave);
+        saida.push({ seg, titulo });
+      }
+    }
+    for (const v of Object.values(no)) {
+      if (v && typeof v === "object") coletar(v, prof + 1);
+    }
+  };
+  coletar(inicial, 0);
+  saida.sort((a, b) => a.seg - b.seg);
+  return saida;
+}
+
 /** Metadados de um playerResponse do YouTube (formato validado na web real). */
 export function metadadosYouTube(player) {
   const vd = (player && player.videoDetails) || {};
@@ -620,6 +661,7 @@ export function montarSaidaVideo({
   aviso,
   tags,
   tracks,
+  capitulos,
   transcricao,
   maxChars,
 }) {
@@ -643,6 +685,9 @@ export function montarSaidaVideo({
       .join(", ");
     linhas.push(`Legendas na plataforma: ${listadas}`);
   }
+  if (Array.isArray(capitulos) && capitulos.length) {
+    linhas.push(`Capitulos: ${capitulos.length}`);
+  }
   if (transcricao && transcricao.blocos && transcricao.blocos.length) {
     linhas.push(
       `Transcricao: ${transcricao.blocos.length} blocos em ${transcricao.lang || "(idioma não informado)"} (~${transcricao.caracteres} caracteres)`
@@ -651,6 +696,13 @@ export function montarSaidaVideo({
     linhas.push(`Transcricao: indisponivel — ${transcricao.indisponivel}`);
   }
   linhas.push("");
+  if (Array.isArray(capitulos) && capitulos.length) {
+    linhas.push("## Capitulos");
+    for (const c of capitulos) {
+      linhas.push(`[${formatarTempo(c.seg)}] ${c.titulo || "(sem título)"}`);
+    }
+    linhas.push("");
+  }
   if (transcricao && transcricao.blocos && transcricao.blocos.length) {
     for (const b of transcricao.blocos) {
       linhas.push(`[${formatarTempo(b.seg)}] ${b.texto}`);
@@ -746,6 +798,8 @@ async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
   }
 
   const meta = metadadosYouTube(player);
+  const inicial = html ? extrairObjetoApos(html, "ytInitialData") : null;
+  const capitulos = inicial ? capitulosDe(inicial) : [];
   const track = escolherTrack(meta.tracks, preferenciasDeIdioma(lang));
   const transcricao = track
     ? await baixarTranscricao(track, { timeoutMs, forcarFormato: "json3" })
@@ -764,6 +818,7 @@ async function lerYouTube(id, { timeoutMs, maxChars, lang }) {
     descricao: meta.descricao,
     tags: meta.tags,
     tracks: meta.tracks,
+    capitulos,
     transcricao,
     maxChars,
   });

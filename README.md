@@ -50,7 +50,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | `extract_links(url)`        | Lista os links da página (texto + URL absoluta, marca interno/externo)                  |
 | `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL                  |
 | `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript extraindo os dados embutidos no HTML (sem navegador) |
-| `read_video(url, lang?)`    | Lê um vídeo (YouTube, Vimeo, página com vídeo ou legenda .vtt/.srt): metadados publicados + transcrição da legenda com timestamps, quando acessível |
+| `read_video(url, lang?)`    | Lê um vídeo (YouTube, Vimeo, página com vídeo ou legenda .vtt/.srt): metadados publicados + capítulos (YouTube) + transcrição da legenda com timestamps, quando acessível |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
@@ -62,7 +62,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda dezenove arquivos em `tests/` (16 suítes + 1 helpers + snapshots, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (22 arquivos, 186 testes, ~80 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -77,9 +77,13 @@ Roda dezenove arquivos em `tests/` (16 suítes + 1 helpers + snapshots, ~60 s, s
 | `tests/crawl.test.mjs` | `crawl_site` com a URL inicial bloqueada devolve `isError`; crawl parcial resume os motivos das falhas |
 | `tests/internal-api.test.mjs` | busca automática de `/api/...` do `read_page`: teto de candidatos, dedupe, priorização e orçamento de tempo |
 | `tests/dynamic.test.mjs` | `read_dynamic_page`: cabeçalho aparece uma única vez, sem perder informação |
-| `tests/video.test.mjs` | `read_video`: metadados + transcrição de `<track>` com timestamps, bloqueio pelo robots declarado, legenda direta `.vtt` e página sem vídeo |
+| `tests/video.test.mjs` | `read_video`: metadados + transcrição de `<track>` com timestamps, capítulos do YouTube (extração do `ytInitialData`, dedupe, ordem) e a seção na saída, bloqueio pelo robots declarado, legenda direta `.vtt` e página sem vídeo |
 | `tests/robustness.test.mjs` | 413 no corpo grande, token de tamanho diferente sem exceção, `Retry-After`, SIGTERM |
 | `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
+| `tests/host-limit.test.mjs` | teto por host: um host lento não monopoliza as vagas, fila do host cheia devolve erro claro, estado por host não vaza |
+| `tests/cluster.test.mjs` | `WEB_CONCURRENCY=2` sobe workers, atende e encerra; sem a variável, processo único |
+| `tests/parada-antecipada.test.mjs` | parada do parse no teto de saída: página gigante idêntica à conversão completa, páginas pequenas intactas, cercas pareadas no prefixo |
+| `tests/endurecimento.test.mjs` | transporte pinado com DNS quebrado, gzip/br, redirect/erro com corpo infinito, robots não toca host bloqueado, faixas reservadas, `%` malformado, teto do stdio |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400 |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
@@ -253,7 +257,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.2.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.3.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -657,29 +661,40 @@ Aceita quatro entradas:
 
 | Entrada | O que ela tenta |
 | --- | --- |
-| URL de vídeo do YouTube (`watch`, `youtu.be`, `shorts`, `live`, `embed`) | metadados + legendas da própria página |
+| URL de vídeo do YouTube (`watch`, `youtu.be`, `shorts`, `live`, `embed`) | metadados + capítulos + legendas da própria página |
 | URL do Vimeo (vídeo ou player) | metadados + faixas do player — a transcrição funciona |
 | Qualquer página com vídeo embutido (blog, notícia) | segue o embed conhecido, ou lê og tags/JSON-LD/`<track>` da própria página |
 | Link direto de legenda (`.vtt`/`.srt`) | baixa e converte em blocos com timestamps |
 
-O que sai: título, canal, duração, visualização, publicação, capa, descrição e a
-**transcrição** — cada bloco com timestamp (`[3:33] texto`), no idioma preferido
-(`lang`) ou na ordem `pt-BR`, `pt`, `en`.
+O que sai: título, canal, duração, visualização, publicação, capa, descrição, os
+**capítulos** publicados (seção `Capitulos:`, com minutagem — só no YouTube, que
+os publica no mesmo HTML da página) e a **transcrição** — cada bloco com
+timestamp (`[3:33] texto`), no idioma preferido (`lang`) ou na ordem `pt-BR`,
+`pt`, `en`.
 
 **O que ela não faz — e por quê.** Não baixa o vídeo, não decodifica quadros e não
 gera resumo de imagem: isso exigiria `yt-dlp`/`ffmpeg` (quebraria a restrição de
 zero dependências) e estouraria a memória do plano free. Só entra o que a
 plataforma publica como **texto acessível**.
 
-**YouTube, a parte honesta:** a página do vídeo entrega os metadados completos,
-mas o download de legenda do YouTube mora em `/api/timedtext` — que o robots.txt
-do próprio YouTube bloqueia (`Disallow: /api/`) e que, mesmo fora dele, devolve
-corpo vazio para acesso anônimo (testado também por curl). Além disso, para
-**IPs de datacenter** (o Render, por exemplo) a própria página `/watch` costuma
-responder **HTTP 429**. Nesses casos o `read_video` cai no oEmbed público
-(título, canal, capa) e declara o bloqueio no campo `Aviso:` — devolve o que
-dá para ler, nunca falha inteiro nem finge leitura completa. Se até o oEmbed
-cair, aí sim é `isError` com o motivo.
+**YouTube, a parte honesta:** a página do vídeo entrega os metadados completos
+(inclusive os **capítulos**, que o `read_video` extrai do mesmo HTML — sem
+chamada extra), mas o download de legenda do YouTube mora em `/api/timedtext` —
+que o robots.txt do próprio YouTube bloqueia (`Disallow: /api/`) e que, mesmo
+fora dele, devolve corpo vazio para acesso anônimo (testado também por curl).
+Além disso, para **IPs de datacenter** (o Render, por exemplo) a própria página
+`/watch` costuma responder **HTTP 429**. Nesses casos o `read_video` cai no
+oEmbed público (título, canal, capa) e declara o bloqueio no campo `Aviso:` —
+devolve o que dá para ler, nunca falha inteiro nem finge leitura completa. Se
+até o oEmbed cair, aí sim é `isError` com o motivo.
+
+**Caminhos testados e fechados** (sondas em `dev/_probe-*`), para não serem
+tentados de novo: o endpoint interno do player (`/youtubei/v1/player`) está
+em `Disallow: /youtubei/` no robots.txt do YouTube; `/shorts/<id>` apenas
+redireciona para `/watch` (sofre do mesmo 429); `/embed` e o
+`youtube-nocookie.com/embed` devolvem só uma casca JS de ~147 KB, sem
+metadados; e o formato `json3` da legenda também vem vazio para acesso
+anônimo.
 
 **Vimeo e páginas com legenda publicada** rodam de ponta a ponta: o módulo baixa
 o VTT/SRT (ou o `json3` do YouTube, quando ele responde), converte em blocos

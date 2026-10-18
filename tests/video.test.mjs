@@ -11,7 +11,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startFixture, startMcp } from "./helpers.mjs";
-import { montarSaidaVideo, motivoCurtoDeErro } from "../src/video.mjs";
+import { montarSaidaVideo, motivoCurtoDeErro, capitulosDe } from "../src/video.mjs";
 
 let fixture;
 let mcp;
@@ -103,4 +103,105 @@ test("motivoCurtoDeErro tira a URL do rabo da mensagem", () => {
   );
   assert.equal(motivo, "HTTP 429 Too Many Requests");
   assert.ok(!motivo.includes("http"), "a URL nao pode sobrar no motivo");
+});
+
+/* ---------- capitulos (ytInitialData) ---------- */
+
+// Estrutura real do YouTube (conferida em dev/_probe-video6.mjs): o markersMap
+// fica em playerOverlays ... multiMarkersPlayerBarRenderer, e cada item e um
+// chapterRenderer com timeRangeStartMillis. A varredura e por profundidade
+// (o caminho ja mudou entre versoes), entao o teste cobre tambem um formato
+// achatado alternativo.
+const inicialComCapitulos = {
+  playerOverlays: {
+    playerOverlayRenderer: {
+      decoratedPlayerBarRenderer: {
+        playerBar: {
+          multiMarkersPlayerBarRenderer: {
+            markersMap: [
+              {
+                key: "AUTO_CHAPTERS",
+                value: {
+                  chapters: [
+                    { chapterRenderer: { timeRangeStartMillis: 0, title: { simpleText: "Introduction example" } } },
+                    {
+                      chapterRenderer: {
+                        timeRangeStartMillis: 67000,
+                        title: { runs: [{ text: "Series " }, { text: "preview" }] },
+                      },
+                    },
+                    { chapterRenderer: { timeRangeStartMillis: 162000, title: { simpleText: "What are neurons?" } } },
+                  ],
+                },
+              },
+              { key: "HEATMAP", value: { heatmap: [{}, {}] } },
+            ],
+          },
+        },
+      },
+    },
+  },
+};
+
+test("capitulosDe: extrai titulo e minutagem do ytInitialData real", () => {
+  const caps = capitulosDe(inicialComCapitulos);
+  assert.equal(caps.length, 3);
+  assert.deepEqual(caps[0], { seg: 0, titulo: "Introduction example" });
+  assert.deepEqual(caps[1], { seg: 67, titulo: "Series preview" }, "runs devem ser concatenados");
+  assert.deepEqual(caps[2], { seg: 162, titulo: "What are neurons?" });
+});
+
+test("capitulosDe: sem capitulos publicados devolve lista vazia", () => {
+  assert.deepEqual(capitulosDe(null), []);
+  assert.deepEqual(capitulosDe({}), []);
+  assert.deepEqual(capitulosDe({ playerOverlays: { playerOverlayRenderer: {} } }), []);
+  assert.deepEqual(capitulosDe("texto solto"), []);
+});
+
+test("capitulosDe: deduplica e ordena por tempo", () => {
+  const j = {
+    a: {
+      chapters: [
+        { chapterRenderer: { timeRangeStartMillis: 90000, title: { simpleText: "Tarde" } } },
+        { chapterRenderer: { timeRangeStartMillis: 0, title: { simpleText: "Cedo" } } },
+      ],
+    },
+    b: {
+      chapters: [{ chapterRenderer: { timeRangeStartMillis: 0, title: { simpleText: "Cedo" } } }],
+    },
+  };
+  const caps = capitulosDe(j);
+  assert.deepEqual(caps, [
+    { seg: 0, titulo: "Cedo" },
+    { seg: 90, titulo: "Tarde" },
+  ]);
+});
+
+test("montarSaidaVideo: secao Capitulos aparece com minutagem formatada", () => {
+  const saida = montarSaidaVideo({
+    urlFinal: "https://www.youtube.com/watch?v=x",
+    plataforma: "YouTube",
+    titulo: "Video com capitulos",
+    duracaoSeg: 3725,
+    capitulos: [
+      { seg: 0, titulo: "Intro" },
+      { seg: 3725, titulo: "Fim" },
+    ],
+    transcricao: { indisponivel: "teste" },
+    maxChars: 8000,
+  });
+  assert.match(saida, /\nCapitulos: 2\n/, "a contagem entra no cabecalho");
+  assert.match(saida, /## Capitulos\n\[0:00\] Intro\n\[1:02:05\] Fim\n/, "a secao lista cada capitulo");
+});
+
+test("montarSaidaVideo: sem capitulos, nenhuma secao e adicionada", () => {
+  const saida = montarSaidaVideo({
+    urlFinal: "https://www.youtube.com/watch?v=x",
+    plataforma: "YouTube",
+    titulo: "Video curto",
+    transcricao: { indisponivel: "teste" },
+    maxChars: 8000,
+  });
+  assert.ok(!saida.includes("Capitulos"), "video sem capitulos nao pode ganhar a secao");
+  assert.ok(!saida.includes("## "), "nenhum cabecalho extra");
 });
