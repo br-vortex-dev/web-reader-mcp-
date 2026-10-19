@@ -1,5 +1,29 @@
 [
   {
+    "name": "read_search",
+    "description": "Busca na web e devolve as URLs de um assunto: título, URL e resumo de cada resultado. É o passo que descobre a página — depois use read_page ou read_multiple_pages para ler as que interessarem. Não depende de chave de API: por padrão fala direto com a página pública do DuckDuckGo. Atenção: buscadores recusam IP de datacenter (Render) — nesse caso a ferramenta avisa o motivo em vez de devolver lista vazia; funcione localmente ou configure BRAVE_API_KEY/SEARXNG_URL.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "description": "O termo/assunto a buscar"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Quantidade máxima de resultados (padrão 10, max 30)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 10000)"
+        }
+      },
+      "required": [
+        "q"
+      ]
+    }
+  },
+  {
     "name": "read_page",
     "description": "Lê uma página web (GET) e devolve o conteúdo extraído em markdown: título, meta descrição e texto principal. Use para ler artigos, documentações, blogs, páginas de produto, etc.",
     "inputSchema": {

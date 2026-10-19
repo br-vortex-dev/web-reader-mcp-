@@ -259,7 +259,7 @@ async function decodeBuffer(buffer, contentType) {
  * ela, devolve `buffer` cru — é o que o leitor de PDF precisa, porque PDF é
  * binário e passar por decodificação de texto corromperia os bytes.
  */
-export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false } = {}) {
+export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
   // NaN) podia pular o laço inteiro e o throw final lançar `null`.
@@ -301,6 +301,10 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
       };
+      // Headers extras do chamador (ex.: Authorization da API de busca). A
+      // chave viaja AQUI, nunca na URL — assim não entra na chave de cache
+      // nem em mensagem de erro. O que o chamador mandar vence o padrão.
+      if (headersExtra) Object.assign(headers, headersExtra);
       // Revalidação condicional: só na primeira tentativa (o retry é por
       // falha de rede, não vale repetir o If-None-Match).
       if (attempt === 0 && condicional) {

@@ -8,7 +8,7 @@
  * - Protocolo MCP (stdio, JSON-RPC newline-delimited) implementado à mão.
  * - Parser de HTML → markdown também implementado à mão (tokenizer próprio).
  *
- * Ferramentas (12):
+ * Ferramentas (13):
  *   read_page(url)               -> lê uma página e devolve título + conteúdo em markdown
  *   extract_links(url)           -> lista os links de uma página
  *   read_multiple_pages(urls)    -> lê várias páginas por chamada
@@ -17,6 +17,7 @@
  *   read_pdf(url)                -> extrai o texto de um PDF (sem OCR)
  *   read_feed(url)               -> lê um feed RSS/Atom/JSON Feed
  *   read_json(url, path?)        -> lê uma resposta JSON de API pública
+ *   read_search(q)               -> busca na web e devolve as URLs de um assunto
  *   find_on_page(url, query)     -> busca um termo na página, só os trechos
  *   diff_page(url)               -> o que mudou na página desde a última leitura
  *   discover_urls(url)           -> descobre URLs do site (sitemap.xml ou links internos)

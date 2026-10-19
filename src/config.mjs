@@ -4,7 +4,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.7.1";
+export const SERVER_VERSION = "1.8.0";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -174,6 +174,29 @@ export const MULTI_MAX_TOTAL_CHARS = Math.max(
 
 // Permite hosts privados (apenas desenvolvimento/testes).
 export const ALLOW_PRIVATE_HOSTS = process.env.ALLOW_PRIVATE_HOSTS === "1";
+
+/* --------------------------------------------------------------------- *
+ * Busca na web (read_search)                                            *
+ * --------------------------------------------------------------------- *
+ * A busca tem provedor PLUGAVEL porque nenhum motor aceita o IP de
+ * datacenter do Render: DuckDuckGo e Mojeek dao timeout, Google/Bing/
+ * Brave/Startpage barram por robots, Ecosia devolve 403 (medido em
+ * dev/_probe-search*.mjs). O caminho que funciona no servidor hospedado e
+ * uma API com chave (feita para datacenter) ou uma instancia SearXNG
+ * propria. O DDG HTML continua valendo como padrao porque funciona na
+ * maquina local — quem roda em datacenter configura chave ou SearXNG e a
+ * MESMA ferramenta passa a funcionar; sem chave, ela diz o motivo em vez
+ * de fingir que nao achou nada.
+ *
+ * SEARCH_PROVIDER: "auto" (padrao) escolhe sozinho na ordem
+ * brave -> searxng -> ddg, pelo que estiver configurado.
+ */
+export const SEARCH_PROVIDER = (process.env.SEARCH_PROVIDER || "auto").toLowerCase();
+export const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
+export const SEARXNG_URL = (process.env.SEARXNG_URL || "").replace(/\/+$/, "");
+export const SEARCH_TIMEOUT_MS = clampEnv(process.env.SEARCH_TIMEOUT_MS, 10000, 1000, 60000);
+export const SEARCH_DEFAULT_LIMIT = clampEnv(process.env.SEARCH_DEFAULT_LIMIT, 10, 1, 50);
+export const SEARCH_MAX_LIMIT = clampEnv(process.env.SEARCH_MAX_LIMIT, 30, 1, 100);
 
 /**
  * Clampa um valor de ambiente entre min e max.

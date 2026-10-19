@@ -28,6 +28,7 @@ import { htmlToMarkdown, extractMeta, extractLinks, hostOf } from "./html-parser
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
+import { toolSearch } from "./search.mjs";
 import {
   snapshots,
   chaveSnapshot,
@@ -1043,6 +1044,8 @@ export async function callTool(name, args) {
       return await toolReadFeed(args || {});
     case "read_json":
       return await toolReadJson(args || {});
+    case "read_search":
+      return await toolSearch(args || {});
     case "find_on_page":
       return await toolFindOnPage(args || {});
     case "diff_page":
