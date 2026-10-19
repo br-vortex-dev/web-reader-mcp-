@@ -1,0 +1,59 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "tools",
+  "quando": "2026-10-19T21:27:17.483Z",
+  "resultados": [
+    {
+      "conc": 4,
+      "enviados": 96,
+      "ok": 96,
+      "reqPorSeg": 15.39,
+      "uteisPorSeg": 15.39,
+      "latP50": 232,
+      "latP95": 366,
+      "latP99": 651,
+      "latMax": 651,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "59",
+        "cache": "0"
+      },
+      "healthDepois": {
+        "rss": "61",
+        "cache": "0",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 16,
+      "enviados": 367,
+      "ok": 367,
+      "reqPorSeg": 58.43,
+      "uteisPorSeg": 58.43,
+      "latP50": 227,
+      "latP95": 649,
+      "latP99": 808,
+      "latMax": 1249,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "61",
+        "cache": "0"
+      },
+      "healthDepois": {
+        "rss": "67",
+        "cache": "0",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

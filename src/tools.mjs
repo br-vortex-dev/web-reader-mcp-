@@ -28,7 +28,6 @@ import { htmlToMarkdown, extractMeta, extractLinks, hostOf } from "./html-parser
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
-import { toolSearch } from "./search.mjs";
 import {
   snapshots,
   chaveSnapshot,
@@ -700,21 +699,26 @@ export async function toolReadMultiplePages(args) {
 
   const CONCURRENCY = FETCH_CONCURRENCY;
   const lidos = new Array(unicas.length);
-  for (let start = 0; start < unicas.length; start += CONCURRENCY) {
-    const lote = unicas.slice(start, start + CONCURRENCY);
-    const settled = await Promise.all(
-      lote.map(async (url) => {
-        try {
-          return { ok: true, text: (await lerPaginaCompleta(url, maxChars, timeoutMs)).conteudo };
-        } catch (err) {
-          return { ok: false, text: `# Erro ao ler ${url}\n${err.message}` };
-        }
-      })
-    );
-    settled.forEach((resultado, i) => {
-      lidos[start + i] = resultado;
-    });
-  }
+  // Pool contínuo em vez de lotes de CONCURRENCY com Promise.all por bloco.
+  // No lote, os índices seguintes só começavam quando o MAIS LENTO do bloco
+  // terminava: 31 URLs rápidas esperavam a 32ª. Aqui cada vaga puxa a próxima
+  // URL assim que fica livre — a mesma concorrência, sem o degrau artificial.
+  // O limite real de sockets segue garantido pelos limitadores do fetch
+  // (global, por host e de memória), então isto não aumenta a carga na origem.
+  let proximo = 0;
+  const trabalhador = async () => {
+    for (;;) {
+      const i = proximo++;
+      if (i >= unicas.length) return;
+      try {
+        lidos[i] = { ok: true, text: (await lerPaginaCompleta(unicas[i], maxChars, timeoutMs)).conteudo };
+      } catch (err) {
+        lidos[i] = { ok: false, text: `# Erro ao ler ${unicas[i]}\n${err.message}` };
+      }
+    }
+  };
+  const vagas = Math.min(CONCURRENCY, unicas.length);
+  await Promise.all(Array.from({ length: vagas }, trabalhador));
 
   const secoes = [];
   let total = 0;
@@ -743,7 +747,7 @@ export async function toolReadMultiplePages(args) {
 
   const ok = unicas.filter((u) => lidos[indice.get(u)].ok).length;
   const resumo = [
-    `Leitura concluida: ${ok}/${unicas.length} paginas OK (lidas em lotes de ${CONCURRENCY}).`,
+    `Leitura concluida: ${ok}/${unicas.length} paginas OK (ate ${CONCURRENCY} em paralelo).`,
     duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez so.` : "",
     omitidas > 0 ? ` ${omitidas} secao(oes) omitida(s) por teto de saida total.` : "",
     "",
@@ -1044,8 +1048,6 @@ export async function callTool(name, args) {
       return await toolReadFeed(args || {});
     case "read_json":
       return await toolReadJson(args || {});
-    case "read_search":
-      return await toolSearch(args || {});
     case "find_on_page":
       return await toolFindOnPage(args || {});
     case "diff_page":

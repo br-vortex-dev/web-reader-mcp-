@@ -50,7 +50,7 @@ test("corpo dentro do limite continua funcionando", { timeout: 60000 }, async ()
   });
   assert.equal(res.status, 200);
   const json = await res.json();
-  assert.equal((json.result.tools || []).length, 13);
+  assert.equal((json.result.tools || []).length, 12);
 });
 
 test("o servidor sobrevive a um corpo grande demais", { timeout: 60000 }, async () => {

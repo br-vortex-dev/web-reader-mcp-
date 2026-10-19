@@ -1,0 +1,140 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "quando": "2026-10-19T20:50:13.734Z",
+  "catalogo": [
+    "read_page",
+    "extract_links",
+    "read_multiple_pages",
+    "discover_urls",
+    "crawl_site",
+    "read_dynamic_page",
+    "read_video",
+    "read_pdf",
+    "read_feed",
+    "read_json",
+    "find_on_page",
+    "diff_page"
+  ],
+  "individuais": [
+    {
+      "nome": "tools/list",
+      "marca": "PASS",
+      "ms": 285,
+      "status": 200,
+      "chars": 9699,
+      "extra": ""
+    },
+    {
+      "nome": "read_page",
+      "marca": "PASS",
+      "ms": 937,
+      "status": 200,
+      "chars": 1030,
+      "extra": ""
+    },
+    {
+      "nome": "read_page (teto 25000)",
+      "marca": "PASS",
+      "ms": 302,
+      "status": 200,
+      "chars": 1030,
+      "extra": ""
+    },
+    {
+      "nome": "extract_links",
+      "marca": "PASS",
+      "ms": 289,
+      "status": 200,
+      "chars": 379,
+      "extra": ""
+    },
+    {
+      "nome": "read_multiple_pages (5 urls)",
+      "marca": "PASS",
+      "ms": 755,
+      "status": 200,
+      "chars": 6715,
+      "extra": ""
+    },
+    {
+      "nome": "discover_urls",
+      "marca": "PASS",
+      "ms": 752,
+      "status": 200,
+      "chars": 813,
+      "extra": ""
+    },
+    {
+      "nome": "crawl_site",
+      "marca": "PASS",
+      "ms": 257,
+      "status": 200,
+      "chars": 310,
+      "extra": ""
+    },
+    {
+      "nome": "read_dynamic_page",
+      "marca": "PASS",
+      "ms": 494,
+      "status": 200,
+      "chars": 2349,
+      "extra": ""
+    },
+    {
+      "nome": "read_video",
+      "marca": "PASS",
+      "ms": 715,
+      "status": 200,
+      "chars": 545,
+      "extra": ""
+    },
+    {
+      "nome": "read_pdf",
+      "marca": "FALHA",
+      "ms": 315,
+      "status": 200,
+      "chars": 107,
+      "extra": "Erro: HTTP 403 Forbidden ao acessar https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+    },
+    {
+      "nome": "read_feed",
+      "marca": "PASS",
+      "ms": 2954,
+      "status": 200,
+      "chars": 7514,
+      "extra": ""
+    },
+    {
+      "nome": "read_json",
+      "marca": "PASS",
+      "ms": 578,
+      "status": 200,
+      "chars": 141,
+      "extra": "valor: # JSON: node URL: https://api.github.com/repos/nodejs/node C"
+    },
+    {
+      "nome": "find_on_page",
+      "marca": "PASS",
+      "ms": 280,
+      "status": 200,
+      "chars": 772,
+      "extra": ""
+    },
+    {
+      "nome": "diff_page (marca)",
+      "marca": "PASS",
+      "ms": 401,
+      "status": 200,
+      "chars": 244,
+      "extra": ""
+    },
+    {
+      "nome": "diff_page (compara)",
+      "marca": "PASS",
+      "ms": 274,
+      "status": 200,
+      "chars": 136,
+      "extra": ""
+    }
+  ]
+}

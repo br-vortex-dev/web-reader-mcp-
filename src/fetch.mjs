@@ -220,6 +220,30 @@ async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal) {
   }
 }
 
+// Decodificadores reaproveitados: criar um TextDecoder por resposta custa
+// caro (a tabela de charset é montada na construção) e a esmagadora maioria
+// das páginas é UTF-8. Os incomuns continuam sendo criados sob demanda e
+// ficam guardados por charset.
+const decoderUtf8 = new TextDecoder("utf-8");
+const decodersPorCharset = new Map();
+
+/** Devolve o TextDecoder do charset (cache por nome), ou null se desconhecido. */
+function decoderPara(charset) {
+  if (charset === "utf-8" || charset === "utf8") return decoderUtf8;
+  let dec = decodersPorCharset.get(charset);
+  if (dec) return dec;
+  try {
+    dec = new TextDecoder(charset);
+  } catch {
+    return null;
+  }
+  // Teto pequeno: um site não usa dezenas de charsets, e sem teto um atacante
+  // que varia o `charset` encheria o mapa.
+  if (decodersPorCharset.size >= 64) decodersPorCharset.clear();
+  decodersPorCharset.set(charset, dec);
+  return dec;
+}
+
 /**
  * Decodifica o buffer de acordo com o charset do content-type ou detecta BOM.
  */
@@ -228,22 +252,19 @@ async function decodeBuffer(buffer, contentType) {
   const charset = charsetMatch ? charsetMatch[1].toLowerCase().replace(/["']/g, "") : "";
   const bytes = new Uint8Array(buffer);
   if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
-    return new TextDecoder("utf-8").decode(bytes.slice(3));
+    return decoderUtf8.decode(bytes.subarray(3));
   }
   if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
-    return new TextDecoder("utf-16be").decode(bytes.slice(2));
+    return (decoderPara("utf-16be") || decoderUtf8).decode(bytes.subarray(2));
   }
   if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
-    return new TextDecoder("utf-16le").decode(bytes.slice(2));
+    return (decoderPara("utf-16le") || decoderUtf8).decode(bytes.subarray(2));
   }
-  try {
-    if (charset && charset !== "utf-8" && charset !== "utf8") {
-      return new TextDecoder(charset).decode(bytes);
-    }
-  } catch {
-    // charset desconhecido, cai no UTF-8
+  if (charset) {
+    const dec = decoderPara(charset);
+    if (dec) return dec.decode(bytes);
   }
-  return new TextDecoder("utf-8").decode(bytes);
+  return decoderUtf8.decode(bytes);
 }
 
 /**
@@ -293,8 +314,14 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
+        // Revalidação em vez de proibição de cache. "no-cache" + "Pragma:
+        // no-cache" obrigavam CDN e proxy a irem SEMPRE até a origem, e num
+        // site atrás de Cloudflare/Fastly isso custa a maior parte do TTFB.
+        // "max-age=0, must-revalidate" continua sem servir conteúdo velho
+        // (o cache de borda revalida antes de responder), e a revalidação
+        // condicional por ETag/Last-Modified — que já existe logo abaixo —
+        // faz o servidor devolver 304 sem corpo quando nada mudou.
+        "Cache-Control": "max-age=0, must-revalidate",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",

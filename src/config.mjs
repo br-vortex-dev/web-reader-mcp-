@@ -111,13 +111,22 @@ export const COMPRESSAO_CACHE_ENTRIES = clampEnvZero(process.env.COMPRESSAO_CACH
 
 // Cache em memória (LRU + TTL).
 export const CACHE_TTL_MS = Math.max(500, Math.floor(Number(process.env.CACHE_TTL_MS) || 7.5 * 60 * 1000));
-// Teto de entradas ajustável: com muitos sites distintos no ar, 100 entradas
-// evicta páginas ainda quentes. Subir aqui aumenta o reuso sem tocar em código.
-export const CACHE_MAX_ENTRIES = clampEnv(process.env.CACHE_MAX_ENTRIES, 100, 1, 100000);
-export const CACHE_MAX_BYTES = Math.max(512, Math.floor(Number(process.env.CACHE_MAX_BYTES) || 32 * 1024 * 1024));
+// Teto de entradas ajustável: com muitos sites distintos no ar, poucas entradas
+// evictam páginas ainda quentes. 512 cobre com folga o conjunto de trabalho de
+// um servidor que lê dezenas de sites por hora, sem custo quando o tráfego é
+// pequeno (o cache só ocupa o que de fato foi baixado).
+export const CACHE_MAX_ENTRIES = clampEnv(process.env.CACHE_MAX_ENTRIES, 512, 1, 100000);
+// 128 MB: o valor anterior (32 MB) enchia no próprio teste de carga — foram
+// medidos 52 entradas ocupando 33 MB, ou seja, o cache despejava página quente
+// enquanto ainda servia. Memória é barata perto de um download a menos.
+export const CACHE_MAX_BYTES = Math.max(512, Math.floor(Number(process.env.CACHE_MAX_BYTES) || 128 * 1024 * 1024));
+// Teto de UMA entrada. Antes era metade do download máximo (2,5 MB com o
+// padrão de 5 MB), então página grande NUNCA entrava no cache: era baixada,
+// convertida e descartada a cada leitura. Agora o teto acompanha o teto de
+// download, e a página inteira cabe.
 export const CACHE_MAX_ENTRY_BYTES = Math.min(
   Math.floor(CACHE_MAX_BYTES / 4),
-  Math.floor(MAX_RESPONSE_BYTES / 2)
+  MAX_RESPONSE_BYTES
 );
 
 // Revalidação em segundo plano (stale-while-revalidate). Desligada por padrão:
@@ -174,29 +183,6 @@ export const MULTI_MAX_TOTAL_CHARS = Math.max(
 
 // Permite hosts privados (apenas desenvolvimento/testes).
 export const ALLOW_PRIVATE_HOSTS = process.env.ALLOW_PRIVATE_HOSTS === "1";
-
-/* --------------------------------------------------------------------- *
- * Busca na web (read_search)                                            *
- * --------------------------------------------------------------------- *
- * A busca tem provedor PLUGAVEL porque nenhum motor aceita o IP de
- * datacenter do Render: DuckDuckGo e Mojeek dao timeout, Google/Bing/
- * Brave/Startpage barram por robots, Ecosia devolve 403 (medido em
- * dev/_probe-search*.mjs). O caminho que funciona no servidor hospedado e
- * uma API com chave (feita para datacenter) ou uma instancia SearXNG
- * propria. O DDG HTML continua valendo como padrao porque funciona na
- * maquina local — quem roda em datacenter configura chave ou SearXNG e a
- * MESMA ferramenta passa a funcionar; sem chave, ela diz o motivo em vez
- * de fingir que nao achou nada.
- *
- * SEARCH_PROVIDER: "auto" (padrao) escolhe sozinho na ordem
- * brave -> searxng -> ddg, pelo que estiver configurado.
- */
-export const SEARCH_PROVIDER = (process.env.SEARCH_PROVIDER || "auto").toLowerCase();
-export const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
-export const SEARXNG_URL = (process.env.SEARXNG_URL || "").replace(/\/+$/, "");
-export const SEARCH_TIMEOUT_MS = clampEnv(process.env.SEARCH_TIMEOUT_MS, 10000, 1000, 60000);
-export const SEARCH_DEFAULT_LIMIT = clampEnv(process.env.SEARCH_DEFAULT_LIMIT, 10, 1, 50);
-export const SEARCH_MAX_LIMIT = clampEnv(process.env.SEARCH_MAX_LIMIT, 30, 1, 100);
 
 /**
  * Clampa um valor de ambiente entre min e max.

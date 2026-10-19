@@ -21,11 +21,10 @@ sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 13 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
+| `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
 | `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
-| `search.mjs` | `read_search`: busca na web e devolve as URLs de um assunto. Motor **plugável** (`SEARCH_PROVIDER`): DuckDuckGo HTML (sem chave, funciona fora de datacenter), Brave Search API (`BRAVE_API_KEY`) e SearXNG próprio (`SEARXNG_URL`). Extração do HTML à mão, em passe único, sem dependência. |
 | `snapshot.mjs` | `diff_page`: marca por URL (hash do conteúdo + texto normalizado) e diff por linhas (LCS com corte de prefixo/sufixo) do que mudou desde a última leitura. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, **compressão da resposta** (gzip/br conforme `Accept-Encoding`), handlers, `/health` e shutdown limpo. |
@@ -58,7 +57,6 @@ sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
 | `read_pdf(url)`             | Extrai o **texto** de um PDF público (sem OCR): reconstrói espaços e quebras pelos operadores de texto. PDF escaneado avisa que não há camada de texto |
 | `read_feed(url)`            | Lê um feed RSS/Atom/JSON Feed e lista os itens (título, link, data, autor, resumo)       |
 | `read_json(url, path?)`     | Lê uma resposta JSON pública, declara a forma e aceita `path` (ex.: `data.items`)        |
-| `read_search(q, limit?)`    | **Busca na web** e devolve título, URL e resumo dos resultados — o passo que descobre a página. Sem chave: fala direto com o DuckDuckGo HTML (ver *Busca* abaixo) |
 | `find_on_page(url, query)`  | Busca um termo na página e devolve só os trechos com contexto (literal ou regex)         |
 | `diff_page(url)`            | Compara com a leitura anterior e devolve só o que mudou (linhas + e -)                  |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
@@ -100,7 +98,6 @@ Roda os arquivos de `tests/` (30 arquivos, 241 testes, ~90 s, sem rede na maiori
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 | `tests/pdf.test.mjs` | `read_pdf`: extração de texto com espaços/quebras, contagem de páginas, não-PDF avisa sem erro cru, truncamento, cache |
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
-| `tests/search.test.mjs` | `read_search`: extração do DuckDuckGo (título, URL desembrulhada do redirector, resumo), dedupe, as duas ordens de atributo, HTML sem resultado, consulta vazia recusada |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão) |
@@ -125,7 +122,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 13 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 12 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 ```
 
@@ -180,7 +177,7 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 13 ferramentas do MCP
+│   ├── tools.mjs      <- as 12 ferramentas do MCP
 │   ├── video.mjs      <- read_video: metadados + transcricao de legendas
 │   ├── pdf.mjs        <- read_pdf: extracao de texto de PDF (zero deps)
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
@@ -427,8 +424,8 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `PORT` | `3000` | Porta do modo HTTP. O Render define sozinha; a presença dela é o que escolhe o modo HTTP (sem `PORT` → stdio). |
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
-| `CACHE_MAX_BYTES` | `33554432` (32 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
-| `CACHE_MAX_ENTRIES` | `100` | Teto de entradas do cache (o segundo teto, além dos bytes). Ajustável por env: subir diminui o despejo de páginas ainda quentes. |
+| `CACHE_MAX_BYTES` | `134217728` (128 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. O valor anterior (32 MB) enchia no próprio teste de carga e despejava página ainda quente. |
+| `CACHE_MAX_ENTRIES` | `512` | Teto de entradas do cache (o segundo teto, além dos bytes). Ajustável por env: subir diminui o despejo de páginas ainda quentes. |
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
 | `CACHE_SWR` | desligada | `1` liga a **revalidação em segundo plano**: entrada vencida dentro da janela de graça é servida na hora e atualizada atrás (passando pela junção em voo). O `render.yaml` liga. Desligada, vencida = busca de novo (comportamento conservador). |
 | `CACHE_STALE_WINDOW_MS` | `0` (2× o TTL) | Tamanho da janela de graça do SWR em ms. Fora dela, a entrada é descartada e a leitura espera a nova busca. |
@@ -810,47 +807,6 @@ não consegue. Do mesmo jeito, PDF antigo com fonte de encoding próprio e sem m
 **Medido na web real** (`dev/_check-pdf-live.mjs`): o artigo *Attention Is All You
 Need* (arXiv, 2,2 MB, 15 páginas) devolveu **39.284 caracteres** de texto legível,
 com espaços entre palavras e quebras de linha corretas.
-
-## read_search (buscar na web — o passo que faltava)
-
-Até aqui o servidor **lia** uma URL que já se tinha; faltava **descobrir** a URL.
-O `read_search` fecha o ciclo:
-
-```json
-{ "name": "read_search", "arguments": { "q": "melhores práticas de web scraping", "limit": 5 } }
-```
-
-Devolve título, URL e resumo de cada resultado — e depois é só chamar `read_page`
-ou `read_multiple_pages` nas que interessarem.
-
-**Sem chave e sem dependência.** Por padrão fala direto com a página pública do
-**DuckDuckGo HTML**: o MCP faz a requisição sozinho, ninguém no meio, nada
-contratado. A extração é feita à mão, em passe único (o `href` real é desembrulhado
-do redirector `uddg=`), e o transporte já respeita o robots.txt e o SSRF.
-
-**A parede do datacenter — leia antes de publicar.** Buscadores recusam **IP de
-datacenter**. Medido em `dev/_probe-search*.mjs`:
-
-| De onde | DuckDuckGo | Google/Bing/Brave/Startpage | Ecosia | Mojeek |
-| --- | --- | --- | --- | --- |
-| Sua máquina (residencial) | responde em ~0,8 s | robots barra | — | — |
-| Render (datacenter) | **timeout** | robots barra | 403 | timeout |
-
-Ou seja: **no Render a busca sem chave não funciona** — e não é limitação do
-código, é o buscador que não atende o datacenter. Por isso a ferramenta é
-*plugável*: `SEARCH_PROVIDER` escolhe o motor, e há dois feitos para servidor:
-
-| `SEARCH_PROVIDER` | Motor | Chave? | Funciona em datacenter? |
-| --- | --- | --- | --- |
-| `ddg` (padrão) | DuckDuckGo HTML | não | **não** |
-| `brave` | Brave Search API | `BRAVE_API_KEY` | sim |
-| `searxng` | Instância SearXNG própria | não (URL) | sim |
-| `auto` (padrão) | escolhe: Brave > SearXNG > DDG | — | conforme o que estiver setado |
-
-Quando nenhum motor está configurado num ambiente onde o DDG não responde, a
-ferramenta **diz o motivo** — nunca devolve "nenhum resultado" como se a busca
-tivesse rodado. Provado localmente (`dev/_check-search-live.mjs`, 10/10): a busca
-achou `https://nodejs.org/pt-br/docs` e o `read_page` leu a página na sequência.
 
 ## read_feed e read_json (feed e API, sem virar HTML)
 
