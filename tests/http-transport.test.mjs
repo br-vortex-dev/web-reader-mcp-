@@ -63,11 +63,70 @@ test("404: path desconhecido responde 404 text/plain", async () => {
   assert.equal(r.body, "not found");
 });
 
-test("405: /mcp so aceita POST", async () => {
-  const r = await bruto("/mcp", { method: "GET", headers: { authorization: `Bearer ${TOKEN}` } });
+test("405: metodo que nao e da spec (PUT) devolve 405", async () => {
+  const r = await bruto("/mcp", { method: "PUT", headers: { authorization: `Bearer ${TOKEN}` } });
   assert.equal(r.status, 405);
   assert.equal(r.headers.get("allow"), "POST");
   assert.equal(r.body, "Use POST /mcp com o JSON-RPC do MCP.");
+});
+
+test("GET /mcp com token mas sem sessao: 400 (canal SSE exige sessao)", async () => {
+  const r = await bruto("/mcp", { method: "GET", headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(r.status, 400);
+  const json = JSON.parse(r.body);
+  assert.match(json.error.message, /[Ss]essao invalida/);
+});
+
+test("DELETE /mcp sem sessao: 400", async () => {
+  const r = await bruto("/mcp", { method: "DELETE", headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(r.status, 400);
+});
+
+test("initialize emite Mcp-Session-Id e o DELETE encerra a sessao", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {} },
+    }),
+  });
+  assert.equal(r.status, 200);
+  const sid = r.headers.get("mcp-session-id");
+  assert.ok(sid && sid.length > 10, "esperava um mcp-session-id na resposta do initialize");
+
+  // DELETE com a sessão encerra (204).
+  const del = await bruto("/mcp", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${TOKEN}`, "mcp-session-id": sid },
+  });
+  assert.equal(del.status, 204);
+
+  // Encerrar de novo: a sessão não existe mais (404).
+  const del2 = await bruto("/mcp", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${TOKEN}`, "mcp-session-id": sid },
+  });
+  assert.equal(del2.status, 404);
+});
+
+test("initialize reusa a sessao enviada pelo cliente", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}`, "mcp-session-id": "abc" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    }),
+  });
+  // A sessão "abc" não existia; o servidor emite uma nova (não a inventada).
+  assert.equal(r.status, 200);
+  const sid = r.headers.get("mcp-session-id");
+  assert.ok(sid && sid !== "abc", "sessao inexistente nao deve ser ecoada");
 });
 
 test("401: sem token, /mcp devolve 401 com www-authenticate Bearer", async () => {
@@ -93,7 +152,7 @@ test("OPTIONS: CORS com 204 e os headers certos", async () => {
   const r = await bruto("/mcp", { method: "OPTIONS" });
   assert.equal(r.status, 204);
   assert.equal(r.headers.get("access-control-allow-origin"), "*");
-  assert.equal(r.headers.get("access-control-allow-methods"), "POST, GET, OPTIONS");
+  assert.equal(r.headers.get("access-control-allow-methods"), "POST, GET, DELETE, OPTIONS");
   assert.equal(r.headers.get("access-control-allow-headers"), "content-type, mcp-session-id, last-event-id, authorization");
 });
 

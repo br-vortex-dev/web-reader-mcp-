@@ -78,8 +78,8 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
   try {
     const res = await fetchT(MCP_URL, { method: "GET", headers: { authorization: `Bearer ${token}` } });
     await res.text();
-    check(res.status === 405, "GET /mcp devolve 405 (so POST)", `status ${res.status}`);
-  } catch (e) { check(false, "GET /mcp devolve 405 (so POST)", e.message); }
+    check(res.status === 400, "GET /mcp sem sessao: 400 (canal SSE exige Mcp-Session-Id)", `status ${res.status}`);
+  } catch (e) { check(false, "GET /mcp sem sessao: 400 (canal SSE exige Mcp-Session-Id)", e.message); }
 
   try {
     const r = await mcpCall("tools/list", undefined, 1, false);

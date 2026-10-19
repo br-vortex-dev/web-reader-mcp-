@@ -4,7 +4,7 @@
  * server.mjs.
  */
 
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import http from "node:http";
 import zlib from "node:zlib";
@@ -255,6 +255,7 @@ export async function montarTextoHealth(server) {
     ` | condicional: ${revalidacaoCondicional.tentadas} (304 ${revalidacaoCondicional.naoModificadas})`,
     ` | conversoes: ${conversoesMemo.realizadas} (reaproveitadas ${conversoesMemo.caronas})`,
     ` | video: ${analisesVideo.realizadas} (reaproveitadas ${analisesVideo.caronas})`,
+    ` | sessoes: ${estatisticasSessoes().sessoes} (canais ${estatisticasSessoes().canaisSse})`,
   ].join("");
 }
 
@@ -266,7 +267,7 @@ export async function montarTextoHealth(server) {
 export function handlerOptions(res) {
   res.writeHead(204, {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "POST, GET, OPTIONS",
+    "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
     "access-control-allow-headers": "content-type, mcp-session-id, last-event-id, authorization",
   });
   res.end();
@@ -377,6 +378,186 @@ export async function processarCorpo(parsed) {
   return { responses, eraArray: Array.isArray(parsed) };
 }
 
+/* ===================================================================== *
+ * Sessões (Mcp-Session-Id) e canal SSE                                  *
+ * ===================================================================== */
+
+/**
+ * Sessões do transporte HTTP.
+ *
+ * A spec do transporte MCP (2025-03-26 / 2025-06-18) permite que o servidor
+ * emita `Mcp-Session-Id` na resposta do `initialize`; a partir daí o cliente
+ * envia o header e pode abrir um canal SSE no GET e encerrar no DELETE.
+ * Muitos clientes só funcionam assim — antes disso, este servidor era
+ * stateless e um cliente exigente ficava sem caminho.
+ *
+ * Decisões de compatibilidade:
+ * - EMITIR o header é aditivo: cliente que ignora continua funcionando.
+ * - NÃO exigir o header nas chamadas seguintes: exigir quebraria os clientes
+ *   que já funcionam hoje (e a spec permite servidor stateless). Quem manda,
+ *   é reconhecido; quem não manda, é atendido como sempre.
+ * - Teto de sessões e TTL: sessão é estado em memória — sem teto, um cliente
+ *   que chama `initialize` em laço infla a memória.
+ */
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
+const MAX_SESSOES = 1000;
+const sessoes = new Map(); // id -> { criadaEm, ultimoUso, sse: Set<res> }
+
+function limparSessoes() {
+  const agora = Date.now();
+  for (const [id, s] of sessoes) {
+    if (agora - s.ultimoUso > SESSION_TTL_MS) {
+      for (const res of s.sse) {
+        try {
+          res.end();
+        } catch {
+          // já fechado
+        }
+      }
+      sessoes.delete(id);
+    }
+  }
+}
+
+/** Cria (ou reusa) uma sessão e devolve o id. */
+export function criarSessao() {
+  limparSessoes();
+  if (sessoes.size >= MAX_SESSOES) {
+    // Despeja a mais antiga em uso (LRU por ultimoUso).
+    let maisAntiga = null;
+    let idAntigo = null;
+    for (const [id, s] of sessoes) {
+      if (!maisAntiga || s.ultimoUso < maisAntiga.ultimoUso) {
+        maisAntiga = s;
+        idAntigo = id;
+      }
+    }
+    if (idAntigo) {
+      for (const res of maisAntiga.sse) {
+        try {
+          res.end();
+        } catch {
+          // já fechado
+        }
+      }
+      sessoes.delete(idAntigo);
+    }
+  }
+  const id = randomUUID();
+  sessoes.set(id, { criadaEm: Date.now(), ultimoUso: Date.now(), sse: new Set() });
+  return id;
+}
+
+/** Marca uso da sessão (se existir) e devolve se ela é conhecida. */
+export function tocarSessao(id) {
+  const s = sessoes.get(id);
+  if (!s) return false;
+  s.ultimoUso = Date.now();
+  return true;
+}
+
+/** Encerra uma sessão e fecha os canais SSE dela. */
+export function encerrarSessao(id) {
+  const s = sessoes.get(id);
+  if (!s) return false;
+  for (const res of s.sse) {
+    try {
+      res.end();
+    } catch {
+      // já fechado
+    }
+  }
+  sessoes.delete(id);
+  return true;
+}
+
+/** Estatísticas para o /health. */
+export function estatisticasSessoes() {
+  let canais = 0;
+  for (const s of sessoes.values()) canais += s.sse.size;
+  return { sessoes: sessoes.size, canaisSse: canais };
+}
+
+/** Autoriza a requisição (mesma regra do POST: Bearer ou x-mcp-token). */
+function autorizado(req, authToken) {
+  if (!authToken) return true;
+  const authHeader = String(req.headers.authorization || "");
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const token = bearer || String(req.headers["x-mcp-token"] || "");
+  return tokenConfere(token, authToken);
+}
+
+/**
+ * GET /mcp — canal SSE (server→client).
+ *
+ * Este servidor não empurra notificação espontânea, então o canal serve para
+ * o que o cliente espera dele: abrir, receber o `endpoint` e ficar vivo. O
+ * keep-alive (comentário SSE) impede que proxy derrube a conexão ociosa.
+ * Não passa pela admissão de propósito: um canal aberto não pode segurar
+ * vaga de processamento (ficaria preso até o cliente fechar).
+ */
+export function handlerSse(req, res, ctx) {
+  if (!autorizado(req, ctx.authToken)) return handlerNaoAutorizado(res);
+
+  const sessionId = String(req.headers["mcp-session-id"] || "").trim();
+  if (!sessionId || !tocarSessao(sessionId)) {
+    res.writeHead(400, {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+    });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Sessao invalida: envie mcp-session-id de uma sessao ativa." },
+      })
+    );
+    return;
+  }
+
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "access-control-allow-origin": "*",
+    "x-accel-buffering": "no",
+  });
+  res.write("event: endpoint\ndata: /mcp\n\n");
+
+  const sessao = sessoes.get(sessionId);
+  sessao.sse.add(res);
+
+  const ping = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      // conexão caiu; o close abaixo limpa
+    }
+  }, 25000);
+  ping.unref();
+
+  const fechar = () => {
+    clearInterval(ping);
+    sessao.sse.delete(res);
+  };
+  req.on("close", fechar);
+  res.on("close", fechar);
+}
+
+/** DELETE /mcp — encerra a sessão (spec do transporte). */
+export function handlerEncerrarSessao(req, res, ctx) {
+  if (!autorizado(req, ctx.authToken)) return handlerNaoAutorizado(res);
+  const sessionId = String(req.headers["mcp-session-id"] || "").trim();
+  if (!sessionId) {
+    res.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
+    res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "Informe mcp-session-id." } }));
+    return;
+  }
+  const existia = encerrarSessao(sessionId);
+  res.writeHead(existia ? 204 : 404, { "access-control-allow-origin": "*" });
+  res.end();
+}
+
 /**
  * Handler de POST /mcp: a sequência de validações (auth → rate limit → método →
  * admissão → corpo → dispatch).
@@ -395,7 +576,14 @@ export async function handlerMcp(req, res, ctx) {
   const { bloqueado } = rateLimiter.registrar(clientIp, Date.now());
   if (bloqueado) return handlerRateLimit(res, rateLimitWindowMs);
 
-  if (req.method !== "POST") return handlerMetodoNaoPermitido(res);
+  if (req.method !== "POST") {
+    // GET/DELETE do /mcp são da spec do transporte (canal SSE e encerramento
+    // de sessão). Caem aqui quando a rota já decidiu, mas mantém a resposta
+    // certa caso cheguem por este caminho.
+    if (req.method === "GET") return handlerSse(req, res, ctx);
+    if (req.method === "DELETE") return handlerEncerrarSessao(req, res, ctx);
+    return handlerMetodoNaoPermitido(res);
+  }
 
   try {
     await admissaoHttp.adquirir();
@@ -448,6 +636,19 @@ export async function handlerMcp(req, res, ctx) {
 
     const { responses, eraArray } = await processarCorpo(parsed);
 
+    // Sessão: se a resposta trouxe um `initialize`, emite o Mcp-Session-Id.
+    // Cliente que já mandou uma sessão válida mantém a dele; quem não mandou
+    // recebe uma nova. O header é ADITIVO — quem ignora não é afetado.
+    const headersExtra = { "access-control-allow-origin": "*" };
+    const houveInitialize = responses.some((r) => r && r.result && r.result.protocolVersion);
+    if (houveInitialize) {
+      const enviada = String(req.headers["mcp-session-id"] || "").trim();
+      headersExtra["mcp-session-id"] = enviada && tocarSessao(enviada) ? enviada : criarSessao();
+    } else {
+      const enviada = String(req.headers["mcp-session-id"] || "").trim();
+      if (enviada) tocarSessao(enviada);
+    }
+
     if (responses.length === 0) {
       res.writeHead(202, {
         "content-type": "application/json",
@@ -458,9 +659,7 @@ export async function handlerMcp(req, res, ctx) {
       return;
     }
 
-    responderJson(req, res, 200, responses.length === 1 && !eraArray ? responses[0] : responses, {
-      "access-control-allow-origin": "*",
-    });
+    responderJson(req, res, 200, responses.length === 1 && !eraArray ? responses[0] : responses, headersExtra);
   } finally {
     clearTimeout(watchdog);
     liberarUmaVez();
@@ -498,6 +697,10 @@ export function criarServidorHttp(ctx) {
     if (req.method === "OPTIONS") return handlerOptions(res);
     if (path === "/health" || path === "/") return handlerHealth(server, res);
     if (path !== "/mcp") return handlerNotFound(res);
+
+    // Rotas da spec do transporte HTTP do MCP. Continuam exigindo o token.
+    if (req.method === "GET") return handlerSse(req, res, ctx);
+    if (req.method === "DELETE") return handlerEncerrarSessao(req, res, ctx);
 
     return handlerMcp(req, res, ctx);
   });
