@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -21,8 +21,11 @@ sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 8 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. A `read_video` mora em `video.mjs`. |
+| `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
+| `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
+| `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
+| `snapshot.mjs` | `diff_page`: marca por URL (hash do conteúdo + texto normalizado) e diff por linhas (LCS com corte de prefixo/sufixo) do que mudou desde a última leitura. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, **compressão da resposta** (gzip/br conforme `Accept-Encoding`), handlers, `/health` e shutdown limpo. |
 | `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
@@ -52,6 +55,10 @@ sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 | `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript extraindo os dados embutidos no HTML (sem navegador) |
 | `read_video(url, lang?)`    | Lê um vídeo (YouTube, Vimeo, página com vídeo ou legenda .vtt/.srt): metadados publicados + capítulos (YouTube) + transcrição da legenda com timestamps, quando acessível |
 | `read_pdf(url)`             | Extrai o **texto** de um PDF público (sem OCR): reconstrói espaços e quebras pelos operadores de texto. PDF escaneado avisa que não há camada de texto |
+| `read_feed(url)`            | Lê um feed RSS/Atom/JSON Feed e lista os itens (título, link, data, autor, resumo)       |
+| `read_json(url, path?)`     | Lê uma resposta JSON pública, declara a forma e aceita `path` (ex.: `data.items`)        |
+| `find_on_page(url, query)`  | Busca um termo na página e devolve só os trechos com contexto (literal ou regex)         |
+| `diff_page(url)`            | Compara com a leitura anterior e devolve só o que mudou (linhas + e -)                  |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
@@ -63,7 +70,7 @@ sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda os arquivos de `tests/` (25 arquivos, 201 testes, ~80 s, sem rede na maioria):
+Roda os arquivos de `tests/` (29 arquivos, 237 testes, ~90 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -89,7 +96,11 @@ Roda os arquivos de `tests/` (25 arquivos, 201 testes, ~80 s, sem rede na maiori
 | `tests/parada-antecipada.test.mjs` | parada do parse no teto de saída: página gigante idêntica à conversão completa, páginas pequenas intactas, cercas pareadas no prefixo |
 | `tests/endurecimento.test.mjs` | transporte pinado com DNS quebrado, gzip/br, redirect/erro com corpo infinito, robots não toca host bloqueado, faixas reservadas, `%` malformado, teto do stdio |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
-| `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400 |
+| `tests/pdf.test.mjs` | `read_pdf`: extração de texto com espaços/quebras, contagem de páginas, não-PDF avisa sem erro cru, truncamento, cache |
+| `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
+| `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
+| `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
+| `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão) |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
 | `tests/golden.test.mjs` | `htmlToMarkdown` bate com os 20 golden files em `tests/golden/` (saída byte a byte) |
 | `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
@@ -111,7 +122,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 8 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 12 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 ```
 
@@ -166,7 +177,7 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 8 ferramentas do MCP
+│   ├── tools.mjs      <- as 12 ferramentas do MCP
 │   ├── video.mjs      <- read_video: metadados + transcricao de legendas
 │   ├── pdf.mjs        <- read_pdf: extracao de texto de PDF (zero deps)
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
@@ -262,7 +273,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.6.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.7.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -786,6 +797,54 @@ não consegue. Do mesmo jeito, PDF antigo com fonte de encoding próprio e sem m
 Need* (arXiv, 2,2 MB, 15 páginas) devolveu **39.284 caracteres** de texto legível,
 com espaços entre palavras e quebras de linha corretas.
 
+## read_feed e read_json (feed e API, sem virar HTML)
+
+O `read_page` é só-HTML por desenho — então um feed RSS e a resposta de uma API
+pública eram dois caminhos legítimos de leitura que simplesmente não existiam.
+Agora existem:
+
+```json
+{ "name": "read_feed", "arguments": { "url": "https://exemplo.com/feed.xml", "limit": 20 } }
+{ "name": "read_json", "arguments": { "url": "https://api.exemplo.com/dados.json", "path": "data.items" } }
+```
+
+- **`read_feed`** entende RSS 2.0/RDF, Atom e JSON Feed, com um parser de XML
+  próprio (CDATA e entidades tratadas — o texto sai, a marcação não). Devolve
+  título, link, data, autor e resumo de cada item. Não segue os links: para o
+  texto completo, `read_page`.
+- **`read_json`** pareia o corpo, declara a forma (objeto com N chaves / array de
+  N itens) e aceita `path` (`data.items`) para entregar só o ramo que interessa,
+  sem a IA ter que garimpar o envelope.
+
+Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devolvem
+"vazio" silencioso.
+
+## find_on_page e diff_page (ler menos para ler melhor)
+
+- **`find_on_page(url, query)`** busca um termo e devolve **só os trechos que
+  casam**, com número de linha e contexto. Aceita texto literal (inclusive com
+  caracteres de regex, sem surpresa) ou expressão regular com `regex: true`.
+  Achar um preço numa leitura de 25.000 caracteres deixou de custar os 25.000.
+- **`diff_page(url)`** relê a URL, compara com a marca da leitura anterior e
+  devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
+  comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é
+  um hash + o texto normalizado, com TTL — não páginas inteiras em memória.
+
+## Sessão e SSE (a spec do transporte HTTP)
+
+O transporte HTTP do MCP prevê `Mcp-Session-Id` desde a revisão `2025-03-26`.
+O servidor agora:
+
+- **emite** o `Mcp-Session-Id` na resposta do `initialize` (cliente que ignora
+  não é afetado — o header é aditivo);
+- **abre canal SSE** no `GET /mcp` para uma sessão ativa (com `ping` de
+  keep-alive) e **encerra** no `DELETE /mcp`;
+- **não exige** o header nas chamadas seguintes: exigir quebraria todo cliente
+  que já funciona hoje, e a spec permite servidor stateless. Quem manda o header
+  é reconhecido; quem não manda é atendido como sempre.
+
+O `/health` mostra `sessoes: N (canais M)`.
+
 ## Como as falhas aparecem na saída
 
 A saída é consumida por uma IA, então **uma falha nunca pode parecer "página
@@ -801,6 +860,10 @@ vazia"**. O contrato é:
 | `crawl_site` com falha **no meio** do crawl | continua e devolve o que leu, com `RESULTADO PARCIAL: N pagina(s) falharam — 2 com HTTP 404, 1 com timeout`, e cada página ruim marcada com `# Erro ao ler <url>` |
 | `read_multiple_pages` com falha em alguma URL | a chamada **não** é erro (o isolamento por URL é proposital); o resumo traz `N paginas OK` e cada falha vem marcada com `# Erro ao ler <url>` |
 | `discover_urls` sem sitemap e sem links internos | mensagem explicando isso (não é erro) |
+| `read_feed` numa URL que é HTML | **não** é erro: avisa que não é feed e, se a página anuncia um `<link rel="alternate" type="application/rss+xml">`, aponta a URL do feed |
+| `read_json` num corpo que não é JSON | **não** é erro: `JSON invalido` com o motivo, e aponta `read_page` quando o corpo é HTML |
+| `find_on_page` sem ocorrências | **não** é erro: avisa que não achou e diz quantas linhas/caracteres a página tem |
+| `diff_page` na primeira leitura de uma URL | **não** é erro: grava a marca e avisa que não havia ponto de comparação |
 
 ## Limitações conhecidas
 
