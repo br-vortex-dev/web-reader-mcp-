@@ -1,0 +1,81 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "quando": "2026-10-19T18:21:18.319Z",
+  "set": "hard",
+  "alvos": [
+    "https://example.com",
+    "https://httpbin.org/html",
+    "https://jsonplaceholder.typicode.com",
+    "https://www.wikipedia.org",
+    "https://news.ycombinator.com",
+    "https://github.com",
+    "https://stackoverflow.com",
+    "https://www.npmjs.com",
+    "https://developer.mozilla.org",
+    "https://nodejs.org",
+    "https://www.google.com",
+    "https://www.bbc.com",
+    "https://www.cnn.com",
+    "https://www.reddit.com",
+    "https://www.medium.com",
+    "https://www.linkedin.com",
+    "https://www.twitter.com",
+    "https://www.instagram.com",
+    "https://www.facebook.com",
+    "https://www.apple.com"
+  ],
+  "rajada": [],
+  "volume": {
+    "modo": "read-cache",
+    "conc": 64,
+    "enviados": 3000,
+    "ok": 3000,
+    "reqPorSeg": 204.51,
+    "latP50": 248,
+    "latP95": 384,
+    "latP99": 2272,
+    "latMax": 2372,
+    "ms": 14669,
+    "classes": {
+      "ok": 3000
+    },
+    "classesResumo": "ok=3000",
+    "paginasOK": 0,
+    "paginasTotal": 0,
+    "mbRecebidos": 0.9,
+    "travaram": 0,
+    "healthAntes": {
+      "rssMB": "81",
+      "cache": "12",
+      "reqRecusadas": "0",
+      "dlRecusados": "0",
+      "conexoes": "1",
+      "coalescidas": "0",
+      "revalidacoes": "0",
+      "conversoes": "36",
+      "raw": "web-reader-mcp v1.7.0 OK | cache: 12 entradas, 2770577 bytes / 33554432 bytes (max 100 entradas, ttl 8 min) | requisicoes: 0 ativas, 0 na fila (max 128/4096, recusadas 0) | downloads: 0 ativos, 0 na fila (max 128/100, recusados 0) | por host: 0 host(s), 0 ativos, 0 na fila (max 64/256) | memoria de download: 0 MB de 64 MB (pico 5 MB, 0 na fila, recusados 0) | conexoes: 1 | rss: 81 MB | coalescidas: 0 (em voo 0) | revalidacoes: 0 (falhas 0) | condicional: 0 (304 0) | conversoes: 36 (reaproveitadas 0) | video: 0 (reaproveitadas 0) | sessoes: 0 (canais 0)"
+    },
+    "healthDepois": {
+      "rssMB": "84",
+      "cache": "12",
+      "reqRecusadas": "0",
+      "dlRecusados": "0",
+      "conexoes": "2",
+      "coalescidas": "0",
+      "revalidacoes": "0",
+      "conversoes": "36",
+      "raw": "web-reader-mcp v1.7.0 OK | cache: 12 entradas, 2770577 bytes / 33554432 bytes (max 100 entradas, ttl 8 min) | requisicoes: 0 ativas, 0 na fila (max 128/4096, recusadas 0) | downloads: 0 ativos, 0 na fila (max 128/100, recusados 0) | por host: 0 host(s), 0 ativos, 0 na fila (max 64/256) | memoria de download: 0 MB de 64 MB (pico 5 MB, 0 na fila, recusados 0) | conexoes: 2 | rss: 84 MB | coalescidas: 0 (em voo 0) | revalidacoes: 0 (falhas 0) | condicional: 0 (304 0) | conversoes: 36 (reaproveitadas 6000) | video: 0 (reaproveitadas 0) | sessoes: 0 (canais 0)"
+    }
+  },
+  "healthFinal": {
+    "rssMB": "84",
+    "cache": "12",
+    "reqRecusadas": "0",
+    "dlRecusados": "0",
+    "conexoes": "2",
+    "coalescidas": "0",
+    "revalidacoes": "0",
+    "conversoes": "36",
+    "raw": "web-reader-mcp v1.7.0 OK | cache: 12 entradas, 2770577 bytes / 33554432 bytes (max 100 entradas, ttl 8 min) | requisicoes: 0 ativas, 0 na fila (max 128/4096, recusadas 0) | downloads: 0 ativos, 0 na fila (max 128/100, recusados 0) | por host: 0 host(s), 0 ativos, 0 na fila (max 64/256) | memoria de download: 0 MB de 64 MB (pico 5 MB, 0 na fila, recusados 0) | conexoes: 2 | rss: 84 MB | coalescidas: 0 (em voo 0) | revalidacoes: 0 (falhas 0) | condicional: 0 (304 0) | conversoes: 36 (reaproveitadas 6000) | video: 0 (reaproveitadas 0) | sessoes: 0 (canais 0)"
+  }
+}

@@ -20,6 +20,8 @@ import {
   MAX_WAIT_MS,
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
+  BROTLI_QUALITY,
+  COMPRESSAO_CACHE_ENTRIES,
   clampEnv,
 } from "./config.mjs";
 import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes, revalidacaoCondicional } from "./fetch.mjs";
@@ -51,12 +53,68 @@ export function escolherCodificacao(acceptEncoding) {
   return null;
 }
 
+// Cache da compressão: a chave é o sha256 dos bytes do corpo + a codificação.
+// O caso que paga é a resposta CONSTANTE reenviada (tools/list, initialize,
+// resources/list): o JSON é sempre o mesmo, então comprimir de novo é trabalho
+// jogado fora. Um corpo que muda não colide — o hash muda junto. LRU simples,
+// inserção em ordem de Map (o primeiro é o mais antigo).
+const cacheCompressao = new Map();
+let acertosCompressao = 0;
+let errosCompressao = 0;
+
+/** Estatísticas do cache de compressão (para o /health). */
+export function estatisticasCompressao() {
+  return { entradas: cacheCompressao.size, acertos: acertosCompressao, ausencias: errosCompressao };
+}
+
+/** Limpa o cache de compressão (testes). */
+export function limparCacheCompressao() {
+  cacheCompressao.clear();
+  acertosCompressao = 0;
+  errosCompressao = 0;
+}
+
 /** Comprime um Buffer na codificação dada (devolve o próprio Buffer se nula). */
 export function comprimirCorpo(buffer, codificacao) {
-  if (codificacao === "br") return zlib.brotliCompressSync(buffer);
+  if (codificacao === "br") {
+    return zlib.brotliCompressSync(buffer, {
+      params: { [zlib.constants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY },
+    });
+  }
   if (codificacao === "gzip") return zlib.gzipSync(buffer);
   if (codificacao === "deflate") return zlib.deflateSync(buffer);
   return buffer;
+}
+
+/**
+ * Comprime com cache. Só vale a pena quando o corpo se repete; a checagem do
+ * hash custa ~microssegundos em 6 KB, muito abaixo dos milissegundos que a
+ * compressão custa. Sem cache (COMPRESSAO_CACHE_ENTRIES = 0), cai direto.
+ */
+function comprimirComCache(buffer, codificacao) {
+  if (codificacao === null) return buffer;
+  if (COMPRESSAO_CACHE_ENTRIES === 0) return comprimirCorpo(buffer, codificacao);
+  const chave = createHash("sha256").update(buffer).digest("base64") + ":" + codificacao;
+  const guardado = cacheCompressao.get(chave);
+  if (guardado) {
+    acertosCompressao++;
+    // Move para o fim (mais recente) sem recriar o valor.
+    cacheCompressao.delete(chave);
+    cacheCompressao.set(chave, guardado);
+    return guardado;
+  }
+  errosCompressao++;
+  const comprimido = comprimirCorpo(buffer, codificacao);
+  cacheCompressao.set(chave, comprimido);
+  if (cacheCompressao.size > COMPRESSAO_CACHE_ENTRIES) {
+    cacheCompressao.delete(cacheCompressao.keys().next().value);
+  }
+  return comprimido;
+}
+
+/** ETag forte (sha256 do corpo), para revalidação condicional. */
+function etagDe(buffer) {
+  return '"' + createHash("sha256").update(buffer).digest("hex").slice(0, 32) + '"';
 }
 
 /**
@@ -66,16 +124,28 @@ export function comprimirCorpo(buffer, codificacao) {
  */
 export function responderJson(req, res, status, payload, extraHeaders = {}) {
   const corpo = Buffer.from(JSON.stringify(payload), "utf8");
+  const headers = { "content-type": "application/json", vary: "accept-encoding", ...extraHeaders };
+
+  // ETag + 304: as respostas constantes (tools/list, initialize) são as mesmas
+  // a cada chamada. Com o ETag, o cliente que revalida recebe 304 e não baixa
+  // corpo nenhum — economiza a volta inteira, não só a compressão. O ETag sai
+  // no corpo CRU (independe da codificação escolhida).
+  const etag = etagDe(corpo);
+  headers.etag = etag;
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+
   const codificacao =
     corpo.length >= COMPRESSAO_MIN_BYTES ? escolherCodificacao(req.headers["accept-encoding"]) : null;
-  const headers = { "content-type": "application/json", vary: "accept-encoding", ...extraHeaders };
   if (!codificacao) {
     res.writeHead(status, headers);
     return res.end(corpo);
   }
   headers["content-encoding"] = codificacao;
   res.writeHead(status, headers);
-  res.end(comprimirCorpo(corpo, codificacao));
+  res.end(comprimirComCache(corpo, codificacao));
 }
 
 /** Referência ao handleMessage do roteador (definida por registrarHandleMessage). */

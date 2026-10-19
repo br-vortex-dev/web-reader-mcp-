@@ -1,0 +1,68 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "tools",
+  "quando": "2026-10-19T18:15:08.054Z",
+  "resultados": [
+    {
+      "conc": 1024,
+      "enviados": 1024,
+      "ok": 549,
+      "reqPorSeg": 15.85,
+      "uteisPorSeg": 8.5,
+      "latP50": 29417,
+      "latP95": 61218,
+      "latP99": 61504,
+      "latMax": 61843,
+      "http": {
+        "HTTP 502": 73
+      },
+      "erros": {
+        "rede: ECONNRESET": 346,
+        "rede: ECONNABORTED": 56
+      },
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "230",
+        "cache": "60"
+      },
+      "healthDepois": {
+        "rss": "?",
+        "cache": "?",
+        "reqRecusadas": "?",
+        "dlRecusados": "?"
+      }
+    },
+    {
+      "conc": 2048,
+      "enviados": 2048,
+      "ok": 364,
+      "reqPorSeg": 34.94,
+      "uteisPorSeg": 6.21,
+      "latP50": 42640,
+      "latP95": 57068,
+      "latP99": 57207,
+      "latMax": 57679,
+      "http": {},
+      "erros": {
+        "rede: ECONNRESET": 412,
+        "rede: ECONNABORTED": 1107,
+        "rede: ETIMEDOUT": 165
+      },
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "?",
+        "cache": "?"
+      },
+      "healthDepois": {
+        "rss": "66",
+        "cache": "0",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

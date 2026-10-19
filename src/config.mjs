@@ -4,7 +4,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.7.0";
+export const SERVER_VERSION = "1.7.1";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -94,6 +94,20 @@ export const STDIO_MAX_LINE_BYTES = clampEnv(
   64 * 1024,
   64 * 1024 * 1024
 );
+
+// Qualidade do brotli na compressão da resposta do /mcp.
+// O padrão do Node é 11 — o mais caro que existe e SÍNCRONO (segura o event
+// loop). Medido neste projeto, num corpo do tamanho de um tools/list (6,5 KB):
+// q11 = 17,3 ms por requisição; q4 = 0,68 ms; gzip = 0,59 ms. A saída em q11
+// tem 131 bytes e em q4 tem 145 — 10 bytes a mais por 25x menos CPU. É o
+// caminho crítico de toda resposta, então 4 é o padrão; quem quiser o byte a
+// menos sobe para 11 por env.
+export const BROTLI_QUALITY = clampEnvZero(process.env.BROTLI_QUALITY, 4, 0, 11);
+
+// Teto do cache de compressão (entradas). Guarda a versão comprimida de um
+// corpo que se repete — a chave é o sha256 do corpo, então só acerta quando o
+// byte a byte é idêntico (ex.: o mesmo tools/list reenviado). 0 desliga.
+export const COMPRESSAO_CACHE_ENTRIES = clampEnvZero(process.env.COMPRESSAO_CACHE_ENTRIES, 64, 0, 4096);
 
 // Cache em memória (LRU + TTL).
 export const CACHE_TTL_MS = Math.max(500, Math.floor(Number(process.env.CACHE_TTL_MS) || 7.5 * 60 * 1000));

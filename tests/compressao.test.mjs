@@ -31,7 +31,7 @@ after(async () => {
 });
 
 // POST cru no /mcp: devolve status, headers e o corpo CRU (sem descomprimir).
-function postCru(corpo, { acceptEncoding } = {}) {
+function postCru(corpo, { acceptEncoding, ifNoneMatch } = {}) {
   const { hostname, port } = new URL(mcp.base);
   return new Promise((resolve, reject) => {
     const headers = {
@@ -40,6 +40,7 @@ function postCru(corpo, { acceptEncoding } = {}) {
       "content-length": Buffer.byteLength(corpo),
     };
     if (acceptEncoding) headers["accept-encoding"] = acceptEncoding;
+    if (ifNoneMatch) headers["if-none-match"] = ifNoneMatch;
     const req = http.request({ hostname, port, method: "POST", path: "/mcp", headers }, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
@@ -144,4 +145,62 @@ test("a leitura grande realmente ganha bytes na volta (prova de ponta a ponta)",
   const reducao = 1 - comBr.bruto.length / semCompressao.bruto.length;
   // Num payload de 20 KB de texto, comprimir tem de cortar bem mais que 50%.
   assert.ok(reducao > 0.5, `reducao esperada > 50%, veio ${(reducao * 100).toFixed(1)}%`);
+});
+
+// -------------------------------------------------------------------------
+// ETag / 304 e a compressao com brotli em qualidade menor.
+//
+// O que se quer garantir:
+// - toda resposta do /mcp leva ETag;
+// - repetir a chamada com If-None-Match identico devolve 304 SEM corpo (a
+//   resposta constante deixa de trafegar inteira);
+// - um ETag diferente (corpo diferente) NAO devolve 304;
+// - a qualidade do brotli e configuravel e a saida continua descomprimindo
+//   no mesmo JSON (o corte de CPU nao muda o conteudo).
+// -------------------------------------------------------------------------
+
+test("a resposta do /mcp leva ETag", async () => {
+  const corpo = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const r = await postCru(corpo);
+  assert.equal(r.status, 200);
+  assert.match(r.headers["etag"], /^"[0-9a-f]{32}"$/, "ETag deve ser um sha256 curto entre aspas");
+});
+
+test("ETag identico: 304 sem corpo (resposta constante nao trafega de novo)", async () => {
+  const corpo = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const primeira = await postCru(corpo);
+  const etag = primeira.headers["etag"];
+  assert.ok(etag, "a primeira resposta tem de trazer ETag");
+
+  const segunda = await postCru(corpo, { ifNoneMatch: etag });
+  assert.equal(segunda.status, 304);
+  assert.equal(segunda.bruto.length, 0, "304 nao pode trazer corpo");
+  assert.equal(segunda.headers["etag"], etag);
+});
+
+test("ETag que nao bate: resposta completa, sem 304", async () => {
+  const corpo = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const r = await postCru(corpo, { ifNoneMatch: '"nao-e-o-meu-etag"' });
+  assert.equal(r.status, 200);
+  assert.ok(r.bruto.length > 0);
+});
+
+test("respostas diferentes tem ETags diferentes", async () => {
+  const a = await postCru(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+  const b = await postCru(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
+  assert.notEqual(a.headers["etag"], b.headers["etag"], "o id muda a resposta, logo o ETag");
+});
+
+test("brotli numa qualidade menor descomprime no MESMO JSON", async () => {
+  const chamada = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "read_page", arguments: { url: `${fixture.url}/page/qqual?kb=20` } },
+  });
+  const semCompressao = await postCru(chamada);
+  const comBr = await postCru(chamada, { acceptEncoding: "br" });
+  assert.equal(comBr.headers["content-encoding"], "br");
+  const descomprimido = descomprimir(comBr.bruto, "br").toString("utf8");
+  assert.equal(descomprimido, semCompressao.bruto.toString("utf8"));
 });

@@ -453,6 +453,8 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `HOST_CHECK_TTL_MS` | `300000` (5 min) | Validade da validação de host (SSRF) por nome. |
 | `AGENT_CACHE_MAX` | `256` | Teto de Agents HTTP/HTTPS mantidos por IP (keep-alive). |
 | `MAX_INFLIGHT_REQUESTS` | `128` | Quantas requisições são processadas ao mesmo tempo. Calibrado pelo **joelho da curva de capacidade** (~64 no hardware de referência). **Aumentar não aumenta a vazão** — só a fila. |
+| `BROTLI_QUALITY` | `4` | Qualidade do brotli na resposta do `/mcp`. O padrão do Node é **11**, o mais caro e **síncrono** (segura o event loop): medido num corpo de `tools/list`, **17,3 ms** por requisição em q11 contra **0,68 ms** em q4 — 25x menos CPU por 10 bytes a mais na saída. Suba para `11` só se quiser o byte a menos. |
+| `COMPRESSAO_CACHE_ENTRIES` | `64` | Teto do cache de compressão: guarda a versão comprimida de um corpo que se repete (a chave é o sha256 do corpo). `tools/list` e `initialize` são constantes, então a partir da segunda chamada a compressão é servida pronta (**0,12 ms** contra 16,4 ms). `0` desliga. |
 | `MAX_WAITING_REQUESTS` | `4096` | Quantas esperam por uma vaga. `0` = recusa na hora. |
 | `MAX_WAIT_MS` | `15000` (15 s) | Teto de espera por uma vaga; depois disso, **503 com `Retry-After`**. Deve ser menor que o timeout do seu cliente MCP. |
 | `OUTBOUND_MAX_CONCURRENCY` | `128` | Downloads simultâneos (limita sockets/tarefas). |
@@ -601,7 +603,16 @@ e baixá-lo duas vezes quando nada mudou é desperdício puro.
   comprimidas: não vale o custo. Cliente que não declara `Accept-Encoding`
   recebe **exatamente** o JSON de antes (compatível byte a byte). Num payload de
   20 KB de texto de web, a redução medida passa de 50% (brotli costuma ir além —
-  `tests/compressao.test.mjs` prova de ponta a ponta).
+  `tests/compressao.test.mjs` prova de ponta a ponta). A compressão roda em
+  **`BROTLI_QUALITY=4`** (não no 11 padrão do Node, que é síncrono e caro) e
+  tem um **cache por conteúdo**: `tools/list` e `initialize` são respostas
+  constantes, então a partir da segunda chamada o corpo comprimido é servido
+  pronto — **0,12 ms contra 16,4 ms** de comprimir do zero a cada vez.
+
+- **`ETag`/`304` nas respostas do `/mcp`.** Toda resposta leva um `ETag`
+  (sha256 do corpo). O cliente que revalida com `If-None-Match` idêntico recebe
+  **304 sem corpo** — economiza a volta inteira, não só a compressão. É o que
+  faz a resposta constante (`tools/list`) parar de trafegar a cada chamada.
 
 - **Revalidação condicional (`If-None-Match` / `If-Modified-Since`).** Ao baixar
   uma página, o servidor guarda o `ETag`/`Last-Modified`. Quando a entrada vence

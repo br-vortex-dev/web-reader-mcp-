@@ -1,0 +1,91 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "read-pesado",
+  "quando": "2026-10-19T18:11:25.034Z",
+  "resultados": [
+    {
+      "conc": 16,
+      "enviados": 38,
+      "ok": 38,
+      "reqPorSeg": 3.39,
+      "uteisPorSeg": 3.39,
+      "latP50": 3762,
+      "latP95": 8521,
+      "latP99": 8617,
+      "latMax": 8617,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "70",
+        "cache": "1"
+      },
+      "healthDepois": {
+        "rss": "125",
+        "cache": "38",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 64,
+      "enviados": 126,
+      "ok": 123,
+      "reqPorSeg": 6.31,
+      "uteisPorSeg": 6.15,
+      "latP50": 6545,
+      "latP95": 15505,
+      "latP99": 16709,
+      "latMax": 17095,
+      "http": {},
+      "erros": {
+        "isError: Erro: Timeout após Nms ao acessar https://gN.globo.com/?lzc=N": 3
+      },
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "125",
+        "cache": "38"
+      },
+      "healthDepois": {
+        "rss": "208",
+        "cache": "50",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 128,
+      "enviados": 176,
+      "ok": 161,
+      "reqPorSeg": 6.22,
+      "uteisPorSeg": 5.69,
+      "latP50": 13179,
+      "latP95": 24300,
+      "latP99": 25886,
+      "latMax": 26272,
+      "http": {
+        "HTTP 502": 1
+      },
+      "erros": {
+        "isError: Erro: Timeout após Nms ao acessar https://gN.globo.com/?lzc=N": 14
+      },
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "208",
+        "cache": "50"
+      },
+      "healthDepois": {
+        "rss": "239",
+        "cache": "53",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

@@ -56,7 +56,7 @@ try {
   await res.text();
   const ok = res.status === 204
     && res.headers.get("access-control-allow-origin") === "*"
-    && res.headers.get("access-control-allow-methods") === "POST, GET, OPTIONS"
+    && res.headers.get("access-control-allow-methods") === "POST, GET, DELETE, OPTIONS"
     && res.headers.get("access-control-allow-headers") === "content-type, mcp-session-id, last-event-id, authorization";
   check(ok, "OPTIONS /mcp devolve 204 com CORS completo", `status ${res.status}`);
 } catch (e) { check(false, "OPTIONS /mcp devolve 204 com CORS completo", e.message); }
