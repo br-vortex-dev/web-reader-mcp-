@@ -62,58 +62,201 @@ const NAMED_ENTITIES = {
   lrm: "\u200e", rlm: "\u200f", oplus: "\u2295", otimes: "\u2297",
 };
 
-/**
- * Decodifica entidades HTML (&amp;, &lt;, &#123;, etc.) para texto puro.
- */
-export function decodeEntities(input) {
-  if (!input || input.indexOf("&") === -1) return input;
-  return input.replace(
-    /&(#[Xx][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);/g,
-    (match, body) => {
-      if (body[0] === "#") {
-        const isHex = body[1] === "x" || body[1] === "X";
-        const code = parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
-        if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match;
-        try {
-          return String.fromCodePoint(code);
-        } catch {
-          return match;
-        }
-      }
-      const replacement = NAMED_ENTITIES[body];
-      return replacement === undefined ? match : replacement;
-    }
+/** Um caractere de espaço no mesmo sentido que `\s` do JS. */
+function ehEspaco(c) {
+  return (
+    c === 32 ||
+    c === 9 ||
+    c === 10 ||
+    c === 13 ||
+    c === 12 ||
+    c === 11 ||
+    c === 0xa0 ||
+    c === 0xfeff ||
+    c === 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) ||
+    c === 0x2028 ||
+    c === 0x2029 ||
+    c === 0x202f ||
+    c === 0x205f ||
+    c === 0x3000
   );
 }
 
 /**
+ * Decodifica o corpo de uma entidade (o que fica entre `&` e `;`).
+ * Devolve `null` quando o corpo não é uma entidade conhecida.
+ *
+ * Substitui o `String.replace` com callback do caminho antigo: o perfil
+ * apontava 16% do CPU do parser aqui, entre a regex e a closure.
+ */
+function decodificarCorpo(body) {
+  const n = body.length;
+  const c0 = body.charCodeAt(0);
+  if (c0 === 35) {
+    // "#..." — referência numérica (decimal ou hexadecimal).
+    if (n < 2) return null;
+    const c1 = body.charCodeAt(1);
+    const isHex = c1 === 120 || c1 === 88; // x | X
+    let k = isHex ? 2 : 1;
+    if (k >= n) return null;
+    for (; k < n; k++) {
+      const c = body.charCodeAt(k);
+      const okHex =
+        (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+      if (isHex ? !okHex : !(c >= 48 && c <= 57)) return null;
+    }
+    const code = parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
+    if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return null;
+    try {
+      return String.fromCodePoint(code);
+    } catch {
+      return null;
+    }
+  }
+  // Nomeada: [A-Za-z][A-Za-z0-9]*
+  if (!((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122))) return null;
+  for (let k = 1; k < n; k++) {
+    const c = body.charCodeAt(k);
+    if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57))) {
+      return null;
+    }
+  }
+  const replacement = NAMED_ENTITIES[body];
+  return replacement === undefined ? null : replacement;
+}
+
+/** Teto de caracteres entre `&` e `;`: cobre toda entidade nomeada do HTML. */
+const MAX_CORPO_ENTIDADE = 64;
+
+/**
+ * Decodifica entidades HTML (&amp;, &lt;, &#123;, etc.) para texto puro.
+ *
+ * Varredura manual com `indexOf`: nada é alocado nem concatenado enquanto
+ * não aparece a primeira entidade — o caso comum (texto sem `&`) sai com
+ * zero custo e o caso com entidade monta a saída uma vez.
+ */
+export function decodeEntities(input) {
+  if (!input || input.indexOf("&") === -1) return input;
+  const len = input.length;
+  let partes = null; // só aloca ao primeiro "&" válido
+  let ultimo = 0; // início do trecho ainda não copiado
+  let i = 0;
+  while (i < len) {
+    const amp = input.indexOf("&", i);
+    if (amp === -1) break;
+    const semi = input.indexOf(";", amp + 1);
+    const corpoLen = semi === -1 ? -1 : semi - amp - 1;
+    if (corpoLen < 1 || corpoLen > MAX_CORPO_ENTIDADE) {
+      i = amp + 1; // não é entidade: segue depois do "&"
+      continue;
+    }
+    const rep = decodificarCorpo(input.slice(amp + 1, semi));
+    if (rep === null) {
+      i = amp + 1; // entidade desconhecida: fica como está no texto
+      continue;
+    }
+    if (partes === null) partes = [];
+    partes.push(input.slice(ultimo, amp), rep);
+    ultimo = semi + 1;
+    i = semi + 1;
+  }
+  if (partes === null) return input;
+  partes.push(input.slice(ultimo));
+  return partes.join("");
+}
+
+/**
  * Encontra o ">" que fecha uma tag, respeitando atributos entre aspas.
+ *
+ * Laço linear com `charCodeAt`: a versão com `indexOf` de aspas custava
+ * O(n) por tag quando não havia aspa adiante (varria o documento até o
+ * fim), o que na prática virava O(n²) numa página de 1,4 MB.
  */
 function findTagEnd(html, start) {
-  let quote = null;
-  for (let j = start + 1; j < html.length; j++) {
-    const c = html[j];
-    if (quote) {
-      if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") {
+  const len = html.length;
+  let quote = 0; // 0 = fora de aspas; 34 = `"`; 39 = `'`
+  for (let j = start + 1; j < len; j++) {
+    const c = html.charCodeAt(j);
+    if (quote !== 0) {
+      if (c === quote) quote = 0;
+    } else if (c === 34 || c === 39) {
       quote = c;
-    } else if (c === ">") {
+    } else if (c === 62) {
       return j;
     }
   }
   return -1;
 }
 
+function iniciaNomeAtributo(c) {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 58; // A-Z a-z _ :
+}
+
+function continuaNomeAtributo(c) {
+  return (
+    (c >= 65 && c <= 90) ||
+    (c >= 97 && c <= 122) ||
+    (c >= 48 && c <= 57) ||
+    c === 45 ||
+    c === 95 ||
+    c === 58 ||
+    c === 46
+  ); // A-Z a-z 0-9 - _ : .
+}
+
 /**
  * Extrai atributos de uma tag HTML.
+ *
+ * Scanner manual no lugar do `RegExp.exec` em laço: o perfil mostrava 12%
+ * do CPU do parser aqui (a regex de atributo é das mais caras). A semântica
+ * é a mesma: nome `[A-Za-z_:][-A-Za-z0-9_:.]*`, valor opcional entre aspas
+ * duplas, simples ou sem aspas, e o último atributo repetido vence.
  */
 function parseAttrs(source) {
   const attrs = {};
-  const re = /([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]*)))?/g;
-  let m;
-  while ((m = re.exec(source)) !== null) {
-    if (!m[1]) continue;
-    attrs[m[1].toLowerCase()] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? "");
+  const len = source.length;
+  let i = 0;
+  while (i < len) {
+    // Pula o que não inicia nome (espaços, "/", "=", aspas...).
+    while (i < len && !iniciaNomeAtributo(source.charCodeAt(i))) i++;
+    if (i >= len) break;
+    const inicio = i;
+    i++;
+    while (i < len && continuaNomeAtributo(source.charCodeAt(i))) i++;
+    const nome = source.slice(inicio, i);
+
+    // Valor: `\s*=\s*` é opcional.
+    let j = i;
+    while (j < len && ehEspaco(source.charCodeAt(j))) j++;
+    let valor = "";
+    if (j < len && source.charCodeAt(j) === 61) {
+      j++;
+      while (j < len && ehEspaco(source.charCodeAt(j))) j++;
+      const c = j < len ? source.charCodeAt(j) : -1;
+      if (c === 34 || c === 39) {
+        const fim = source.indexOf(source[j], j + 1);
+        if (fim === -1) {
+          // Aspas sem fecho: nada é consumido além do nome, como na regex.
+          i = j;
+        } else {
+          valor = source.slice(j + 1, fim);
+          i = fim + 1;
+        }
+      } else {
+        let k = j;
+        while (k < len) {
+          const cc = source.charCodeAt(k);
+          if (ehEspaco(cc) || cc === 34 || cc === 39 || cc === 61 || cc === 60 || cc === 62 || cc === 96) {
+            break;
+          }
+          k++;
+        }
+        valor = source.slice(j, k);
+        i = k;
+      }
+    }
+    attrs[nome.toLowerCase()] = valor.indexOf("&") === -1 ? valor : decodeEntities(valor);
   }
   return attrs;
 }
@@ -137,11 +280,13 @@ function* tokenize(html) {
       continue;
     }
     const nextChar = html[lt + 1];
+    const nextCode = lt + 1 < html.length ? html.charCodeAt(lt + 1) : -1;
     const startsTag =
       nextChar === "/" ||
       nextChar === "!" ||
       nextChar === "?" ||
-      (nextChar !== undefined && /[A-Za-z]/.test(nextChar));
+      (nextCode >= 65 && nextCode <= 90) ||
+      (nextCode >= 97 && nextCode <= 122);
     if (!startsTag) {
       yield { type: "text", value: "<" };
       i = lt + 1;
@@ -164,19 +309,51 @@ function* tokenize(html) {
       yield { type: "text", value: html.slice(lt) };
       break;
     }
-    const raw = html.slice(lt + 1, gt).trim();
+    let rawInicio = lt + 1;
+    let rawFim = gt;
+    while (rawInicio < rawFim && ehEspaco(html.charCodeAt(rawInicio))) rawInicio++;
+    while (rawFim > rawInicio && ehEspaco(html.charCodeAt(rawFim - 1))) rawFim--;
+    const raw = html.slice(rawInicio, rawFim);
     i = gt + 1;
     if (!raw) continue;
     const closing = raw[0] === "/";
-    const body = closing ? raw.slice(1).trim() : raw;
-    const nameMatch = body.match(/^([A-Za-z][A-Za-z0-9:_-]*)/);
-    if (!nameMatch) continue;
-    const tag = nameMatch[1].toLowerCase();
-    const selfClosing = !closing && (VOID_TAGS.has(tag) || /\/$/.test(body));
+    // Corpo sem os espaços das pontas (o "/" final já é tratado depois).
+    let bIni = closing ? 1 : 0;
+    while (bIni < raw.length && ehEspaco(raw.charCodeAt(bIni))) bIni++;
+    let bFim = raw.length;
+    while (bFim > bIni && ehEspaco(raw.charCodeAt(bFim - 1))) bFim--;
+
+    // Nome da tag: [A-Za-z][A-Za-z0-9:_-]* — scanner no lugar de `match`.
+    if (bIni >= bFim) continue;
+    const cNome = raw.charCodeAt(bIni);
+    if (!((cNome >= 65 && cNome <= 90) || (cNome >= 97 && cNome <= 122))) continue;
+    let k = bIni + 1;
+    while (k < bFim) {
+      const c = raw.charCodeAt(k);
+      if (
+        !((c >= 65 && c <= 90) ||
+          (c >= 97 && c <= 122) ||
+          (c >= 48 && c <= 57) ||
+          c === 58 ||
+          c === 95 ||
+          c === 45)
+      ) {
+        break;
+      }
+      k++;
+    }
+    const tag = raw.slice(bIni, k).toLowerCase();
+    // `selfClosing` olha o corpo inteiro: barra final ou tag void.
+    const selfClosing = !closing && (VOID_TAGS.has(tag) || raw.charCodeAt(bFim - 1) === 47);
     if (closing) {
       yield { type: "close", tag };
     } else {
-      yield { type: "open", tag, selfClosing, attrs: parseAttrs(body.slice(nameMatch[0].length)) };
+      yield {
+        type: "open",
+        tag,
+        selfClosing,
+        attrs: parseAttrs(k < bFim ? raw.slice(k, bFim) : ""),
+      };
     }
   }
 }
