@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -62,7 +62,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda os arquivos de `tests/` (25 arquivos, 200 testes, ~80 s, sem rede na maioria):
+Roda os arquivos de `tests/` (25 arquivos, 201 testes, ~80 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -351,7 +351,7 @@ interno**, que não faz parte da web:
   (nesses casos o IPv4 embutido é validado, e não o IPv6 inteiro).
 
 Redirects continuam funcionando normalmente (`http→https`, `www`, encurtadores), até
-**3 saltos**, com o destino de **cada salto** revalidado. A checagem roda no fetch de
+**5 saltos**, com o destino de **cada salto** revalidado. A checagem roda no fetch de
 baixo nível, então vale para todas as ferramentas: `read_page`, `extract_links`,
 `read_multiple_pages`, `discover_urls`, `crawl_site`, `read_dynamic_page` e para a
 extração automática de dados embutidos (que busca "APIs internas" citadas na página).
