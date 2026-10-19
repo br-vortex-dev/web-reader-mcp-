@@ -27,6 +27,7 @@ import {
 import { htmlToMarkdown, extractMeta, extractLinks, hostOf } from "./html-parser.mjs";
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
+import { toolReadFeed, toolReadJson } from "./feeds.mjs";
 import {
   ParametroInvalidoError,
   LimiteExcedidoError,
@@ -876,6 +877,10 @@ export async function callTool(name, args) {
       return await toolReadVideo(args || {});
     case "read_pdf":
       return await toolReadPdf(args || {});
+    case "read_feed":
+      return await toolReadFeed(args || {});
+    case "read_json":
+      return await toolReadJson(args || {});
     default:
       throw new FerramentaDesconhecidaError(name);
   }

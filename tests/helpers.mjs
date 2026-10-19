@@ -755,6 +755,84 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // ---- fixtures do read_feed ----
+    if (path === "/feed/rss.xml") {
+      res.writeHead(200, { "content-type": "application/rss+xml; charset=utf-8" });
+      res.end(
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<rss version="2.0"><channel>' +
+          "<title>Blog de Teste</title>" +
+          "<description>Um feed para os testes</description>" +
+          "<item>" +
+          "<title>Primeiro post</title>" +
+          "<link>https://exemplo.com/primeiro</link>" +
+          '<pubDate>Tue, 14 Oct 2026 12:00:00 GMT</pubDate>' +
+          "<author>autor@exemplo.com (Fulano)</author>" +
+          "<description>Resumo do primeiro post.</description>" +
+          "</item>" +
+          "<item>" +
+          "<title><![CDATA[Segundo <b>post</b>]]></title>" +
+          "<link>https://exemplo.com/segundo</link>" +
+          "<description><![CDATA[<p>Resumo com <b>HTML</b> dentro.</p>]]></description>" +
+          "</item>" +
+          "</channel></rss>"
+      );
+      return;
+    }
+    if (path === "/feed/atom.xml") {
+      res.writeHead(200, { "content-type": "application/atom+xml; charset=utf-8" });
+      res.end(
+        '<?xml version="1.0" encoding="utf-8"?>\n' +
+          '<feed xmlns="http://www.w3.org/2005/Atom">' +
+          "<title>Atom de Teste</title>" +
+          "<subtitle>Feed Atom para os testes</subtitle>" +
+          "<entry>" +
+          "<title>Entrada um</title>" +
+          '<link rel="alternate" href="https://exemplo.com/um"/>' +
+          "<published>2026-10-14T12:00:00Z</published>" +
+          "<author><name>Beltrano</name></author>" +
+          "<summary>Resumo da entrada um.</summary>" +
+          "</entry>" +
+          "</feed>"
+      );
+      return;
+    }
+    if (path === "/feed/jsonfeed.json") {
+      res.writeHead(200, { "content-type": "application/feed+json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          version: "https://jsonfeed.org/version/1.1",
+          title: "JSON Feed de Teste",
+          items: [
+            { id: "1", title: "Item do JSON Feed", url: "https://exemplo.com/j1", content_text: "Resumo do item." },
+          ],
+        })
+      );
+      return;
+    }
+    // Pagina HTML que ANUNCIA um feed (para o caminho "nao e feed, mas aponta um").
+    if (path === "/feed/pagina.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Pagina com feed</title>" +
+          '<link rel="alternate" type="application/rss+xml" href="https://exemplo.com/feed.xml">' +
+          "</head><body><h1>Blog</h1></body></html>"
+      );
+      return;
+    }
+
+    // ---- fixtures do read_json ----
+    if (path === "/json/simples.json") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ nome: "Teste", total: 2, data: { items: [{ id: 1 }, { id: 2 }] } }));
+      return;
+    }
+    if (path === "/json/invalido.json") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end("{ isto nao e json ");
+      return;
+    }
+
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(FIXTURE_HTML);
   });

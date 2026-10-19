@@ -201,5 +201,61 @@
         "url"
       ]
     }
+  },
+  {
+    "name": "read_feed",
+    "description": "Lê um feed RSS 2.0, RDF, Atom ou JSON Feed e devolve os itens em markdown: título, link, data, autor e resumo de cada um. Use para acompanhar blog, notícia, changelog ou releases sem varrer link por link. Não segue os links dos itens — para o texto completo, chame read_page.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL do feed (http/https), normalmente .xml, .rss, feed ou atom.xml"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Quantidade máxima de itens a listar (padrão 20, max 100)"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres da saída (padrão 8000, max 25000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "read_json",
+    "description": "Lê uma resposta JSON pública (API, endpoint .json) e devolve o JSON formatado, com a forma declarada (objeto/array e chaves). Aceita 'path' (ex.: 'data.items') para entregar só o ramo que interessa. Use quando a URL for de API em vez de usar read_page, que é só-HTML.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL completa (http/https) que devolve JSON"
+        },
+        "path": {
+          "type": "string",
+          "description": "Caminho dentro do JSON, separado por ponto (ex.: 'data.items'). Sem ele, devolve a raiz"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres da saída (padrão 8000, max 25000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
   }
 ]
