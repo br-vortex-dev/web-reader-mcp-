@@ -206,4 +206,25 @@ export const TOOLS = [
       required: ["url"],
     },
   },
+  {
+    name: "find_on_page",
+    description:
+      "Busca um termo numa página e devolve só os trechos que casam, com as linhas em volta — " +
+      "em vez de entregar a página inteira. Use para achar um preço, uma tabela, um nome ou uma " +
+      "frase específica sem gastar a leitura toda. Aceita texto literal (padrão) ou expressão " +
+      "regular com regex:true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da página" },
+        query: { type: "string", description: "Termo a buscar (texto literal, ou regex com regex:true)" },
+        regex: { type: "boolean", description: "Trata query como expressão regular (padrão false)" },
+        matchCase: { type: "boolean", description: "Diferencia maiúsculas de minúsculas (padrão false)" },
+        maxHits: { type: "number", description: "Máximo de ocorrências a exibir (padrão 20, max 100)" },
+        contexto: { type: "number", description: "Linhas de contexto em volta de cada acerto (padrão 1, max 5)" },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url", "query"],
+    },
+  },
 ];

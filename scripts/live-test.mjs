@@ -133,9 +133,9 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     const r = await mcpCall("tools/list", undefined, 5);
     const tools = r.json?.result?.tools || [];
     const nomes = tools.map((t) => t.name).sort();
-    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json"];
-    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 10 ferramentas com schema", nomes.join(", "));
-  } catch (e) { check(false, "tools/list traz as 10 ferramentas com schema", e.message); }
+    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json", "find_on_page"];
+    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 11 ferramentas com schema", nomes.join(", "));
+  } catch (e) { check(false, "tools/list traz as 11 ferramentas com schema", e.message); }
 
   // read_page numa pagina real e complexa (tabelas, links, acentos)
   try {

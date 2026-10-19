@@ -494,6 +494,95 @@ export async function toolReadPage(args) {
 }
 
 /**
+ * Busca um termo no conteúdo de uma página e devolve só os trechos que casam,
+ * com contexto — em vez de entregar a página inteira para a IA garimpar.
+ *
+ * Sem isso, achar um preço/tabela/parágrafo numa leitura de 25.000 caracteres
+ * custava entregar os 25.000; aqui devolve as linhas que importam.
+ *
+ * `query` aceita texto literal (emoji, acento, pontuação — nada de regex por
+ * surpresa) ou expressão regular quando `regex: true`. A busca é
+ * case-insensitive por padrão (ligue `matchCase` para diferenciar).
+ */
+export async function toolFindOnPage(args) {
+  const parsed = validateHttpUrl(args.url);
+  const query = String(args.query ?? "");
+  if (!query) throw new ParametroInvalidoError("query", "informe o termo a buscar");
+  const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  const maxHits = Math.max(1, Math.min(100, Number(args.maxHits) || 20));
+  const contexto = Math.max(0, Math.min(5, Number(args.contexto) || 1));
+
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
+  ensureHtml(contentType, html, finalUrl);
+
+  const conteudo = isConteudoBruto(contentType, html)
+    ? html.replace(/\r\n?/g, "\n")
+    : markdownMemo(payload);
+
+  let matcher;
+  if (args.regex) {
+    try {
+      matcher = new RegExp(query, args.matchCase ? "g" : "gi");
+    } catch (err) {
+      throw new ParametroInvalidoError("query", `regex inválida: ${err.message}`);
+    }
+  } else {
+    const escapado = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    matcher = new RegExp(escapado, args.matchCase ? "g" : "gi");
+  }
+
+  // Trabalha por LINHAS: a linha é a unidade que a IA lê e cita. Cada
+  // ocorrência marca a linha dela; o contexto são as linhas em volta.
+  const linhas = conteudo.split("\n");
+  const casadas = new Set();
+  let total = 0;
+  for (let i = 0; i < linhas.length; i++) {
+    matcher.lastIndex = 0;
+    if (matcher.test(linhas[i])) {
+      total += 1;
+      casadas.add(i);
+    }
+  }
+
+  if (total === 0) {
+    return (
+      `Nenhuma ocorrencia de "${query}" em ${finalUrl}.\n` +
+      `A pagina tem ${linhas.length} linha(s) e ${conteudo.length} caracteres. ` +
+      `Confira o termo ou leia a pagina com read_page.`
+    );
+  }
+
+  // Constrói os blocos com contexto, sem repetir linha e com teto de blocos.
+  const indices = [...casadas].sort((a, b) => a - b);
+  const blocos = [];
+  let usadas = 0;
+  const jaMostrada = new Set();
+  for (const idx of indices) {
+    if (blocos.length >= maxHits) break;
+    const ini = Math.max(0, idx - contexto);
+    const fim = Math.min(linhas.length - 1, idx + contexto);
+    const trecho = [];
+    for (let j = ini; j <= fim; j++) {
+      if (jaMostrada.has(j)) continue;
+      jaMostrada.add(j);
+      const marcador = j === idx ? ">" : " ";
+      trecho.push(`${marcador} ${String(j + 1).padStart(4)}| ${linhas[j]}`);
+    }
+    blocos.push(trecho.join("\n"));
+    usadas += 1;
+  }
+
+  const mostradas = Math.min(total, maxHits);
+  const cabecalho =
+    `# Busca em: ${finalUrl}\n` +
+    `Termo: "${query}"${args.regex ? " (regex)" : ""}\n` +
+    `Ocorrencias: ${total} em ${linhas.length} linha(s)` +
+    (total > mostradas ? ` — exibindo ${mostradas}` : "");
+  return cabecalho + "\n\n" + blocos.join("\n\n") + (total > usadas ? `\n\n[... ${total - usadas} ocorrencia(s) alem do limite; aumente maxHits ...]` : "");
+}
+
+/**
  * Acessa uma página e lista seus links.
  */
 export async function toolExtractLinks(args) {
@@ -881,6 +970,8 @@ export async function callTool(name, args) {
       return await toolReadFeed(args || {});
     case "read_json":
       return await toolReadJson(args || {});
+    case "find_on_page":
+      return await toolFindOnPage(args || {});
     default:
       throw new FerramentaDesconhecidaError(name);
   }
