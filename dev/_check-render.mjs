@@ -7,8 +7,13 @@
 // Ou seja: GET /mcp SEM token devolve 401, nao 405. Testar aqui so o que
 // nao precisa de token; o restante roda com scripts/live-test.mjs <url> <token>.
 //
-// Uso: node dev/_check-render.mjs
-const base = "https://web-reader-mcp-13z0.onrender.com";
+// Uso: node dev/_check-render.mjs [url]
+// A URL também pode vir de RENDER_URL; sem nenhuma das duas, usa o serviço
+// padrão. O CI (.github/workflows/pos-deploy.yml) passa a URL por argumento.
+const base =
+  process.argv[2] ||
+  process.env.RENDER_URL ||
+  "https://web-reader-mcp-13z0.onrender.com";
 // Cobre o cold start do plano free (~50 s).
 const TIMEOUT_MS = 120000;
 
