@@ -17,6 +17,55 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const SERVER_PATH = process.env.TEST_SERVER_PATH || join(__dirname, "..", "server.js");
 export const TOKEN = "token-de-teste";
 
+// Monta um PDF minimo, porem VALIDO, com um content stream comprimido em
+// FlateDecode: operadores de texto de verdade (BT/ET, Tf, TD, Tj, TJ) para o
+// extrator do projeto ter o que ler. Usa zlib (ja importado) para comprimir.
+export function construirPdfFixture() {
+  // Duas linhas por Tj; um TJ com ajuste negativo grande (espaco entre
+  // palavras); um Td com ty != 0 (nova linha).
+  // Um paragrafo de enchimento alem das linhas fixas, para o teste de
+  // truncamento ter o que cortar (o minimo de maxChars e 200).
+  let enchimento = "";
+  for (let i = 1; i <= 6; i++) {
+    enchimento += `0 -18 Td\n(Linha de enchimento numero ${i} com bastante texto para passar da marca de duzentos caracteres.) Tj\n`;
+  }
+  const conteudo =
+    "BT\n/F1 12 Tf\n72 720 Td\n" +
+    "(Relatorio de teste do leitor de PDF) Tj\n" +
+    "0 -18 Td\n" +
+    "[(Texto) -300 (com) -300 (espacos) -300 (reconstruidos)] TJ\n" +
+    "0 -18 Td\n" +
+    "(Segunda linha do documento.) Tj\n" +
+    enchimento +
+    "ET\n";
+  const comprimido = zlib.deflateSync(Buffer.from(conteudo, "latin1"));
+
+  const objetos = [];
+  objetos.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+  objetos.push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+  objetos.push(
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"
+  );
+  const cabecalhoStream = `4 0 obj\n<< /Length ${comprimido.length} /Filter /FlateDecode >>\nstream\n`;
+  const rodapeStream = "\nendstream\nendobj\n";
+  objetos.push(cabecalhoStream + comprimido.toString("latin1") + rodapeStream);
+  objetos.push("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+
+  let corpo = "%PDF-1.4\n";
+  const offsets = [];
+  for (const obj of objetos) {
+    offsets.push(corpo.length);
+    corpo += obj;
+  }
+  const inicioXref = corpo.length;
+  corpo += `xref\n0 ${objetos.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) {
+    corpo += String(off).padStart(10, "0") + " 00000 n \n";
+  }
+  corpo += `trailer\n<< /Size ${objetos.length + 1} /Root 1 0 R >>\nstartxref\n${inicioXref}\n%%EOF\n`;
+  return Buffer.from(corpo, "latin1");
+}
+
 // Porta livre: abre em 0, le a porta atribuida e fecha.
 export function freePort() {
   return new Promise((resolve, reject) => {
@@ -686,6 +735,23 @@ export async function startFixture({ robots = "regras" } = {}) {
         "<!DOCTYPE html><html><head><title>Texto</title></head><body>" +
           "<h1>Noticia</h1><p>Uma pagina normal, sem video embutido.</p></body></html>"
       );
+      return;
+    }
+
+    // ---- fixtures do read_pdf ----
+    // PDF de verdade, montado aqui com zlib: content stream com operadores
+    // Tj/TD/TJ, comprimido em FlateDecode. Serve para provar a extracao e a
+    // reconstrucao de espacos/quebras sem depender de rede nem de arquivo
+    // binario no repositorio.
+    if (path === "/pdf/simples.pdf") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end(construirPdfFixture());
+      return;
+    }
+    // Corpo que NAO e PDF (para o caminho "nao reconhecido").
+    if (path === "/pdf/nao-pdf.pdf") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end("%NAO-E-PDF\nisto aqui nao e um pdf de verdade.\n");
       return;
     }
 

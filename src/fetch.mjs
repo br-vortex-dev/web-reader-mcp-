@@ -254,8 +254,12 @@ async function decodeBuffer(buffer, contentType) {
  * corpo a baixar — devolve o payload guardado, marcado com `naoModificado`,
  * e quem chamou reaquece o cache. É download inteiro economizado quando o
  * site coopera.
+ *
+ * Com `decodificar: true`, devolve `text` (decodificado pelo charset). Sem
+ * ela, devolve `buffer` cru — é o que o leitor de PDF precisa, porque PDF é
+ * binário e passar por decodificação de texto corromperia os bytes.
  */
-export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null } = {}) {
+export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
   // NaN) podia pular o laço inteiro e o throw final lançar `null`.
@@ -326,14 +330,16 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
         controller.signal
       );
       const contentType = String(resposta.headers["content-type"] || "").toLowerCase();
-      const text = await decodeBuffer(buffer, contentType);
-      return {
-        text,
+      const base = {
         finalUrl,
         contentType,
         etag: resposta.headers["etag"] || null,
         lastModified: resposta.headers["last-modified"] || null,
       };
+      if (!decodificar) {
+        return { ...base, buffer };
+      }
+      return { ...base, text: await decodeBuffer(buffer, contentType) };
     } catch (errBruto) {
       // Nao reatribuir a variavel do catch: o `finally` roda depois do catch e
       // uma reatribuicao aqui se perde, fazendo o throw final lancar o erro
@@ -354,16 +360,25 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
 }
 
 /**
+ * Invólucro de compatibilidade: baixa a URL e devolve o TEXTO decodificado.
+ * É o caminho usado por tudo que lê HTML/XML/JSON; o leitor de PDF usa
+ * `fetchBytes` direto para receber os bytes crus.
+ */
+export function fetchText(url, options) {
+  return fetchBytes(url, { ...(options || {}), decodificar: true });
+}
+
+/**
  * Tenta buscar a página com HTTPS se HTTP falhar.
  */
 export async function fetchTextWithFallback(url, options) {
   try {
-    return await fetchText(url, options);
+    return await fetchBytes(url, options);
   } catch (err) {
     if (url.startsWith("http://")) {
       const httpsUrl = url.replace(/^http:/, "https:");
       try {
-        return await fetchText(httpsUrl, options);
+        return await fetchBytes(httpsUrl, options);
       } catch {
         throw err;
       }
@@ -557,7 +572,7 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
  * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
  * propósito; o objetivo é atualizá-la.
  */
-async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null } = {}) {
+async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null } = {}) {
   const cacheKey = chave || chaveCanonica(url);
   if (!revalidacao) {
     // Quem esperou na junção pode encontrar a entrada que outro pedido acabou
@@ -590,9 +605,22 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   }
   const payload = await limitesPorHost.executar(hostOf(url), () =>
     limiteSaida.executar(() =>
-      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional })
+      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair })
     )
   );
+  // Transformação opcional ANTES do cache: o leitor de PDF baixa bytes e
+  // converte em texto aqui, para que a entrada do cache (e a junção em voo)
+  // guardem o RESULTADO e uma releitura não reparseie o PDF.
+  if (extrair) {
+    const { text, extraido } = extrair(payload);
+    const comTexto = { ...payload, text, extraido };
+    const bytes = payloadBytes(comTexto);
+    if (bytes <= CACHE_MAX_ENTRY_BYTES) {
+      pageCache.set(cacheKey, comTexto, bytes);
+    }
+    guardarValidadores(cacheKey, payload.etag, payload.lastModified, comTexto);
+    return comTexto;
+  }
   // A flag `naoModificado` é sinal interno de transporte: não vai para o cache.
   const { naoModificado, ...semFlag } = payload;
   const bytes = payloadBytes(semFlag);
@@ -648,6 +676,24 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
     return hit.payload;
   }
   return coalescedorDeBuscas.executar(chave, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
+}
+
+/**
+ * Baixa um PDF e devolve os bytes CRUS, com o mesmo cache/junção/segurança da
+ * leitura de HTML. O conteúdo é binário: `text` fica vazio e `buffer` é o PDF.
+ * O cache guarda o resultado já extraído quando `extrair` é passado (o leitor
+ * de PDF passa a função de extração) — assim uma releitura não reparseia.
+ */
+export async function fetchPdfCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, extrair } = {}) {
+  const chave = chaveCanonica(url);
+  const hit = pageCache.get(chave);
+  if (hit) {
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
+    return hit.payload;
+  }
+  return coalescedorDeBuscas.executar(chave, () =>
+    buscarEAquecer(url, { timeoutMs, signal, retries, chave, extrair })
+  );
 }
 
 /**

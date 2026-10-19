@@ -177,5 +177,29 @@
         "url"
       ]
     }
+  },
+  {
+    "name": "read_pdf",
+    "description": "Lê um PDF público e devolve o TEXTO extraído (sem OCR): artigos, editais, relatórios, contratos. Reconstrói espaços e quebras a partir dos operadores de texto do PDF. Não lê PDF escaneado (só imagem) — nesse caso devolve o motivo explícito. Use quando a URL terminar em .pdf ou o read_page recusar por não ser HTML.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL completa (http/https) do PDF"
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Máximo de caracteres do conteúdo retornado (padrão 8000, max 25000)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
   }
 ]

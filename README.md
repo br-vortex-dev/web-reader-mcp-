@@ -21,7 +21,7 @@ sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 7 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. A `read_video` mora em `video.mjs`. |
+| `tools.mjs` | As 8 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. A `read_video` mora em `video.mjs`. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, **compressão da resposta** (gzip/br conforme `Accept-Encoding`), handlers, `/health` e shutdown limpo. |
@@ -51,6 +51,7 @@ sai. O produto mora em `src/`, em doze módulos com uma responsabilidade cada:
 | `read_multiple_pages(urls)` | Lê até 30 páginas por chamada (em lotes paralelos), com status por URL                  |
 | `read_dynamic_page(url)`    | Lê páginas que dependem de JavaScript extraindo os dados embutidos no HTML (sem navegador) |
 | `read_video(url, lang?)`    | Lê um vídeo (YouTube, Vimeo, página com vídeo ou legenda .vtt/.srt): metadados publicados + capítulos (YouTube) + transcrição da legenda com timestamps, quando acessível |
+| `read_pdf(url)`             | Extrai o **texto** de um PDF público (sem OCR): reconstrói espaços e quebras pelos operadores de texto. PDF escaneado avisa que não há camada de texto |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
 
@@ -110,7 +111,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 7 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 8 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 ```
 
@@ -165,8 +166,9 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 7 ferramentas do MCP
+│   ├── tools.mjs      <- as 8 ferramentas do MCP
 │   ├── video.mjs      <- read_video: metadados + transcricao de legendas
+│   ├── pdf.mjs        <- read_pdf: extracao de texto de PDF (zero deps)
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
 │   ├── http-transport.mjs<- HTTP: rate limit, auth, /health, handlers
 │   └── server.mjs     <- roteador JSON-RPC, stdio e montagem do HTTP
@@ -260,7 +262,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.5.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.6.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -752,6 +754,38 @@ legíveis, junta cues curtas em frases e limpa a marcação (`<i>`, `<c.cor>`, `
 Toda URL tocada pela `read_video` passa pelo mesmo caminho das outras ferramentas:
 validação SSRF, robots.txt, cache, junção de buscas em voo e teto por host.
 
+## read_pdf (texto de PDF, sem dependência)
+
+PDF é conteúdo web comum (editais, artigos, relatórios, contratos) e era o
+único tipo de documento que o servidor recusava. Agora existe `read_pdf`:
+
+```json
+{ "name": "read_pdf", "arguments": { "url": "https://arxiv.org/pdf/1706.03762", "maxChars": 8000 } }
+```
+
+**Como funciona** — e por que continua com zero dependências:
+
+1. baixa os **bytes crus** (`fetchBytes`, o mesmo transporte com SSRF, robots,
+   cache e junção em voo) — decodificar PDF como texto corromperia o arquivo;
+2. acha os objetos `stream ... endstream` e infla os que usam FlateDecode
+   (com `node:zlib`, alternando `inflate`/`inflateRaw`/`gunzip`);
+3. reconhece os **content streams** (os que têm `BT` + `Tj`/`TJ`) e os varre com
+   um interpretador dos operadores de texto: `Tf` dá o tamanho da fonte, `Td`/`TD`
+   dão a mudança de linha, `Tm` a posição, `Tj`/`'`/`"` desenham, e o `TJ` vem com
+   ajustes de kerning — um número muito negativo ali é **espaço entre palavras**,
+   que é como os espaços são reconstruídos (sem isso o texto sai colado);
+4. normaliza espaços/quebras, trunca em `maxChars` com o aviso de sempre e
+   guarda o **texto pronto** no cache (reler não reparseia o PDF).
+
+**Honestidade sobre o limite:** não há OCR. Um PDF escaneado (só imagem) não tem
+camada de texto e a ferramenta devolve `Conteudo: 0 caracteres` explicando que
+não consegue. Do mesmo jeito, PDF antigo com fonte de encoding próprio e sem mapa
+`ToUnicode` pode devolver glifos errados — a ferramenta nunca finge que leu.
+
+**Medido na web real** (`dev/_check-pdf-live.mjs`): o artigo *Attention Is All You
+Need* (arXiv, 2,2 MB, 15 páginas) devolveu **39.284 caracteres** de texto legível,
+com espaços entre palavras e quebras de linha corretas.
+
 ## Como as falhas aparecem na saída
 
 A saída é consumida por uma IA, então **uma falha nunca pode parecer "página
@@ -761,6 +795,8 @@ vazia"**. O contrato é:
 | --- | --- |
 | `read_page` / `extract_links` / `read_dynamic_page` com URL bloqueada, DNS, timeout ou HTTP ruim | `isError: true` com a mensagem do motivo |
 | `read_video` sem acesso à legenda (robots, corpo vazio ou faixa ausente) | **não** é erro: devolve os metadados e o campo `Transcricao: indisponivel — <motivo>`. Sem vídeo identificável na página, devolve mensagem explicando e apontando o `read_page` |
+| `read_pdf` de PDF escaneado (só imagem) | **não** é erro: devolve `Conteudo: 0 caracteres` e explica que não há camada de texto (não há OCR) |
+| `read_pdf` de URL que não é PDF | **não** é erro: avisa que o conteúdo não tem a assinatura `%PDF-` e aponta o `read_page` |
 | `crawl_site` com a **URL inicial** ruim | `isError: true` — `Nao foi possivel iniciar o crawl em <url>: <motivo>` |
 | `crawl_site` com falha **no meio** do crawl | continua e devolve o que leu, com `RESULTADO PARCIAL: N pagina(s) falharam — 2 com HTTP 404, 1 com timeout`, e cada página ruim marcada com `# Erro ao ler <url>` |
 | `read_multiple_pages` com falha em alguma URL | a chamada **não** é erro (o isolamento por URL é proposital); o resumo traz `N paginas OK` e cada falha vem marcada com `# Erro ao ler <url>` |
