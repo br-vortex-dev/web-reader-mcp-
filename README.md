@@ -16,15 +16,15 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 | --- | --- |
 | `config.mjs` | **Toda** a configuração: tetos, timeouts, defaults e os clamps de variável de ambiente. Nenhum outro módulo lê `process.env` diretamente. |
 | `errors.mjs` | As 18 classes de erro e seus códigos. A camada de transporte nunca monta mensagem à mão: ela traduz o erro. |
-| `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes), o cache LRU com TTL e a **junção de buscas em voo** (single-flight). |
+| `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes), o cache LRU com TTL, a **junção de buscas em voo** (single-flight) e a **chave de cache canônica** (descarta rastreio, ordena os parâmetros). |
 | `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado/reservado, NAT64, 6to4) e robots.txt. |
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
-| `fetch.mjs` | O fetch de baixo nível: cache, **junção de buscas em voo**, revalidação em segundo plano (SWR), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
+| `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `tools.mjs` | As 7 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. A `read_video` mora em `video.mjs`. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
-| `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, handlers, `/health` e shutdown limpo. |
+| `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, **compressão da resposta** (gzip/br conforme `Accept-Encoding`), handlers, `/health` e shutdown limpo. |
 | `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
 
 **As quatro regras que mantêm o projeto saudável:**
@@ -62,7 +62,7 @@ sai. O produto mora em `src/`, em dez módulos com uma responsabilidade cada:
 npm test
 ```
 
-Roda os arquivos de `tests/` (22 arquivos, 186 testes, ~80 s, sem rede na maioria):
+Roda os arquivos de `tests/` (25 arquivos, 200 testes, ~80 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -71,6 +71,9 @@ Roda os arquivos de `tests/` (22 arquivos, 186 testes, ~80 s, sem rede na maiori
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
 | `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração, **SWR (vencido serve na hora; rajada no vencimento = 1 revalidação)** |
 | `tests/coalesce.test.mjs` | **junção de buscas em voo**: rajada de N leituras da mesma URL = 1 acesso, série continua do cache, falha compartilhada não derruba o servidor |
+| `tests/chave-canonica.test.mjs` | **chave de cache canônica**: URL com `utm_*`/`gclid` acerta o cache da URL limpa (1 download), ordem dos parâmetros e fragmento não criam entradas, parâmetros reais (`?page=2`) continuam distintos |
+| `tests/compressao.test.mjs` | **compressão da resposta do `/mcp`**: gzip/br conforme `Accept-Encoding`, corpo descomprimido idêntico ao puro, `vary` presente, sem `Accept-Encoding` = JSON puro, resposta pequena não comprime, ganho de ponta a ponta |
+| `tests/revalidacao.test.mjs` | **revalidação condicional**: `304` reaquece a entrada sem baixar o corpo de novo (contador no `/health`), servidor sem `ETag` volta a baixar (sem regressão) |
 | `tests/memo.test.mjs` | **memoização da conversão**: acerto de cache reaproveita, conteúdo novo reconverte, `MEMO_CONVERSAO=0` desliga, ferramentas compartilham o memo do mesmo payload |
 | `tests/campo-fixes.test.mjs` | regressões dos bugs encontrados na rodada de campo (fidelidade de conteúdo, charset, tabelas) |
 | `tests/defaults.test.mjs` | trava os padrões de leitura: `maxChars` 8000, `MAX_REDIRECTS` 5 e `DEFAULT_TIMEOUT_MS` 8000 |
@@ -257,7 +260,7 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.4.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
+   `web-reader-mcp v1.5.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -409,7 +412,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
 | `CACHE_MAX_BYTES` | `33554432` (32 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. |
-| `CACHE_MAX_ENTRIES` | `100` | Teto de entradas do cache (o segundo teto, além dos bytes). |
+| `CACHE_MAX_ENTRIES` | `100` | Teto de entradas do cache (o segundo teto, além dos bytes). Ajustável por env: subir diminui o despejo de páginas ainda quentes. |
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
 | `CACHE_SWR` | desligada | `1` liga a **revalidação em segundo plano**: entrada vencida dentro da janela de graça é servida na hora e atualizada atrás (passando pela junção em voo). O `render.yaml` liga. Desligada, vencida = busca de novo (comportamento conservador). |
 | `CACHE_STALE_WINDOW_MS` | `0` (2× o TTL) | Tamanho da janela de graça do SWR em ms. Fora dela, a entrada é descartada e a leitura espera a nova busca. |
@@ -571,6 +574,36 @@ O `k6` não é dependência do projeto — instale à parte (`winget`/`brew`/`ap
 Os números antes/depois do tuning e o caminho para 10k req/s ficaram registrados
 no histórico de commits do repositório (rodada de capacidade de outubro de 2026);
 tudo continua recuperável pelo git.
+
+#### Bytes na volta: compressão da resposta e revalidação condicional
+
+Duas frentes atacam o que ainda trafegava à toa — o texto de uma página é grande,
+e baixá-lo duas vezes quando nada mudou é desperdício puro.
+
+- **Compressão da resposta do `/mcp`.** O corpo do `/mcp` saía como JSON puro: o
+  texto lido de uma página viajava cru na volta. Agora a resposta é comprimida
+  com `brotli`/`gzip`/`deflate` conforme o `Accept-Encoding` do cliente — sempre
+  com `vary: accept-encoding`, para nenhum cache intermediário servir a versão
+  comprimida a quem não a aceita. Respostas pequenas (abaixo de 1 KB) **não** são
+  comprimidas: não vale o custo. Cliente que não declara `Accept-Encoding`
+  recebe **exatamente** o JSON de antes (compatível byte a byte). Num payload de
+  20 KB de texto de web, a redução medida passa de 50% (brotli costuma ir além —
+  `tests/compressao.test.mjs` prova de ponta a ponta).
+
+- **Revalidação condicional (`If-None-Match` / `If-Modified-Since`).** Ao baixar
+  uma página, o servidor guarda o `ETag`/`Last-Modified`. Quando a entrada vence
+  e a leitura volta à rede, o pedido leva esses validadores: se o site responder
+  **304 (não modificado)**, não há corpo para baixar e a entrada em cache volta a
+  valer. O download inteiro é economizado — exatamente quando o site coopera.
+  Site sem `ETag` continua igual a antes (baixa de novo no vencimento). No
+  `/health`: `condicional: N (304 M)`.
+
+- **Chave de cache canônica.** A mesma página chega com parâmetros de rastreio a
+  cada clique ou compartilhamento (`utm_*`, `gclid`, `fbclid`...). Sem
+  normalizar, cada variação virava uma URL diferente — baixava de novo, convertia
+  de novo e ocupava outra vaga do cache. Agora a chave descarta os parâmetros de
+  rastreio, ignora a ordem dos demais e o fragmento `#...`; parâmetros que **são**
+  conteúdo (`?page=2`) continuam distintos, como devem.
 
 ### Rate limit e `x-forwarded-for`
 

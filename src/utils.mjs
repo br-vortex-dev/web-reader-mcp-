@@ -4,6 +4,67 @@
 
 import { ServidorOcupadoError } from "./errors.mjs";
 
+/* ============================ URL canônica ============================ *
+ * A mesma página chega com parâmetros de rastreio a cada clique/`share`
+ * (utm_*, gclid, fbclid...). Sem normalizar, cada variação vira uma URL
+ * diferente: baixa de novo, converte de novo e ocupa uma vaga do cache. A
+ * chave canônica descarta esses parâmetros — o conteúdo é o mesmo — e a
+ * ordem dos demais parâmetros passa a não importar.
+ * ======================================================================= */
+
+// Parâmetros que só carregam rastreio/marketing: descartados da chave.
+const PARAMS_RASTREIO = new Set([
+  "gclid",
+  "fbclid",
+  "dclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+  "mc_cid",
+  "mc_eid",
+  "_hsenc",
+  "_hsmi",
+  "igshid",
+  "s_kwcid",
+  "yclid",
+  "twclid",
+  "vero_id",
+]);
+
+/** É parâmetro de rastreio? (utm_* por prefixo, os demais por nome exato.) */
+export function ehParamRastreio(chave) {
+  const k = String(chave).toLowerCase();
+  return k.startsWith("utm_") || PARAMS_RASTREIO.has(k);
+}
+
+/**
+ * Devolve a chave canônica de uma URL: sem parâmetros de rastreio e com os
+ * demais ordenados (para ?a=1&b=2 e ?b=2&a=1 casarem). URL inválida volta
+ * como o próprio texto — a validação de verdade acontece depois, no fetch.
+ *
+ * A barra final e o fragmento (#...) também são normalizados: o servidor
+ * entrega o mesmo conteúdo, então não vale pagar dois downloads.
+ */
+export function chaveCanonica(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return String(url);
+  }
+  const limpos = [];
+  for (const [k, v] of u.searchParams) {
+    if (!ehParamRastreio(k)) limpos.push([k, v]);
+  }
+  limpos.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  u.search = "";
+  for (const [k, v] of limpos) u.searchParams.append(k, v);
+  u.hash = "";
+  // "/" e "" são a mesma home; unifica para não duplicar entrada.
+  if (u.pathname === "/") u.pathname = "";
+  return u.href;
+}
+
 /**
  * Fila FIFO com índice de cabeça (evita shift()/splice() O(n)).
  */

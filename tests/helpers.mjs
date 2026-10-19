@@ -93,6 +93,28 @@ export async function startFixture({ robots = "regras" } = {}) {
   const server = http.createServer((req, res) => {
     const path = String(req.url || "/");
 
+    // /etag?tag=X -> pagina que emite ETag e honra If-None-Match: bate no
+    // contador de hits para dar para provar se houve download ou 304. Serve
+    // para testar a revalidacao condicional do fetch.
+    if (path.startsWith("/etag")) {
+      const u = new URL(path, "http://local");
+      const tag = u.searchParams.get("tag") || '"v1"';
+      const id = `etag:${tag}`;
+      const n = (hits.get(id) || 0) + 1;
+      hits.set(id, n);
+      if (req.headers["if-none-match"] === tag) {
+        res.writeHead(304, { etag: tag });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", etag: tag });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Etag</title></head><body>" +
+          `<h1>Etag ${tag}</h1><p>${"x".repeat(600)}</p></body></html>`
+      );
+      return;
+    }
+
     // /page/<id>?kb=N[&ms=M] -> pagina de ~N KB com o contador de requisicoes no
     // texto. `ms` atrasa a resposta (usado pelos testes de junção em voo para
     // garantir que os pedidos chegam ENQUANTO a busca esta em andamento).

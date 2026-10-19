@@ -7,6 +7,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import http from "node:http";
+import zlib from "node:zlib";
 import {
   SERVER_NAME,
   SERVER_VERSION,
@@ -21,13 +22,61 @@ import {
   OUTBOUND_MAX_QUEUE,
   clampEnv,
 } from "./config.mjs";
-import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes } from "./fetch.mjs";
+import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes, revalidacaoCondicional } from "./fetch.mjs";
 import { conversoesMemo } from "./tools.mjs";
 import { analisesVideo } from "./video.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
 // Referência global ao servidor HTTP (para encerramento por erro fatal).
 let servidorHttp = null;
+
+// Compressão da resposta HTTP. O corpo do /mcp é grande (o texto lido de uma
+// página) e saía como JSON puro: todo byte trafegava cru na volta. Comprime
+// só acima do limiar (resposta pequena não paga o custo de comprimir) e só
+// quando o cliente declarou aceitar — sem Accept-Encoding, a resposta continua
+// byte a byte igual à de antes.
+const COMPRESSAO_MIN_BYTES = 1024;
+
+/** Escolhe a melhor codificação declarada pelo cliente (br > gzip > deflate). */
+export function escolherCodificacao(acceptEncoding) {
+  const aceita = String(acceptEncoding || "").toLowerCase();
+  if (!aceita) return null;
+  // q=0 desliga a codificação; presença simples já basta (ignoramos pesos >0).
+  const tem = (nome) =>
+    new RegExp(`(^|[,\\s])${nome}\\s*(;|,|$)`).test(aceita) &&
+    !new RegExp(`${nome}\\s*;\\s*q\\s*=\\s*0`).test(aceita);
+  if (tem("br")) return "br";
+  if (tem("gzip")) return "gzip";
+  if (tem("deflate")) return "deflate";
+  return null;
+}
+
+/** Comprime um Buffer na codificação dada (devolve o próprio Buffer se nula). */
+export function comprimirCorpo(buffer, codificacao) {
+  if (codificacao === "br") return zlib.brotliCompressSync(buffer);
+  if (codificacao === "gzip") return zlib.gzipSync(buffer);
+  if (codificacao === "deflate") return zlib.deflateSync(buffer);
+  return buffer;
+}
+
+/**
+ * Responde JSON comprimindo quando vale a pena. Centraliza o content-type e o
+ * Vary para que a resposta comprimida nunca seja servida por engano a um
+ * cliente que não a aceita (cache intermediário incluso).
+ */
+export function responderJson(req, res, status, payload, extraHeaders = {}) {
+  const corpo = Buffer.from(JSON.stringify(payload), "utf8");
+  const codificacao =
+    corpo.length >= COMPRESSAO_MIN_BYTES ? escolherCodificacao(req.headers["accept-encoding"]) : null;
+  const headers = { "content-type": "application/json", vary: "accept-encoding", ...extraHeaders };
+  if (!codificacao) {
+    res.writeHead(status, headers);
+    return res.end(corpo);
+  }
+  headers["content-encoding"] = codificacao;
+  res.writeHead(status, headers);
+  res.end(comprimirCorpo(corpo, codificacao));
+}
 
 /** Referência ao handleMessage do roteador (definida por registrarHandleMessage). */
 let handleMessageFn = null;
@@ -203,6 +252,7 @@ export async function montarTextoHealth(server) {
     `rss: ${Math.round(mem.rss / 1024 / 1024)} MB`,
     ` | coalescidas: ${coalescedorDeBuscas.stats.colapsadas} (em voo ${coalescedorDeBuscas.stats.emVoo})`,
     ` | revalidacoes: ${revalidacoes.tentadas} (falhas ${revalidacoes.falhas})`,
+    ` | condicional: ${revalidacaoCondicional.tentadas} (304 ${revalidacaoCondicional.naoModificadas})`,
     ` | conversoes: ${conversoesMemo.realizadas} (reaproveitadas ${conversoesMemo.caronas})`,
     ` | video: ${analisesVideo.realizadas} (reaproveitadas ${analisesVideo.caronas})`,
   ].join("");
@@ -399,16 +449,18 @@ export async function handlerMcp(req, res, ctx) {
     const { responses, eraArray } = await processarCorpo(parsed);
 
     if (responses.length === 0) {
-      res.writeHead(202, { "content-type": "application/json", "access-control-allow-origin": "*" });
+      res.writeHead(202, {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*",
+        vary: "accept-encoding",
+      });
       res.end();
       return;
     }
 
-    res.writeHead(200, {
-      "content-type": "application/json",
+    responderJson(req, res, 200, responses.length === 1 && !eraArray ? responses[0] : responses, {
       "access-control-allow-origin": "*",
     });
-    res.end(JSON.stringify(responses.length === 1 && !eraArray ? responses[0] : responses));
   } finally {
     clearTimeout(watchdog);
     liberarUmaVez();

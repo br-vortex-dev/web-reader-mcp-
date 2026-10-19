@@ -4,7 +4,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.4.0";
+export const SERVER_VERSION = "1.5.0";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -97,7 +97,9 @@ export const STDIO_MAX_LINE_BYTES = clampEnv(
 
 // Cache em memória (LRU + TTL).
 export const CACHE_TTL_MS = Math.max(500, Math.floor(Number(process.env.CACHE_TTL_MS) || 7.5 * 60 * 1000));
-export const CACHE_MAX_ENTRIES = 100;
+// Teto de entradas ajustável: com muitos sites distintos no ar, 100 entradas
+// evicta páginas ainda quentes. Subir aqui aumenta o reuso sem tocar em código.
+export const CACHE_MAX_ENTRIES = clampEnv(process.env.CACHE_MAX_ENTRIES, 100, 1, 100000);
 export const CACHE_MAX_BYTES = Math.max(512, Math.floor(Number(process.env.CACHE_MAX_BYTES) || 32 * 1024 * 1024));
 export const CACHE_MAX_ENTRY_BYTES = Math.min(
   Math.floor(CACHE_MAX_BYTES / 4),

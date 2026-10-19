@@ -32,6 +32,7 @@ import {
   criarLimitadorPorChave,
   CacheLRU,
   criarCoalescedorDeBuscas,
+  chaveCanonica,
 } from "./utils.mjs";
 import { assertPublicHost, checarRobots } from "./security.mjs";
 import { httpGetUmSalto, coletarComTeto, desembrulhar, descartarCorpo } from "./net.mjs";
@@ -91,6 +92,29 @@ export const coalescedorDeBuscas = criarCoalescedorDeBuscas();
 
 // Revalidações em segundo plano (SWR): contadores para o /health.
 export const revalidacoes = { tentadas: 0, falhas: 0 };
+
+// Validadores HTTP (ETag/Last-Modified) por URL, para revalidação condicional.
+// Guardamos também o payload para restaurá-lo quando o servidor responde 304
+// (não modificado) — nesse caso não há corpo para baixar e a entrada vencida
+// volta a valer. O mapa é limitado: sem teto, cada URL nova ficaria guardada
+// para sempre (mesmo depois de sair do cache).
+const VALIDADORES_MAX = 512;
+export const validadoresHttp = new Map();
+// Contadores de revalidação condicional (aparecem no /health).
+export const revalidacaoCondicional = { tentadas: 0, naoModificadas: 0 };
+
+/** Guarda (ou limpa) os validadores de uma URL, mantendo o mapa dentro do teto. */
+function guardarValidadores(url, etag, lastModified, payload) {
+  if (!etag && !lastModified) {
+    validadoresHttp.delete(url);
+    return;
+  }
+  if (validadoresHttp.has(url)) validadoresHttp.delete(url);
+  validadoresHttp.set(url, { etag, lastModified, payload });
+  while (validadoresHttp.size > VALIDADORES_MAX) {
+    validadoresHttp.delete(validadoresHttp.keys().next().value);
+  }
+}
 
 // Limpeza periódica de entradas expiradas.
 const cacheCleanup = setInterval(() => pageCache.cleanup(), CACHE_TTL_MS);
@@ -224,8 +248,14 @@ async function decodeBuffer(buffer, contentType) {
 
 /**
  * Faz download de uma URL com timeout, retries e limite de bytes.
+ *
+ * Com `condicional` ({ etag, lastModified, payload }), manda If-None-Match /
+ * If-Modified-Since: se o servidor responder 304 (não modificado), NÃO há
+ * corpo a baixar — devolve o payload guardado, marcado com `naoModificado`,
+ * e quem chamou reaquece o cache. É download inteiro economizado quando o
+ * site coopera.
  */
-export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES } = {}) {
+export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
   // NaN) podia pular o laço inteiro e o throw final lançar `null`.
@@ -267,7 +297,18 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
       };
+      // Revalidação condicional: só na primeira tentativa (o retry é por
+      // falha de rede, não vale repetir o If-None-Match).
+      if (attempt === 0 && condicional) {
+        if (condicional.etag) headers["If-None-Match"] = condicional.etag;
+        if (condicional.lastModified) headers["If-Modified-Since"] = condicional.lastModified;
+      }
       const { resposta, finalUrl } = await buscarComRedirects(url, headers, controller.signal);
+      if (resposta.statusCode === 304 && condicional && condicional.payload) {
+        descartarCorpo(resposta.stream);
+        revalidacaoCondicional.naoModificadas++;
+        return { ...condicional.payload, naoModificado: true };
+      }
       if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
         const statusFrase = (resposta.statusMessage || "").replace(/\b([A-Z]{2,})\b/, (m) =>
           m.charAt(0) + m.slice(1).toLowerCase()
@@ -290,6 +331,8 @@ export async function fetchText(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries =
         text,
         finalUrl,
         contentType,
+        etag: resposta.headers["etag"] || null,
+        lastModified: resposta.headers["last-modified"] || null,
       };
     } catch (errBruto) {
       // Nao reatribuir a variavel do catch: o `finally` roda depois do catch e
@@ -514,11 +557,12 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
  * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
  * propósito; o objetivo é atualizá-la.
  */
-async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false } = {}) {
+async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null } = {}) {
+  const cacheKey = chave || chaveCanonica(url);
   if (!revalidacao) {
     // Quem esperou na junção pode encontrar a entrada que outro pedido acabou
     // de gravar — nesse caso não baixa de novo.
-    const hitQuente = pageCache.get(url);
+    const hitQuente = pageCache.get(cacheKey);
     if (hitQuente && !hitQuente.stale) return hitQuente.payload;
   }
 
@@ -535,16 +579,28 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   // um único site com centenas de pedidos em fila não entope a concorrência
   // dos outros. (Invertido, os pedidos em fila do host consumiriam vagas
   // globais enquanto esperam e a justiça entre sites iria por água abaixo.)
+  //
+  // Revalidação condicional: se há validador guardado desta URL, manda
+  // If-None-Match/If-Modified-Since. Um 304 reaquece a entrada com o payload
+  // que já estava aqui — sem baixar o corpo de novo. Vale tanto para a
+  // revalidação em segundo plano (SWR) quanto para o vencimento comum do TTL.
+  const condicional = validadoresHttp.get(cacheKey) || null;
+  if (condicional) {
+    revalidacaoCondicional.tentadas++;
+  }
   const payload = await limitesPorHost.executar(hostOf(url), () =>
     limiteSaida.executar(() =>
-      fetchTextWithFallback(url, { timeoutMs, signal, retries })
+      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional })
     )
   );
-  const bytes = payloadBytes(payload);
+  // A flag `naoModificado` é sinal interno de transporte: não vai para o cache.
+  const { naoModificado, ...semFlag } = payload;
+  const bytes = payloadBytes(semFlag);
   if (bytes <= CACHE_MAX_ENTRY_BYTES) {
-    pageCache.set(url, payload, bytes);
+    pageCache.set(cacheKey, semFlag, bytes);
   }
-  return payload;
+  guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, semFlag);
+  return semFlag;
 }
 
 /**
@@ -555,11 +611,11 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
  * não pedidos que a pediram (a rajada toda colapsa em uma). Erros são
  * engolidos: falhou, a entrada vencida segue valendo até sair da janela.
  */
-function revalidarEmSegundoPlano(url, { timeoutMs, retries } = {}) {
+function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries } = {}) {
   coalescedorDeBuscas
-    .executar(url, () => {
+    .executar(chave, () => {
       revalidacoes.tentadas++;
-      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true }).catch((err) => {
+      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true, chave }).catch((err) => {
         revalidacoes.falhas++;
         throw err;
       });
@@ -582,12 +638,16 @@ function revalidarEmSegundoPlano(url, { timeoutMs, retries } = {}) {
  * resultado dela.
  */
 export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
-  const hit = pageCache.get(url);
+  // A chave do cache/da junção é a URL CANÔNICA: duas variações da mesma
+  // página (com/sem utm_*, parâmetros em ordem diferente) compartilham uma
+  // entrada — um download só. A URL original segue no payload (finalUrl).
+  const chave = chaveCanonica(url);
+  const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(url, { timeoutMs, retries });
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(url, () => buscarEAquecer(url, { timeoutMs, signal, retries }));
+  return coalescedorDeBuscas.executar(chave, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
 }
 
 /**
