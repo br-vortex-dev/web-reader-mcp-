@@ -190,7 +190,7 @@ t("pagina sem video", metadadosPagina(htmlSem, "https://exemplo.com/x").temVideo
 // --- schema e despacho ---
 const schemaVideo = TOOLS.find((x) => x.name === "read_video");
 t("schema expõe read_video", Boolean(schemaVideo) && schemaVideo.inputSchema.required.includes("url"));
-t("onze ferramentas no schema", TOOLS.length === 11, `total=${TOOLS.length}`);
+t("onze ferramentas no schema", TOOLS.length === 12, `total=${TOOLS.length}`);
 
 try {
   await callTool("nao-existe", {});

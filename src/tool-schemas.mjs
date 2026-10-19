@@ -227,4 +227,28 @@ export const TOOLS = [
       required: ["url", "query"],
     },
   },
+  {
+    name: "diff_page",
+    description:
+      "Compara a página com a leitura anterior e devolve SÓ o que mudou (linhas adicionadas e " +
+      "removidas). A primeira chamada de uma URL grava o ponto de comparação; as seguintes medem " +
+      "a partir dela. Use para 'o que mudou desde ontem' em vez de reler e comparar inteiro. " +
+      "force:true regrava a marca sem comparar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da página" },
+        force: {
+          type: "boolean",
+          description: "Grava a marca de agora sem comparar (padrão false)",
+        },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres do diff retornado (padrão 8000, max 25000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
 ];

@@ -821,6 +821,32 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // ---- fixture do diff_page ----
+    // Conteudo MUDA a cada leitura: e assim que se prova o diff sem esperar
+    // um site de verdade mudar. /diff/muda -> contador; /diff/estavel -> igual.
+    if (path === "/diff/muda") {
+      const n = (hits.get("/diff/muda") || 0) + 1;
+      hits.set("/diff/muda", n);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Pagina que muda</title></head><body>" +
+          "<h1>Titulo estavel</h1>" +
+          "<p>Paragrafo que nunca muda.</p>" +
+          `<p>Versao ${n}</p>` +
+          "</body></html>"
+      );
+      return;
+    }
+    if (path === "/diff/estavel") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Pagina estavel</title></head><body>" +
+          "<h1>Conteudo fixo</h1><p>Nada muda aqui.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
     // ---- fixtures do read_json ----
     if (path === "/json/simples.json") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });

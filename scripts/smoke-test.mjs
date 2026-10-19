@@ -93,7 +93,7 @@ async function main() {
   const list = await rpc("tools/list");
   const names = (list.tools || []).map((t) => t.name);
   console.log("Ferramentas:", names.join(", "));
-  check(names.length === 11, "tools/list retornou as 11 ferramentas");
+  check(names.length === 12, "tools/list retornou as 12 ferramentas");
 
   const p1 = await rpc("tools/call", {
     name: "read_page",
@@ -236,7 +236,7 @@ async function main() {
     });
     check(initData.result?.serverInfo?.name === "web-reader", "HTTP initialize respondeu serverInfo");
     const listData = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    check((listData.result?.tools || []).length === 11, "HTTP tools/list retornou 11 ferramentas");
+    check((listData.result?.tools || []).length === 12, "HTTP tools/list retornou 12 ferramentas");
     const callData = await post({
       jsonrpc: "2.0",
       id: 3,

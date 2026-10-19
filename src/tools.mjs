@@ -29,6 +29,14 @@ import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
 import {
+  snapshots,
+  chaveSnapshot,
+  hashConteudo,
+  normalizarParaDiff,
+  diffDeLinhas,
+  formatarSaidaDiff,
+} from "./snapshot.mjs";
+import {
   ParametroInvalidoError,
   LimiteExcedidoError,
   FerramentaDesconhecidaError,
@@ -583,6 +591,71 @@ export async function toolFindOnPage(args) {
 }
 
 /**
+ * Snapshot e diff de página: relê a URL, compara com a marca da leitura
+ * anterior e devolve SÓ o que mudou.
+ *
+ * Uso típico: "o que mudou no edital desde ontem", "a página de preço mudou?".
+ * Sem a marca, a primeira chamada grava o ponto de comparação (não é erro);
+ * `force: true` grava de novo sem comparar ("marque como lido").
+ */
+export async function toolDiffPage(args) {
+  const parsed = validateHttpUrl(args.url);
+  const maxChars = clampMaxChars(args.maxChars);
+  const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  const chave = chaveSnapshot(parsed.href);
+
+  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
+  ensureHtml(contentType, html, finalUrl);
+
+  const conteudo = isConteudoBruto(contentType, html) ? html : markdownMemo(payload);
+  const hashDepois = hashConteudo(conteudo);
+
+  const marca = snapshots.get(chave);
+  const anterior = marca ? marca.payload : null;
+
+  if (!anterior || args.force) {
+    snapshots.set(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, 64 * 1024) }, conteudo.length);
+    return formatarSaidaDiff({
+      finalUrl,
+      primeiraVez: true,
+      gravado: true,
+      diff: null,
+      hashAntes: null,
+      hashDepois,
+      maxChars,
+    });
+  }
+
+  if (anterior.hash === hashDepois) {
+    return formatarSaidaDiff({
+      finalUrl,
+      primeiraVez: false,
+      gravado: false,
+      diff: { iguais: true },
+      hashAntes: anterior.hash,
+      hashDepois,
+      maxChars,
+    });
+  }
+
+  const diff = diffDeLinhas(anterior.texto || "", conteudo);
+  // A marca avança: o próximo diff mede a partir de agora (é o que a pessoa
+  // espera de "o que mudou desde a ultima vez que eu olhei").
+  snapshots.set(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, 64 * 1024) }, conteudo.length);
+
+  return formatarSaidaDiff({
+    finalUrl,
+    primeiraVez: false,
+    gravado: true,
+    diff,
+    hashAntes: anterior.hash,
+    hashDepois,
+    maxChars,
+  });
+}
+
+/**
  * Acessa uma página e lista seus links.
  */
 export async function toolExtractLinks(args) {
@@ -972,6 +1045,8 @@ export async function callTool(name, args) {
       return await toolReadJson(args || {});
     case "find_on_page":
       return await toolFindOnPage(args || {});
+    case "diff_page":
+      return await toolDiffPage(args || {});
     default:
       throw new FerramentaDesconhecidaError(name);
   }
