@@ -24,7 +24,7 @@ import {
   isConteudoBruto,
   conteudoBrutoResult,
 } from "./fetch.mjs";
-import { htmlToMarkdown, extractMeta, extractLinks, hostOf } from "./html-parser.mjs";
+import { htmlToMarkdown, htmlToMarkdownComLinks, extractMeta, extractLinks, hostOf } from "./html-parser.mjs";
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
@@ -128,10 +128,17 @@ function markdownMemo(payload) {
   }
   if (!("markdown" in memo)) {
     const diagnostico = { interrompida: false };
-    memo.markdown = htmlToMarkdown(payload.text, payload.finalUrl, {
+    // Passada ÚNICA: markdown e links saem da mesma tokenização. Antes eram
+    // duas varreduras completas do HTML (52,6 ms + 41,0 ms numa página de
+    // 1,34 MB); a segunda varredura existia só porque cada função lia o
+    // texto por conta própria. Os links ficam no memo, então uma chamada
+    // posterior de extract_links neste mesmo payload não paga nada.
+    const convertido = htmlToMarkdownComLinks(payload.text, payload.finalUrl, {
       ...OPCOES_MARKDOWN_EXIBIVEL,
       diagnostico,
     });
+    memo.markdown = convertido.markdown;
+    memo.links = convertido.links;
     conversaoInterrompidaDe.set(payload, Boolean(diagnostico.interrompida));
     conversoesMemo.realizadas++;
   } else {

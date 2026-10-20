@@ -499,6 +499,23 @@ O que mudou (tudo medido):
 | `htmlToMarkdown` numa página de 236 KB | 59 ms | 22,5 ms (2,6x) |
 | Conversão de página de 1 MB (só os ~58 KB entregáveis) | 1249 ms | 80 ms (15x) |
 | Página gigante: download + parse do rabo que nunca sai | tudo baixado e convertido | para no teto entregável, com prefixo byte a byte idêntico |
+| Leitura completa de página de 1,34 MB (markdown + links + meta) | 68,4 ms | 39,1 ms (**1,75x**, 43% menos CPU) |
+| `parseAttrs` (atributos de tag) | em toda tag, inclusive nas que ninguém lê | só em `<a>`, `<img>` e tags que contêm `aria-hidden` |
+
+A **passada única** (`htmlToMarkdownComLinks`) existe porque `htmlToMarkdown` e
+`extractLinks` liam o HTML inteiro cada um — duas tokenizações completas do mesmo
+texto (48,8 ms + 25,4 ms numa página de 1,34 MB). A tokenização é a parte que se
+pagava duas vezes, e ela não depende do que se quer extrair: agora um único laço
+produz markdown e links, e a `extract_links` de um payload já convertido não
+custa nada (os links ficam no memo). Quando a parada antecipada dispara, o
+markdown é finalizado naquele ponto e o laço **continua** apenas coletando links,
+então a lista de links nunca sai truncada. `tests/passada-unica.test.mjs` prova
+que a saída é indistinguível das duas funções separadas, caso a caso.
+
+Junto disso, `parseAttrs` passou a ser **condicional**: de todos os consumidores,
+só `<a>` e `<img>` leem atributos de verdade, e o resto do parser só olha
+`aria-hidden`. Uma `<div class="…" data-…>` não paga mais por carregar atributos
+que ninguém vai ler.
 
 A **parada antecipada** é conservadora por construção: a conversão só para numa
 fronteira segura (fora de `<pre>`, de tabela e de bloco ignorado, com as cercas

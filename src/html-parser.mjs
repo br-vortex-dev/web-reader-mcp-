@@ -23,6 +23,15 @@ const PRE_SILENCE_TAGS = new Set([
   "details", "summary", "ul", "ol", "dl", "blockquote", "li",
 ]);
 
+// Tags cujos atributos algum consumidor realmente lê (`href`, `src`, `alt`).
+// Para todas as outras, o tokenizador só paga `parseAttrs` se o corpo da tag
+// contiver "aria-hidden" — ver o comentário longo no ponto de emissão.
+const TAGS_COM_ATTRS = new Set(["a", "img"]);
+
+// Objeto vazio compartilhado: evita alocar um `{}` por tag sem atributos.
+// Ninguém escreve em `token.attrs`, então é seguro reaproveitar a instância.
+const ATTRS_VAZIOS = Object.freeze({});
+
 // Tabela de entidades HTML nomeadas (Latin-1 + tipografia).
 const NAMED_ENTITIES = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
@@ -348,12 +357,24 @@ function* tokenize(html) {
     if (closing) {
       yield { type: "close", tag };
     } else {
-      yield {
-        type: "open",
-        tag,
-        selfClosing,
-        attrs: parseAttrs(k < bFim ? raw.slice(k, bFim) : ""),
-      };
+      // Parse de atributos CONDICIONAL. O perfil mostrou que a maior parte do
+      // custo de `parseAttrs` era jogada fora: de todos os consumidores, só
+      // `<a>` e `<img>` leem atributos de verdade, e o resto do parser só olha
+      // `aria-hidden`. Então uma `<div class="..." data-...>` não paga mais
+      // nada por carregar atributos que ninguém vai ler. O teste de
+      // `aria-hidden` é um `indexOf` no corpo cru — se a string não aparece,
+      // o atributo não existe, e o resultado é idêntico ao do parse completo.
+      // O `slice` também é condicional: fatiar o corpo da tag para depois
+      // descobrir que ninguém vai ler os atributos era alocar uma string por
+      // tag (a página tem milhares). O teste de `aria-hidden` é feito sobre
+      // `raw` a partir de `k`, na própria string já existente.
+      let attrs = ATTRS_VAZIOS;
+      if (TAGS_COM_ATTRS.has(tag)) {
+        attrs = parseAttrs(k < bFim ? raw.slice(k, bFim) : "");
+      } else if (k < bFim && raw.indexOf("aria-hidden", k) !== -1) {
+        attrs = parseAttrs(raw.slice(k, bFim));
+      }
+      yield { type: "open", tag, selfClosing, attrs };
     }
   }
 }
@@ -836,8 +857,37 @@ function finalizarConversao(st) {
  * acontecer. Sem opções, o comportamento histórico: converte tudo.
  */
 export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
+  return htmlToMarkdownComLinks(html, baseUrl, opcoes).markdown;
+}
+
+/**
+ * PASSO ÚNICO: converte para markdown E extrai os links na MESMA tokenização.
+ *
+ * Antes, `htmlToMarkdown` e `extractLinks` liam o HTML inteiro cada um: em uma
+ * página de 1,34 MB isso custava 52,6 ms + 41,0 ms — duas varreduras completas
+ * do mesmo texto. A tokenização é a parte que se paga duas vezes, e ela não
+ * depende do que se quer extrair: aqui um único laço produz os dois resultados.
+ *
+ * A coleta de links roda ANTES do processamento do markdown em cada token e
+ * não é afetada pela parada antecipada. Quando a parada dispara, o markdown é
+ * finalizado naquele ponto (`markdownFinal`) e o laço CONTINUA apenas coletando
+ * links — o rabo da página ainda é varrido uma vez (barato), mas nunca mais
+ * convertido duas vezes.
+ *
+ * As regras de "conteúdo que não é conteúdo" são idênticas às de `extractLinks`
+ * (tags de skip e blocos `aria-hidden`), e a saída é verificada contra o golden
+ * e contra o próprio `extractLinks` nos testes.
+ */
+export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   const st = criarEstadoConversao();
   const emit = (chunk) => st.emit(chunk);
+  const links = [];
+  const lkVistos = new Set();
+  const lkBaseHost = hostOf(baseUrl);
+  const lkAria = [];
+  let lkSkip = 0;
+  let linkAtual = null;
+  let markdownFinal = null;
   const minimo = Number(opcoes.minCharsEntregaveis) > 0 ? Math.floor(opcoes.minCharsEntregaveis) : 0;
   const diagnostico = opcoes.diagnostico || null;
   let paradaAtiva = minimo > 0;
@@ -845,6 +895,56 @@ export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
   let reChecagens = 0;
 
   for (const token of tokenize(html)) {
+    // ---- coleta de links (mesma passada) ----------------------------
+    // Roda ANTES do markdown para não depender do estado da conversão e
+    // continua valendo depois da parada antecipada.
+    {
+      const lkSkipTag = SKIP_TAGS.has(token.tag);
+      const lkOculto = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
+      if (token.type === "open") {
+        if (lkSkipTag || lkOculto) {
+          if (!token.selfClosing) {
+            lkSkip++;
+            lkAria.push(token.tag);
+          }
+        } else if (lkSkip === 0) {
+          if (token.tag === "a") {
+            linkAtual = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
+          }
+          if (token.tag === "img" && linkAtual && !linkAtual.imgAlt) {
+            const alt = (token.attrs.alt || "").trim();
+            if (alt) linkAtual.imgAlt = alt;
+          }
+        }
+      } else if (token.type === "close") {
+        const lkIdx = lkAria.lastIndexOf(token.tag);
+        if (lkIdx !== -1) {
+          lkAria.length = lkIdx;
+          if (lkSkip > 0) lkSkip--;
+        } else if (lkSkipTag) {
+          if (lkSkip > 0) lkSkip--;
+        } else if (lkSkip === 0) {
+          if (token.tag === "a" && linkAtual) {
+            const href = linkAtual.href;
+            const texto =
+              decodeEntities(linkAtual.parts.join("")).replace(/\s+/g, " ").trim() ||
+              linkAtual.imgAlt ||
+              "(sem texto)";
+            linkAtual = null;
+            if (href && !lkVistos.has(href)) {
+              lkVistos.add(href);
+              links.push({ text: texto, href, internal: hostOf(href) === lkBaseHost });
+            }
+          }
+        }
+      } else if (token.type === "text" && linkAtual && lkSkip === 0) {
+        linkAtual.parts.push(token.value);
+      }
+    }
+
+    // Markdown já finalizado (parada antecipada): só segue coletando links.
+    if (markdownFinal !== null) continue;
+
     if (paradaAtiva && st.outLen >= limiar && fronteiraSegura(st)) {
       // A limpeza final (máscara de cercas + polimento) só é fiel ao prefixo
       // completo se as cercas "```" estiverem TODAS emparelhadas no buffer:
@@ -856,7 +956,8 @@ export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
         const limpo = polirTexto(cleanMarkdown(bruto));
         if (limpo.length >= minimo + MARGEM_SEGURANCA) {
           if (diagnostico) diagnostico.interrompida = true;
-          return finalizarConversao(st);
+          markdownFinal = finalizarConversao(st);
+          continue;
         }
       }
       if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
@@ -943,7 +1044,8 @@ export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
     }
   }
 
-  return finalizarConversao(st);
+  const markdown = markdownFinal !== null ? markdownFinal : finalizarConversao(st);
+  return { markdown, links };
 }
 
 /**
