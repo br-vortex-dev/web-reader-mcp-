@@ -612,13 +612,20 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
     if (hitQuente && !hitQuente.stale) return hitQuente.payload;
   }
 
-  // Ordem importa: valida o SSRF do host ANTES de qualquer outra saída — e só
-  // depois checa o robots.txt (que revalida o host de novo e sai pelo
-  // transporte pinado). Antes os dois rodavam em Promise.all e o fetch do
-  // robots escapava do bloqueio, tocando endereço interno (prova em
+  // O SSRF do host é validado ANTES de qualquer outra saída (o fetch do robots
+  // escapava do bloqueio quando os dois iam juntos sem essa ordem — prova em
   // dev/_probe-robots-ssrf.mjs: o servidor interno recebia GET /robots.txt).
   await assertPublicHost(url);
-  await checarRobots(url);
+
+  // O robots.txt checa o MESMO host já validado acima, então não precisa
+  // terminar antes do download: os dois são independentes e o robots custa
+  // uma ida inteira à rede (120-380ms medidos em dev/_perfil.mjs). Dispara os
+  // dois juntos e cobra a decisão no fim — se negar, o corpo baixado é
+  // descartado e nada entra no cache, exatamente como antes.
+  const robotsEmCurso = checarRobots(url);
+  // Se o download falhar primeiro, ninguém vai esperar o robots: a rejeição
+  // dele não pode virar "unhandled rejection" e derrubar o processo.
+  robotsEmCurso.catch(() => {});
 
   // Ordem importa: o teto POR HOST vem por fora e o global por dentro. Assim,
   // quem espera na fila do próprio host NÃO segura vaga global — no pior caso,
@@ -639,6 +646,11 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
       fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair })
     )
   );
+
+  // O robots rodou em paralelo com o download; aqui a decisão dele é cobrada.
+  // Negado => RobotBloqueadoError sobe e o corpo baixado é descartado sem
+  // entrar no cache (mesmo efeito de antes, só sem somar as duas latências).
+  await robotsEmCurso;
   // Transformação opcional ANTES do cache: o leitor de PDF baixa bytes e
   // converte em texto aqui, para que a entrada do cache (e a junção em voo)
   // guardem o RESULTADO e uma releitura não reparseie o PDF.

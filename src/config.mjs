@@ -168,7 +168,11 @@ export const RETRY_AFTER_MAX_MS = 10000;
 export const ROBOTS_RESPECT = process.env.ROBOTS_RESPECT !== "0";
 export const ROBOTS_TTL_MS = Math.max(500, Math.floor(Number(process.env.ROBOTS_TTL_MS) || 15 * 60 * 1000));
 export const ROBOTS_TIMEOUT_MS = Math.max(500, Math.min(15000, Math.floor(Number(process.env.ROBOTS_TIMEOUT_MS) || 2500)));
-export const ROBOTS_NEGATIVE_TTL_MS = 60000;
+// Cache da INACESSIBILIDADE (404/timeout no robots.txt). Subiu de 60s para
+// 15 min: um host sem robots.txt é o caso mais comum da web, e com 60s um site
+// movimentado repunha essa ida à rede toda hora. Robots inacessível é estável
+// — se o dono publicar um depois, a próxima janela pega.
+export const ROBOTS_NEGATIVE_TTL_MS = Math.max(60000, Math.floor(Number(process.env.ROBOTS_NEGATIVE_TTL_MS) || ROBOTS_TTL_MS));
 export const ROBOTS_MAX_BYTES = 512 * 1024;
 export const ROBOTS_MAX_ORIGINS = 1000;
 // Teto de concorrencia das buscas de robots.txt (uma por origem). Sem ele,

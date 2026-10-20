@@ -979,31 +979,46 @@ export async function toolCrawlSite(args) {
   }
 
   const CONCURRENCY = FETCH_CONCURRENCY;
-  while (queue.length > 0 && lidas < maxPages) {
-    const lote = [];
-    while (
-      lote.length < CONCURRENCY &&
-      queue.length > 0 &&
-      lidas + lote.length < maxPages
-    ) {
-      lote.push(queue.shift());
-    }
-    if (lote.length === 0) break;
-
-    const resultados = await Promise.all(
-      lote.map(async (url) => {
-        try {
-          return { ok: true, url, ...(await lerPaginaCompleta(url, maxChars, timeoutMs)) };
-        } catch (err) {
-          return { ok: false, url, erro: err };
-        }
-      })
-    );
-
-    for (const r of resultados) {
+  // Pool contínuo em vez de lotes de CONCURRENCY com Promise.all por bloco.
+  // No lote, os itens seguintes só começavam quando o MAIS LENTO do bloco
+  // terminava — uma página pendurada segurava as outras 31 vagas. Aqui cada
+  // vaga puxa a próxima URL assim que fica livre; a concorrência é a mesma e
+  // os limitadores do fetch (global, por host, memória) seguem no comando.
+  // A fila é alimentada pelas páginas recém-lidas, então a vaga que encontra
+  // a fila vazia não pode simplesmente sair: outra vaga ainda ativa vai
+  // empurrar links. Ela espera o aviso `acordar()` e reavalia.
+  // Deadlock é impossível: quem espera nunca é quem está baixando, e a última
+  // leitura sempre acorda todo mundo antes de terminar (que então reavalia,
+  // vê fila vazia e nenhum ativo, e sai).
+  // São sempre CONCURRENCY trabalhadores — mesmo com a fila inicial curta —
+  // porque o crawl cresce sozinho: com um só, o resto do site seria lido em
+  // série, um por vez.
+  const emEspera = [];
+  const acordar = () => {
+    while (emEspera.length > 0) emEspera.shift()();
+  };
+  let ativos = 0;
+  const trabalhador = async () => {
+    for (;;) {
+      if (lidas + ativos >= maxPages) return;
+      if (queue.length === 0) {
+        if (ativos === 0) return; // não há leitura em curso para descobrir mais URLs
+        await new Promise((res) => emEspera.push(res));
+        continue;
+      }
+      const url = queue.shift();
+      ativos++;
+      let r;
+      try {
+        r = { ok: true, url, ...(await lerPaginaCompleta(url, maxChars, timeoutMs)) };
+      } catch (err) {
+        r = { ok: false, url, erro: err };
+      }
+      ativos--;
       if (r.ok) {
         conteudos.push(r.conteudo);
         lidas++;
+        // Só os links de uma leitura BEM-SUCEDIDA entram na fila.
         for (const href of r.links) {
           if (!visited.has(href)) {
             visited.add(href);
@@ -1014,8 +1029,10 @@ export async function toolCrawlSite(args) {
         falhas.push({ url: r.url, motivo: classifyFetchError(r.erro), mensagem: r.erro.message });
         conteudos.push(`# Erro ao ler ${r.url}\n${r.erro.message}`);
       }
+      acordar();
     }
-  }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, trabalhador));
 
   let cabecalho =
     `Crawl de ${start.href}: ${lidas} pagina(s) lida(s) (limite ${maxPages}, dominio ${baseHost}).`;

@@ -1,12 +1,12 @@
 {
-  "base": "http://127.0.0.1:6480",
-  "quando": "2026-10-19T21:59:11.511Z",
+  "base": "http://127.0.0.1:6676",
+  "quando": "2026-10-20T23:42:57.192Z",
   "resultados": [
     {
       "ferramenta": "tools/list",
       "alvo": "catalogo",
       "ok": true,
-      "ms": 56,
+      "ms": 23,
       "status": 200,
       "chars": 8879,
       "obs": "12 ferramentas"
@@ -15,7 +15,7 @@
       "ferramenta": "read_page",
       "alvo": "guardian (teto 25000)",
       "ok": true,
-      "ms": 640,
+      "ms": 408,
       "status": 200,
       "chars": 25338,
       "obs": ""
@@ -24,7 +24,7 @@
       "ferramenta": "read_page",
       "alvo": "wikipedia/Brazil",
       "ok": true,
-      "ms": 927,
+      "ms": 759,
       "status": 200,
       "chars": 25229,
       "obs": ""
@@ -33,7 +33,7 @@
       "ferramenta": "read_page",
       "alvo": "guardian (cache quente)",
       "ok": true,
-      "ms": 15,
+      "ms": 10,
       "status": 200,
       "chars": 25338,
       "obs": "esperado: bem menor"
@@ -42,18 +42,18 @@
       "ferramenta": "extract_links",
       "alvo": "bbc.com/news limit 500",
       "ok": true,
-      "ms": 220,
+      "ms": 137,
       "status": 200,
-      "chars": 9531,
+      "chars": 8479,
       "obs": ""
     },
     {
       "ferramenta": "read_multiple_pages",
       "alvo": "10 sites pesados",
       "ok": true,
-      "ms": 2004,
+      "ms": 1153,
       "status": 200,
-      "chars": 8715,
+      "chars": 8713,
       "obs": ""
     },
     {
@@ -69,7 +69,7 @@
       "ferramenta": "crawl_site",
       "alvo": "iana.org maxPages 5",
       "ok": true,
-      "ms": 1827,
+      "ms": 617,
       "status": 200,
       "chars": 6398,
       "obs": ""
@@ -78,7 +78,7 @@
       "ferramenta": "read_dynamic_page",
       "alvo": "nextjs.org (SPA)",
       "ok": true,
-      "ms": 331,
+      "ms": 189,
       "status": 200,
       "chars": 4349,
       "obs": ""
@@ -87,7 +87,7 @@
       "ferramenta": "read_video",
       "alvo": "youtube",
       "ok": true,
-      "ms": 574,
+      "ms": 1001,
       "status": 200,
       "chars": 1382,
       "obs": ""
@@ -96,7 +96,7 @@
       "ferramenta": "read_pdf",
       "alvo": "arxiv 1706.03762",
       "ok": true,
-      "ms": 4594,
+      "ms": 1432,
       "status": 200,
       "chars": 5231,
       "obs": ""
@@ -105,16 +105,16 @@
       "ferramenta": "read_feed",
       "alvo": "hnrss frontpage",
       "ok": true,
-      "ms": 6623,
+      "ms": 882,
       "status": 200,
-      "chars": 7420,
+      "chars": 6823,
       "obs": ""
     },
     {
       "ferramenta": "read_json",
       "alvo": "api.github nodejs/node",
       "ok": true,
-      "ms": 365,
+      "ms": 118,
       "status": 200,
       "chars": 141,
       "obs": ""
@@ -123,7 +123,7 @@
       "ferramenta": "find_on_page",
       "alvo": "wikipedia/Brazil 'Brasil'",
       "ok": true,
-      "ms": 14,
+      "ms": 13,
       "status": 200,
       "chars": 4202,
       "obs": ""
@@ -132,7 +132,7 @@
       "ferramenta": "diff_page",
       "alvo": "guardian (marca)",
       "ok": true,
-      "ms": 25,
+      "ms": 15,
       "status": 200,
       "chars": 258,
       "obs": ""
@@ -141,7 +141,7 @@
       "ferramenta": "diff_page",
       "alvo": "guardian (compara)",
       "ok": true,
-      "ms": 8,
+      "ms": 13,
       "status": 200,
       "chars": 150,
       "obs": ""
