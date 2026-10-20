@@ -1,0 +1,42 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "quando": "2026-10-20T00:20:09.247Z",
+  "voltas": 4,
+  "resumo": [
+    {
+      "site": "amazon.com",
+      "medianaMs": 261,
+      "minMs": 253,
+      "maxMs": 266,
+      "amostras": 4
+    },
+    {
+      "site": "washingtonpost.com",
+      "medianaMs": 1370,
+      "minMs": 1245,
+      "maxMs": 1807,
+      "amostras": 4
+    },
+    {
+      "site": "guardian.com",
+      "medianaMs": 273,
+      "minMs": 245,
+      "maxMs": 291,
+      "amostras": 4
+    },
+    {
+      "site": "wikipedia/Brazil",
+      "medianaMs": 280,
+      "minMs": 254,
+      "maxMs": 309,
+      "amostras": 4
+    },
+    {
+      "site": "bbc.com/news",
+      "medianaMs": 257,
+      "minMs": 251,
+      "maxMs": 262,
+      "amostras": 4
+    }
+  ]
+}
