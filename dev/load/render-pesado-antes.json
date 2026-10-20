@@ -1,0 +1,206 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "rotulo": "antes",
+  "quando": "2026-10-20T00:15:42.152Z",
+  "aquecimentoMs": 1114,
+  "resultados": [
+    {
+      "ferramenta": "tools/list",
+      "alvo": "catalogo",
+      "ok": true,
+      "ms": 252,
+      "status": 200,
+      "chars": 8879,
+      "obs": "12 ferramentas"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "amazon.com",
+      "ok": true,
+      "ms": 1346,
+      "status": 200,
+      "chars": 590,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "nytimes.com",
+      "ok": false,
+      "ms": 895,
+      "status": 200,
+      "chars": 60,
+      "obs": "Erro: HTTP 403 Forbidden ao acessar https://www.nytimes.com/"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "washingtonpost.com",
+      "ok": true,
+      "ms": 3066,
+      "status": 200,
+      "chars": 25589,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "reddit.com",
+      "ok": false,
+      "ms": 297,
+      "status": 200,
+      "chars": 136,
+      "obs": "Erro: Bloqueado por robots.txt de www.reddit.com: o caminho / casa com \"Disallow: /\". Defina ROBOTS_RESPECT=0 para ignorar o robots.txt."
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "reuters.com",
+      "ok": false,
+      "ms": 401,
+      "status": 200,
+      "chars": 137,
+      "obs": "Erro: Bloqueado por robots.txt de www.reuters.com: o caminho / casa com \"Disallow: /\". Defina ROBOTS_RESPECT=0 para ignorar o robots.txt."
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "guardian.com",
+      "ok": true,
+      "ms": 1101,
+      "status": 200,
+      "chars": 25338,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "wikipedia/Brazil",
+      "ok": true,
+      "ms": 2290,
+      "status": 200,
+      "chars": 25229,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "stackoverflow/questions",
+      "ok": false,
+      "ms": 306,
+      "status": 200,
+      "chars": 71,
+      "obs": "Erro: HTTP 403 Forbidden ao acessar https://stackoverflow.com/questions"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "guardian (cache quente)",
+      "ok": true,
+      "ms": 408,
+      "status": 200,
+      "chars": 25338,
+      "obs": "esperado: muito menor"
+    },
+    {
+      "ferramenta": "extract_links",
+      "alvo": "bbc.com/news limit 500",
+      "ok": true,
+      "ms": 393,
+      "status": 200,
+      "chars": 9300,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_multiple_pages",
+      "alvo": "10 sites pesados",
+      "ok": true,
+      "ms": 596,
+      "status": 200,
+      "chars": 9114,
+      "obs": ""
+    },
+    {
+      "ferramenta": "discover_urls",
+      "alvo": "bbc.com sitemap",
+      "ok": true,
+      "ms": 475,
+      "status": 200,
+      "chars": 291,
+      "obs": ""
+    },
+    {
+      "ferramenta": "crawl_site",
+      "alvo": "iana.org maxPages 5",
+      "ok": true,
+      "ms": 2422,
+      "status": 200,
+      "chars": 6398,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_dynamic_page",
+      "alvo": "nextjs.org SPA",
+      "ok": true,
+      "ms": 505,
+      "status": 200,
+      "chars": 4349,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_video",
+      "alvo": "youtube",
+      "ok": true,
+      "ms": 802,
+      "status": 200,
+      "chars": 545,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_pdf",
+      "alvo": "arxiv 1706.03762",
+      "ok": true,
+      "ms": 6792,
+      "status": 200,
+      "chars": 5231,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_feed",
+      "alvo": "hnrss frontpage",
+      "ok": true,
+      "ms": 1116,
+      "status": 200,
+      "chars": 6952,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_json",
+      "alvo": "api.github nodejs/node",
+      "ok": true,
+      "ms": 578,
+      "status": 200,
+      "chars": 141,
+      "obs": ""
+    },
+    {
+      "ferramenta": "find_on_page",
+      "alvo": "wikipedia 'Brasil'",
+      "ok": true,
+      "ms": 231,
+      "status": 200,
+      "chars": 4202,
+      "obs": ""
+    },
+    {
+      "ferramenta": "diff_page",
+      "alvo": "guardian (marca)",
+      "ok": true,
+      "ms": 246,
+      "status": 200,
+      "chars": 258,
+      "obs": ""
+    },
+    {
+      "ferramenta": "diff_page",
+      "alvo": "guardian (compara)",
+      "ok": true,
+      "ms": 248,
+      "status": 200,
+      "chars": 150,
+      "obs": ""
+    }
+  ]
+}
