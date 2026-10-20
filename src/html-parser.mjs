@@ -1126,27 +1126,61 @@ export function extractLinks(html, baseUrl) {
 /**
  * Extrai metadados do HTML cru: título, meta descrição, autor e data de publicação.
  */
+const META_TAGS_CHAVES_DESCRICAO = new Set(["description", "og:description"]);
+const META_TAGS_CHAVES_TITULO = new Set(["og:title", "twitter:title"]);
+const META_TAGS_CHAVES_DATA = new Set([
+  "article:published_time",
+  "og:published_time",
+  "date",
+  "pubdate",
+]);
+
 export function extractMeta(html) {
   let title = "";
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (titleMatch) title = decodeEntities(titleMatch[1]).replace(/\s+/g, " ").trim();
 
-  const metaContent = (pattern) => {
-    const m = html.match(pattern);
-    if (!m) return "";
-    const c = m[0].match(/content\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
-    if (!c) return "";
-    return decodeEntities(c[1] ?? c[2] ?? c[3] ?? "").trim();
-  };
+  // UMA varredura das tags <meta> em vez de quatro regex de documento inteiro.
+  // Antes, cada campo (descrição, og:title, autor, data) varria o HTML do
+  // começo ao fim com um padrão `<meta[^>]+...` — quatro passadas completas,
+  // e o `<meta` seguido de `[^>]+` ainda é um padrão que o motor de regex
+  // explora com backtracking. Aqui o documento é varrido uma vez, cada tag é
+  // lida com o scanner de atributos que já existe, e o primeiro valor de cada
+  // campo (ordem do documento, como antes) vence.
+  let description = "";
+  let ogTitle = "";
+  let author = "";
+  let published = "";
 
-  const description =
-    metaContent(/<meta[^>]+(?:name|property)\s*=\s*["'](?:description|og:description)["'][^>]*>/i) || "";
-  const ogTitle = metaContent(/<meta[^>]+(?:name|property)\s*=\s*["'](?:og:title|twitter:title)["'][^>]*>/i);
-  const author = metaContent(/<meta[^>]+name\s*=\s*["']author["'][^>]*>/i);
-  const published =
-    metaContent(
-      /<meta[^>]+(?:name|property)\s*=\s*["'](?:article:published_time|og:published_time|date|pubdate)["'][^>]*>/i
-    ) || "";
+  const reMeta = /<meta\b[^>]*>/gi;
+  let achado;
+  let faltam = 4;
+  while (faltam > 0 && (achado = reMeta.exec(html)) !== null) {
+    const attrs = parseAttrs(achado[0].slice(5, -1));
+    const chave = String(attrs.property || attrs.name || "").toLowerCase();
+    if (!chave) continue;
+    const conteudo = attrs.content;
+    if (conteudo === undefined) continue;
+    const valor = decodeEntities(conteudo).trim();
+    if (!valor) continue;
+    if (!description && META_TAGS_CHAVES_DESCRICAO.has(chave)) {
+      description = valor;
+      faltam--;
+    }
+    if (!ogTitle && META_TAGS_CHAVES_TITULO.has(chave)) {
+      ogTitle = valor;
+      faltam--;
+    }
+    // `author` no HTML original só casava pelo atributo `name`.
+    if (!author && attrs.name && chave === "author") {
+      author = valor;
+      faltam--;
+    }
+    if (!published && META_TAGS_CHAVES_DATA.has(chave)) {
+      published = valor;
+      faltam--;
+    }
+  }
 
   return {
     title: title || ogTitle,
