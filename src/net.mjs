@@ -10,6 +10,15 @@
  * O resto do módulo é o que o fetch fazia sozinho e agora fica explícito:
  * descompressão (gzip/deflate/br), leitura com teto em bytes e descarte de
  * corpos que não interessam (redirects e respostas de erro).
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma URL já validada por assertPublicHost.
+ *   Sai:   a resposta crua (status, headers, corpo) ou os bytes já
+ *          descomprimidos — sem julgar conteúdo.
+ *
+ * QUEM USA
+ *   Usado por: fetch (o único que baixa) e security.
+ *   Importa de: config, errors.
  */
 
 import http from "node:http";

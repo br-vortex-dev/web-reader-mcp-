@@ -1,7 +1,26 @@
 /**
- * Transporte HTTP Streamable (Render): rate limiter, autenticação, corpo com
- * teto, handlers e /health. Sem lógica de roteamento JSON-RPC — isso vive em
- * server.mjs.
+ * http-transport.mjs — o servidor web do Render: quem recebe a requisição.
+ *
+ * O QUE É
+ *   O transporte HTTP Streamable. Ele cuida de tudo que acontece ANTES do
+ *   JSON-RPC ser interpretado, e de algumas coisas depois:
+ *   - rate limit por cliente e admissão (quantas requisições ao mesmo tempo);
+ *   - autenticação por token (comparação em tempo constante);
+ *   - leitura do corpo com teto de bytes e descompressão;
+ *   - resposta comprimida (gzip/deflate/br) e resposta JSON;
+ *   - as rotas de serviço: /health, OPTIONS e o 404.
+ *
+ *   Ele NÃO interpreta JSON-RPC: só entrega a mensagem para o roteador em
+ *   server.mjs e devolve a resposta dele. Essa separação é o que permite
+ *   testar o roteamento sem subir servidor HTTP.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma requisição HTTP (headers, corpo).
+ *   Sai:   uma resposta HTTP — JSON-RPC, ou 401/413/429/404 com o motivo.
+ *
+ * QUEM USA
+ *   Usado por: server.mjs (que é o ponto de entrada).
+ *   Importa de: config, errors, fetch, tools, video.
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
@@ -632,47 +651,73 @@ export function handlerEncerrarSessao(req, res, ctx) {
  * Handler de POST /mcp: a sequência de validações (auth → rate limit → método →
  * admissão → corpo → dispatch).
  */
-export async function handlerMcp(req, res, ctx) {
-  const { authToken, rateLimiter, rateLimitWindowMs, maxBodyBytes } = ctx;
+/**
+ * Guarda 1: autenticação por token.
+ * Devolve true quando a requisição FOI RECUSADA (a resposta já foi enviada).
+ *
+ * O token pode vir no header Authorization: Bearer, ou em x-mcp-token. A
+ * comparação é em tempo constante (tokenConfere) para não vazar o conteúdo
+ * do token pelo tempo de resposta.
+ */
+function recusarPorAuth(req, res, authToken) {
+  if (!authToken) return false;
+  const authHeader = String(req.headers.authorization || "");
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const token = bearer || String(req.headers["x-mcp-token"] || "");
+  if (tokenConfere(token, authToken)) return false;
+  handlerNaoAutorizado(res);
+  return true;
+}
 
-  if (authToken) {
-    const authHeader = String(req.headers.authorization || "");
-    const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-    const token = bearer || String(req.headers["x-mcp-token"] || "");
-    if (!tokenConfere(token, authToken)) return handlerNaoAutorizado(res);
-  }
-
+/**
+ * Guarda 2: rate limit por cliente.
+ * Devolve true quando a requisição FOI RECUSADA (a resposta já foi enviada).
+ */
+function recusarPorRateLimit(req, res, ctx) {
   const clientIp = clientIpOf(req, ctx.trustProxyHops);
-  const { bloqueado } = rateLimiter.registrar(clientIp, Date.now());
-  if (bloqueado) return handlerRateLimit(res, rateLimitWindowMs);
+  const { bloqueado } = ctx.rateLimiter.registrar(clientIp, Date.now());
+  if (!bloqueado) return false;
+  handlerRateLimit(res, ctx.rateLimitWindowMs);
+  return true;
+}
 
-  if (req.method !== "POST") {
-    // GET/DELETE do /mcp são da spec do transporte (canal SSE e encerramento
-    // de sessão). Caem aqui quando a rota já decidiu, mas mantém a resposta
-    // certa caso cheguem por este caminho.
-    if (req.method === "GET") return handlerSse(req, res, ctx);
-    if (req.method === "DELETE") return handlerEncerrarSessao(req, res, ctx);
-    return handlerMetodoNaoPermitido(res);
+/**
+ * Guarda 3: método HTTP.
+ * GET e DELETE do /mcp são da spec do transporte (canal SSE e encerramento de
+ * sessão). Quando chegam por este caminho, cada um recebe a resposta certa.
+ * Devolve true quando a requisição já foi tratada aqui.
+ */
+function tratarMetodoEspecial(req, res, ctx) {
+  if (req.method === "POST") return false;
+  if (req.method === "GET") {
+    handlerSse(req, res, ctx);
+    return true;
   }
-
-  try {
-    await admissaoHttp.adquirir();
-  } catch (err) {
-    return handlerAdmissaoRecusada(res, err.message);
+  if (req.method === "DELETE") {
+    handlerEncerrarSessao(req, res, ctx);
+    return true;
   }
+  handlerMetodoNaoPermitido(res);
+  return true;
+}
 
-  // A vaga é liberada UMA vez, aconteça o que acontecer. O watchdog cobre o
-  // caso em que o cliente some de um jeito que o Node não sinaliza (proxy que
-  // não propaga o abort): sem ele, o handler fica pendurado e a vaga nunca
-  // volta — foi o estado visto em produção (128 vagas presas por >100 min).
+/**
+ * Cria o par "liberar a vaga da admissão + watchdog".
+ *
+ * A vaga é liberada UMA vez, aconteça o que acontecer. O watchdog cobre o
+ * caso em que o cliente some de um jeito que o Node não sinaliza (proxy que
+ * não propaga o abort): sem ele, o handler fica pendurado e a vaga nunca
+ * volta — foi o estado visto em produção (128 vagas presas por >100 min).
+ */
+function criarTravaDeVaga(res) {
   let liberado = false;
-  const liberarUmaVez = () => {
+  const liberar = () => {
     if (liberado) return;
     liberado = true;
     admissaoHttp.liberar();
   };
   const watchdog = setTimeout(() => {
-    liberarUmaVez();
+    liberar();
     if (res.writableEnded || res.destroyed) return;
     try {
       res.writeHead(503, {
@@ -692,6 +737,52 @@ export async function handlerMcp(req, res, ctx) {
     }
   }, HTTP_REQUEST_TIMEOUT_MS);
   watchdog.unref();
+  return { liberar, watchdog };
+}
+
+/**
+ * Decide os cabeçalhos de sessão da resposta.
+ *
+ * Se a resposta trouxe um `initialize`, emite o Mcp-Session-Id: cliente que já
+ * mandou uma sessão válida mantém a dele, quem não mandou recebe uma nova. O
+ * header é ADITIVO — quem ignora não é afetado. Nos outros casos a sessão
+ * enviada só é tocada (mantém o prazo de validade viva).
+ */
+function cabecalhosDeSessao(req, responses) {
+  const headersExtra = { "access-control-allow-origin": "*" };
+  const enviada = String(req.headers["mcp-session-id"] || "").trim();
+  const houveInitialize = responses.some((r) => r && r.result && r.result.protocolVersion);
+  if (houveInitialize) {
+    headersExtra["mcp-session-id"] = enviada && tocarSessao(enviada) ? enviada : criarSessao();
+  } else if (enviada) {
+    tocarSessao(enviada);
+  }
+  return headersExtra;
+}
+
+/**
+ * Handler de POST /mcp: a sequência de validações (auth → rate limit → método →
+ * admissão → corpo → dispatch).
+ *
+ * A ordem importa e não é aleatória: a autenticação vem antes de qualquer
+ * trabalho (não se gasta CPU com quem não tem token) e a admissão vem depois
+ * do rate limit (quem está bloqueado não ocupa vaga). Cada guarda devolve
+ * "já respondi?" para que o fluxo principal fique legível de cima a baixo.
+ */
+export async function handlerMcp(req, res, ctx) {
+  const { maxBodyBytes } = ctx;
+
+  if (recusarPorAuth(req, res, ctx.authToken)) return;
+  if (recusarPorRateLimit(req, res, ctx)) return;
+  if (tratarMetodoEspecial(req, res, ctx)) return;
+
+  try {
+    await admissaoHttp.adquirir();
+  } catch (err) {
+    return handlerAdmissaoRecusada(res, err.message);
+  }
+
+  const { liberar, watchdog } = criarTravaDeVaga(res);
 
   try {
     let parsed;
@@ -706,19 +797,6 @@ export async function handlerMcp(req, res, ctx) {
 
     const { responses, eraArray } = await processarCorpo(parsed);
 
-    // Sessão: se a resposta trouxe um `initialize`, emite o Mcp-Session-Id.
-    // Cliente que já mandou uma sessão válida mantém a dele; quem não mandou
-    // recebe uma nova. O header é ADITIVO — quem ignora não é afetado.
-    const headersExtra = { "access-control-allow-origin": "*" };
-    const houveInitialize = responses.some((r) => r && r.result && r.result.protocolVersion);
-    if (houveInitialize) {
-      const enviada = String(req.headers["mcp-session-id"] || "").trim();
-      headersExtra["mcp-session-id"] = enviada && tocarSessao(enviada) ? enviada : criarSessao();
-    } else {
-      const enviada = String(req.headers["mcp-session-id"] || "").trim();
-      if (enviada) tocarSessao(enviada);
-    }
-
     if (responses.length === 0) {
       res.writeHead(202, {
         "content-type": "application/json",
@@ -729,10 +807,16 @@ export async function handlerMcp(req, res, ctx) {
       return;
     }
 
-    responderJson(req, res, 200, responses.length === 1 && !eraArray ? responses[0] : responses, headersExtra);
+    responderJson(
+      req,
+      res,
+      200,
+      responses.length === 1 && !eraArray ? responses[0] : responses,
+      cabecalhosDeSessao(req, responses)
+    );
   } finally {
     clearTimeout(watchdog);
-    liberarUmaVez();
+    liberar();
   }
 }
 

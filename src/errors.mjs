@@ -1,6 +1,21 @@
 /**
- * Classes de erro customizadas do web-reader-mcp.
- * Padroniza mensagens e facilita classificação automática de falhas.
+ * errors.mjs — um tipo de erro para cada coisa que pode dar errado.
+ *
+ * O QUE É
+ *   Cada falha possível tem uma classe própria (HostBloqueadoError,
+ *   TimeoutError, RobotsBloqueadoError, ParametroInvalidoError...) com um
+ *   `code` estável e o contexto que importa (URL, host, causa original).
+ *
+ *   Por que não um `new Error("...")` só: quem chama precisa DECIDIR o que
+ *   fazer. Com tipo, a decisão é `instanceof`; sem tipo, sobra comparar
+ *   pedaço de mensagem — que quebra na primeira vez que o texto mudar.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma mensagem legível e um objeto de opções (code, url, host, cause).
+ *   Sai:   um erro tipado, pronto para virar resposta MCP com isError.
+ *
+ * QUEM USA
+ *   Usado por: fetch, http-transport, net, security, tools, utils, video.
  */
 
 export class WebReaderError extends Error {

@@ -1,6 +1,21 @@
 /**
- * Schemas JSON das ferramentas expostas ao cliente MCP (tools/list).
- * Separado do roteador para manter server.mjs enxuto.
+ * tool-schemas.mjs — o catálogo: o que o servidor oferece ao cliente MCP.
+ *
+ * O QUE É
+ *   A lista TOOLS com nome, descrição e schema JSON de cada ferramenta. É
+ *   esta lista que o cliente recebe em `tools/list` e usa para decidir qual
+ *   ferramenta chamar — ou seja, a descrição aqui é documentação que a IA lê.
+ *
+ *   Fica separado do roteador de propósito: mudar um texto de descrição não
+ *   deve exigir mexer na lógica, e o snapshot em tests/snapshot/tools-list.json
+ *   só deve mudar quando o catálogo mudar DE VERDADE.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: nada. É uma constante.
+ *   Sai:   o array TOOLS, consumido por server.mjs e http-transport.mjs.
+ *
+ * QUEM USA
+ *   Usado por: server.mjs. Conferido pelo teste tools-list.
  */
 
 // Definição das ferramentas (schema JSON).

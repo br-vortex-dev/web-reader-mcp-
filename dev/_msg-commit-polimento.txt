@@ -1,0 +1,21 @@
+Polimento de legibilidade: cabecalhos padronizados, funcoes quebradas e nomes claros
+
+Nenhuma mudanca de comportamento: golden do parser byte a byte identico
+(sha256 929d3a47...), 259 testes verdes e CPU na mesma faixa (43,0 ->
+40,9/44,9ms no mesmo HTML de 1,34 MB).
+
+- Cabecalho padrao nos 15 modulos de src/: o que e, o que entra/sai, quem usa
+- Funcoes grandes quebradas em pecas nomeadas:
+  htmlToMarkdownComLinks 169->113 (criarColetorDeLinks, tentarFinalizar)
+  fetchBytes 118->78 (montarCabecalhos, descreverPayload, fraseDeStatus)
+  handlerMcp 103 (recusarPorAuth, recusarPorRateLimit, tratarMetodoEspecial,
+    criarTravaDeVaga, cabecalhosDeSessao)
+  criarLimitadorPorChave 105 (enfileirarNaChave)
+  textoDoContent 96 (interpretar() com operadores nomeados)
+  buscarEAquecer 96 (guardarNoCache, lembrarTamanho)
+  toolCrawlSite 95 (lerUmaDoCrawl, cabecalhoDoCrawl)
+- Variaveis opacas renomeadas (a/b/n/m -> linhasAntes/linhasDepois/..., vd/mf/cr)
+- Limiares de regra de negocio em constante nomeada (TEXTO_MINIMO_UTIL,
+  TEXTO_MINIMO_ESTATICO, FATOR_KERNING_ESPACO, FATOR_LINHA_TM)
+- README: secao "Por onde comecar a ler o codigo" para quem esta iniciando
+- dev/_polimento-saida.mjs: ferramenta que prova saida identica antes/depois

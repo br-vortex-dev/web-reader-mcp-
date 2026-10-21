@@ -1,0 +1,11 @@
+HTML 1.34 MB | 7 amostras de 8 conversões cada
+
+md         31.3ms   42.8 MB/s
+links       9.8ms
+meta        2.0ms
+total      43.0ms
+
+dispersão: md 31.3..46.9 | links 9.8..21.5 | meta 2.0..4.0
+mediana md (para conferir estabilidade): 35.1ms
+
+JSON {"md_ms":31.3,"links_ms":9.8,"meta_ms":2,"total_ms":43,"md_mb_s":42.8}

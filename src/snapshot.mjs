@@ -11,8 +11,9 @@
  *   guardar páginas em memória por horas é justamente o que o cache com TTL
  *   já evita. Sem o texto anterior, respondemos "mudou" com o que dá para
  *   afirmar; com ele (quando o chamador pede), o diff é linha a linha.
- * - `force: true` grava a marca de agora sem comparar — é o "marque como
- *   lido", para o próximo diff medir a partir deste ponto.
+ * QUEM USA
+ *   Usado por: tools.mjs (na ferramenta diff_page).
+ *   Importa de: fetch, utils.
  */
 
 import { createHash } from "node:crypto";
@@ -59,39 +60,54 @@ export function normalizarParaDiff(texto) {
  * parágrafo no meio).
  */
 export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
-  const a = normalizarParaDiff(antes).split("\n");
-  const b = normalizarParaDiff(depois).split("\n");
+  const linhasAntes = normalizarParaDiff(antes).split("\n");
+  const linhasDepois = normalizarParaDiff(depois).split("\n");
 
-  if (a.length > maxLinhas || b.length > maxLinhas) {
+  if (linhasAntes.length > maxLinhas || linhasDepois.length > maxLinhas) {
     // Página grande demais para LCS: responde o que dá para afirmar com o
     // hash e os tamanhos, sem inventar diff.
-    return { grande: true, adicionadas: [], removidas: [], iguais: a.length === b.length };
+    return {
+      grande: true,
+      adicionadas: [],
+      removidas: [],
+      iguais: linhasAntes.length === linhasDepois.length,
+    };
   }
 
   // Corte do prefixo e do sufixo comuns: o miolo é o que interessa.
-  let ini = 0;
-  while (ini < a.length && ini < b.length && a[ini] === b[ini]) ini++;
-  let fimA = a.length - 1;
-  let fimB = b.length - 1;
-  while (fimA >= ini && fimB >= ini && a[fimA] === b[fimB]) {
-    fimA--;
-    fimB--;
+  // `inicio` é a primeira linha em que os dois lados diferem; `fimAntes` e
+  // `fimDepois` são as últimas que coincidem, uma para cada lado (elas podem
+  // ser diferentes porque uma versão pode ter mais linhas no rabo).
+  let inicio = 0;
+  while (inicio < linhasAntes.length && inicio < linhasDepois.length && linhasAntes[inicio] === linhasDepois[inicio]) {
+    inicio++;
   }
-  const meioA = a.slice(ini, fimA + 1);
-  const meioB = b.slice(ini, fimB + 1);
+  let fimAntes = linhasAntes.length - 1;
+  let fimDepois = linhasDepois.length - 1;
+  while (fimAntes >= inicio && fimDepois >= inicio && linhasAntes[fimAntes] === linhasDepois[fimDepois]) {
+    fimAntes--;
+    fimDepois--;
+  }
+  const meioAntes = linhasAntes.slice(inicio, fimAntes + 1);
+  const meioDepois = linhasDepois.slice(inicio, fimDepois + 1);
 
-  if (meioA.length === 0 && meioB.length === 0) {
+  if (meioAntes.length === 0 && meioDepois.length === 0) {
     return { grande: false, adicionadas: [], removidas: [], iguais: true };
   }
 
   // LCS no miolo (que já é pequeno na prática).
-  const n = meioA.length;
-  const m = meioB.length;
-  const tabela = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
+  // `tabela[i][j]` guarda o tamanho do maior subsequência comum entre
+  // meioAntes[i..] e meioDepois[j..]. É preenchida do fim para o começo
+  // porque cada célula depende das de baixo e da direita.
+  const totalAntes = meioAntes.length;
+  const totalDepois = meioDepois.length;
+  const tabela = Array.from({ length: totalAntes + 1 }, () => new Uint32Array(totalDepois + 1));
+  for (let i = totalAntes - 1; i >= 0; i--) {
+    for (let j = totalDepois - 1; j >= 0; j--) {
       tabela[i][j] =
-        meioA[i] === meioB[j] ? tabela[i + 1][j + 1] + 1 : Math.max(tabela[i + 1][j], tabela[i][j + 1]);
+        meioAntes[i] === meioDepois[j]
+          ? tabela[i + 1][j + 1] + 1
+          : Math.max(tabela[i + 1][j], tabela[i][j + 1]);
     }
   }
 
@@ -99,20 +115,20 @@ export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
   const adicionadas = [];
   let i = 0;
   let j = 0;
-  while (i < n && j < m) {
-    if (meioA[i] === meioB[j]) {
+  while (i < totalAntes && j < totalDepois) {
+    if (meioAntes[i] === meioDepois[j]) {
       i++;
       j++;
     } else if (tabela[i + 1][j] >= tabela[i][j + 1]) {
-      removidas.push(meioA[i]);
+      removidas.push(meioAntes[i]);
       i++;
     } else {
-      adicionadas.push(meioB[j]);
+      adicionadas.push(meioDepois[j]);
       j++;
     }
   }
-  while (i < n) removidas.push(meioA[i++]);
-  while (j < m) adicionadas.push(meioB[j++]);
+  while (i < totalAntes) removidas.push(meioAntes[i++]);
+  while (j < totalDepois) adicionadas.push(meioDepois[j++]);
 
   return { grande: false, adicionadas, removidas, iguais: adicionadas.length === 0 && removidas.length === 0 };
 }

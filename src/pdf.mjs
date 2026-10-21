@@ -17,6 +17,15 @@
  * - Não resolve fonte com encoding próprio (subset/CID) em todos os casos:
  *   quando o PDF usa mapa `ToUnicode`, a tabela é aplicada; quando não há mapa
  *   nenhum, os glifos saem como estão e a saída declara a limitação.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: a URL de um PDF público.
+ *   Sai:   o texto extraído (com aviso de truncamento, se truncou) — ou o
+ *          motivo exato quando não foi possível.
+ *
+ * QUEM USA
+ *   Usado por: tools.mjs (read_pdf).
+ *   Importa de: config, fetch.
  */
 
 import { inflateSync, inflateRawSync, gunzipSync } from "node:zlib";
@@ -103,6 +112,37 @@ function ehContentStream(txt) {
  *   TJ   — desenha várias, com ajustes de kerning; número muito negativo é
  *          espaço entre palavras.
  */
+/**
+ * O padrão de UMA passada de tokenização de content stream.
+ *
+ * As alternativas, em ordem: string literal `(...)`, string hexadecimal
+ * `<...>`, número, nome `/Nome`, abertura/fechamento de array e operador
+ * (Tj, TJ, Td...). Tudo que não casa é ruído e fica de fora.
+ */
+const RE_TOKEN_CONTENT = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|[+-]?(?:\d+\.?\d*|\.\d+)|\/[^\s/<>[\]()]+|\[|\]|[A-Za-z'*"][A-Za-z0-9'*"]*/g;
+
+/** Ajuste de kerning abaixo deste fator do tamanho da fonte é espaço. */
+const FATOR_KERNING_ESPACO = 0.2;
+
+/** Diferença de ordenada (em Tm) acima deste fator do corpo é nova linha. */
+const FATOR_LINHA_TM = 0.5;
+
+/**
+ * Lê o `content stream` de uma página e devolve o TEXTO, na ordem em que foi
+ * desenhado.
+ *
+ * A máquina tem uma pilha de operandos e um interpretador dos operadores que
+ * importam para TEXTO:
+ *   Tf    — seleciona a fonte e o TAMANHO (escala dos saltos de espaço);
+ *   Td/TD — move o cursor; `ty != 0` é nova linha;
+ *   Tm    — matriz de texto; a ordenada (`f`) que mudou é nova linha;
+ *   T*    — nova linha;
+ *   Tj / ' / " — desenha uma string;
+ *   TJ    — desenha várias, com ajustes de kerning; número muito negativo é
+ *           espaço entre palavras.
+ *
+ * A pilha é zerada a cada operador: em PDF, o operador CONSOME os operandos.
+ */
 function textoDoContent(txt) {
   const out = [];
   let tamanhoFonte = 12;
@@ -115,17 +155,73 @@ function textoDoContent(txt) {
   };
   const quebra = () => {
     if (out.length === 0) return;
-    const ultimo = out[out.length - 1];
-    if (ultimo !== "\n") out.push("\n");
+    if (out[out.length - 1] !== "\n") out.push("\n");
   };
+  /** O último valor da pilha, do fim para o começo. */
+  const ultimoDe = (tipo) => {
+    for (let i = pilha.length - 1; i >= 0; i--) if (typeof pilha[i] === tipo) return pilha[i];
+    return undefined;
+  };
+  /** Todos os números da pilha, na ordem em que apareceram. */
+  const numeros = () => pilha.filter((v) => typeof v === "number");
 
-  // Tokeniza strings, hex, números, nomes, arrays e operadores.
-  const re = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|[+-]?(?:\d+\.?\d*|\.\d+)|\/[^\s/<>[\]()]+|\[|\]|[A-Za-z'*"][A-Za-z0-9'*"]*/g;
+  function interpretar(operador) {
+    switch (operador) {
+      case "Tf": {
+        const n = ultimoDe("number");
+        if (typeof n === "number" && n > 0) tamanhoFonte = n;
+        return;
+      }
+      case "Td":
+      case "TD": {
+        const nums = numeros();
+        if ((nums[nums.length - 1] ?? 0) !== 0) quebra();
+        return;
+      }
+      case "Tm": {
+        const nums = numeros();
+        const f = nums[nums.length - 1];
+        if (ultimoY !== null && typeof f === "number" && Math.abs(f - ultimoY) > tamanhoFonte * FATOR_LINHA_TM) {
+          quebra();
+        }
+        if (typeof f === "number") ultimoY = f;
+        return;
+      }
+      case "T*":
+        quebra();
+        return;
+      case "Tj": {
+        const str = ultimoDe("string");
+        if (str) out.push(str);
+        return;
+      }
+      case "'":
+      case '"': {
+        quebra();
+        const str = ultimoDe("string");
+        if (str) out.push(str);
+        return;
+      }
+      case "TJ": {
+        for (const v of pilha) {
+          if (typeof v === "string") out.push(v);
+          else if (typeof v === "number" && v < -tamanhoFonte * FATOR_KERNING_ESPACO) espaco();
+        }
+        return;
+      }
+      default:
+        // Operador de desenho/vetor (re, m, l, f, Do...): não tem texto.
+        return;
+    }
+  }
+
   let tok;
-  while ((tok = re.exec(txt)) !== null) {
+  RE_TOKEN_CONTENT.lastIndex = 0;
+  while ((tok = RE_TOKEN_CONTENT.exec(txt)) !== null) {
     const t = tok[0];
     const c0 = t[0];
 
+    // --- operandos: empilham e seguem ---
     if (c0 === "(") {
       pilha.push(desescapar(t.slice(1, -1)));
       continue;
@@ -142,59 +238,11 @@ function textoDoContent(txt) {
       pilha.push(parseFloat(t));
       continue;
     }
-    if (t === "[") {
-      // array do TJ: não precisamos guardar estrutura; os itens soltos bastam
-      continue;
-    }
-    if (t === "]") continue;
+    // --- delimitadores de array do TJ: os itens soltos já bastam ---
+    if (t === "[" || t === "]") continue;
 
-    switch (t) {
-      case "Tf": {
-        const n = [...pilha].reverse().find((v) => typeof v === "number");
-        if (typeof n === "number" && n > 0) tamanhoFonte = n;
-        break;
-      }
-      case "Td":
-      case "TD": {
-        const nums = pilha.filter((v) => typeof v === "number");
-        const ty = nums[nums.length - 1] ?? 0;
-        if (ty !== 0) quebra();
-        break;
-      }
-      case "Tm": {
-        const nums = pilha.filter((v) => typeof v === "number");
-        const f = nums[nums.length - 1];
-        if (ultimoY !== null && typeof f === "number" && Math.abs(f - ultimoY) > tamanhoFonte * 0.5) {
-          quebra();
-        }
-        if (typeof f === "number") ultimoY = f;
-        break;
-      }
-      case "T*":
-        quebra();
-        break;
-      case "Tj": {
-        const str = [...pilha].reverse().find((v) => typeof v === "string");
-        if (str) out.push(str);
-        break;
-      }
-      case "'":
-      case '"': {
-        quebra();
-        const str = [...pilha].reverse().find((v) => typeof v === "string");
-        if (str) out.push(str);
-        break;
-      }
-      case "TJ": {
-        for (const v of pilha) {
-          if (typeof v === "string") out.push(v);
-          else if (typeof v === "number" && v < -tamanhoFonte * 0.2) espaco();
-        }
-        break;
-      }
-      default:
-        break;
-    }
+    // --- operador: consome a pilha ---
+    interpretar(t);
     pilha = [];
   }
   return out.join("");

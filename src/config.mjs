@@ -1,6 +1,21 @@
 /**
- * Configuração central do web-reader-mcp.
- * Todos os tetos, timeouts e defaults do servidor ficam aqui.
+ * config.mjs — todos os números e limites do projeto, num lugar só.
+ *
+ * O QUE É
+ *   Cada teto, timeout, tamanho máximo e valor padrão do servidor vive aqui,
+ *   em constante nomeada. A pergunta "quantos caracteres o read_page devolve
+ *   no máximo?" tem UMA resposta, e ela está neste arquivo — não espalhada em
+ *   número solto pelo resto do código.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: nada. O módulo lê o ambiente (process.env) uma vez, ao ser
+ *          carregado, e é isso.
+ *   Sai:   as constantes já calculadas e validadas — cada uma passa por um
+ *          clamp (nunca zero, nunca absurdo) para que um valor errado de
+ *          ambiente não derrube o servidor.
+ *
+ * QUEM USA
+ *   Usado por: fetch, http-transport, net, pdf, security, server, tools, video.
  */
 
 export const SERVER_NAME = "web-reader";

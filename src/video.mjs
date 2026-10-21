@@ -22,6 +22,15 @@
  * Toda URL tocada por este módulo passa pelo fetchTextCached: SSRF, robots,
  * cache, junção de buscas em voo e teto por host valem igual às outras
  * ferramentas.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: a URL de uma página de vídeo (ou de uma legenda .vtt/.srt).
+ *   Sai:   metadados + transcrição quando a plataforma publica; só metadados
+ *          com aviso claro quando não publica.
+ *
+ * QUEM USA
+ *   Usado por: tools.mjs (read_video) e http-transport.mjs.
+ *   Importa de: config, errors, fetch, html-parser.
  */
 import {
   fetchTextCached,
@@ -307,23 +316,25 @@ export function capitulosDe(inicial) {
       return;
     }
     if (Array.isArray(no.chapters)) {
-      for (const c of no.chapters) {
-        const cr = c && c.chapterRenderer;
-        if (!cr) continue;
-        const seg = Math.floor((Number(cr.timeRangeStartMillis) || 0) / 1000);
-        const bruto = cr.title || {};
+      for (const capitulo of no.chapters) {
+        const dados = capitulo && capitulo.chapterRenderer;
+        if (!dados) continue;
+        const seg = Math.floor((Number(dados.timeRangeStartMillis) || 0) / 1000);
+        const tituloBruto = dados.title || {};
         const titulo = String(
-          bruto.simpleText || (bruto.runs || []).map((r) => r.text || "").join("") || ""
+          tituloBruto.simpleText || (tituloBruto.runs || []).map((run) => run.text || "").join("") || ""
         ).trim();
         if (!seg && !titulo) continue;
+        // A mesma marca pode aparecer em mais de um lugar da árvore do
+        // ytInitialData; a chave evita o capítulo duplicado na saída.
         const chave = `${seg}|${titulo}`;
         if (vistos.has(chave)) continue;
         vistos.add(chave);
         saida.push({ seg, titulo });
       }
     }
-    for (const v of Object.values(no)) {
-      if (v && typeof v === "object") coletar(v, prof + 1);
+    for (const valor of Object.values(no)) {
+      if (valor && typeof valor === "object") coletar(valor, prof + 1);
     }
   };
   coletar(inicial, 0);
@@ -333,32 +344,39 @@ export function capitulosDe(inicial) {
 
 /** Metadados de um playerResponse do YouTube (formato validado na web real). */
 export function metadadosYouTube(player) {
-  const vd = (player && player.videoDetails) || {};
-  const mf = (player && player.microformat && player.microformat.playerMicroformatRenderer) || {};
-  const caps =
+  // Dois blocos de dados com nomes parecidos, de propósito separados:
+  // `detalhes` é o que o player sabe do vídeo (título, autor, duração,
+  // descrição) e `microformato` é o que a PÁGINA publica sobre ele (data de
+  // publicação, categoria, capa). Um campo pode existir só em um dos dois.
+  const detalhes = (player && player.videoDetails) || {};
+  const microformato =
+    (player && player.microformat && player.microformat.playerMicroformatRenderer) || {};
+  const faixas =
     ((player && player.captions && player.captions.playerCaptionsTracklistRenderer) || {}).captionTracks ||
     [];
-  const thumbs =
-    (vd.thumbnail && vd.thumbnail.thumbnails) || (mf.thumbnail && mf.thumbnail.thumbnails) || [];
-  const capa = thumbs.length ? thumbs[thumbs.length - 1].url || "" : "";
+  const miniaturas =
+    (detalhes.thumbnail && detalhes.thumbnail.thumbnails) ||
+    (microformato.thumbnail && microformato.thumbnail.thumbnails) ||
+    [];
+  const capa = miniaturas.length ? miniaturas[miniaturas.length - 1].url || "" : "";
   return {
-    videoId: vd.videoId || "",
-    titulo: vd.title || "",
-    canal: vd.author || mf.ownerChannelName || "",
-    duracaoSeg: Number(vd.lengthSeconds) || 0,
-    views: vd.viewCount ? Number(vd.viewCount) : 0,
-    publicado: String(mf.publishDate || "").slice(0, 10),
-    categoria: mf.category || "",
-    descricao: String(vd.shortDescription || ""),
-    tags: Array.isArray(vd.keywords) ? vd.keywords.slice(0, 10) : [],
+    videoId: detalhes.videoId || "",
+    titulo: detalhes.title || "",
+    canal: detalhes.author || microformato.ownerChannelName || "",
+    duracaoSeg: Number(detalhes.lengthSeconds) || 0,
+    views: detalhes.viewCount ? Number(detalhes.viewCount) : 0,
+    publicado: String(microformato.publishDate || "").slice(0, 10),
+    categoria: microformato.category || "",
+    descricao: String(detalhes.shortDescription || ""),
+    tags: Array.isArray(detalhes.keywords) ? detalhes.keywords.slice(0, 10) : [],
     capa,
-    isLive: Boolean(vd.isLiveContent),
+    isLive: Boolean(detalhes.isLiveContent),
     playability: (player && player.playabilityStatus && player.playabilityStatus.status) || "",
-    tracks: caps.map((t) => ({
+    tracks: faixas.map((t) => ({
       lang: t.languageCode || "",
       kind: t.kind || "manual",
       nome:
-        (t.name && (t.name.simpleText || (t.name.runs || []).map((r) => r.text).join(""))) ||
+        (t.name && (t.name.simpleText || (t.name.runs || []).map((run) => run.text).join(""))) ||
         t.languageCode ||
         "",
       url: t.baseUrl || "",
@@ -368,7 +386,7 @@ export function metadadosYouTube(player) {
 
 /** Metadados do config público do player do Vimeo (estrutura validada). */
 export function metadadosVimeo(config) {
-  const v = (config && config.video) || {};
+  const video = (config && config.video) || {};
   const tracks = ((config && config.request && config.request.text_tracks) || []).map((t) => ({
     lang: t.lang || "",
     kind: t.kind === "captions" ? "captions" : t.kind || "subtitles",
@@ -376,12 +394,12 @@ export function metadadosVimeo(config) {
     url: t.url || "",
   }));
   return {
-    titulo: v.title || "",
-    canal: (v.owner && v.owner.name) || "",
-    duracaoSeg: Number(v.duration) || 0,
-    descricao: String(v.description || ""),
-    publicado: String(v.release_time || v.upload_date || "").slice(0, 10),
-    capa: v.thumbnail_url || "",
+    titulo: video.title || "",
+    canal: (video.owner && video.owner.name) || "",
+    duracaoSeg: Number(video.duration) || 0,
+    descricao: String(video.description || ""),
+    publicado: String(video.release_time || video.upload_date || "").slice(0, 10),
+    capa: video.thumbnail_url || "",
     tracks,
   };
 }

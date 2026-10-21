@@ -45,6 +45,33 @@ sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
    milhares de pedidos nas **mesmas** URLs vira pouquíssimos downloads e quase zero
    conversão redundante (ver *Capacidade e carga*).
 
+### Por onde começar a ler o código
+
+Se você nunca viu este projeto (ou nunca mexeu em servidor MCP), esta é a ordem que
+gasta menos tempo. Cada arquivo abre com um cabeçalho dizendo o que ele é, o que
+entra, o que sai e quem o usa — dá para pular direto para o que interessa.
+
+```koda-passos
+{"titulo":"Ordem de leitura para quem está começando","passos":[{"titulo":"1. server.js e src/server.mjs","texto":"A porta de entrada. Entenda como uma mensagem JSON-RPC chega e vira resposta. Com isso você já sabe o formato de tudo."},{"titulo":"2. src/tool-schemas.mjs","texto":"O catálogo: a lista das 12 ferramentas, com nome, descrição e schema. Aqui você vê o que o servidor oferece ao mundo."},{"titulo":"3. src/tools.mjs","texto":"O corpo do trabalho. Repare em lerPaginaCompleta: é o caminho ÚNICO de leitura que todas as ferramentas de página compartilham."},{"titulo":"4. src/fetch.mjs","texto":"A única porta de saída para a internet. Leia as seis regras no cabeçalho: SSRF, DNS, redirect, retry, cache e junção de buscas."},{"titulo":"5. src/security.mjs e src/net.mjs","texto":"Os dois portões de segurança. Não precisa decorar; precisa saber que existem e onde procurar quando uma URL é bloqueada."},{"titulo":"6. src/html-parser.mjs","texto":"O conversor de HTML para markdown. É o arquivo mais reaproveitado do projeto e o que tem golden files: mude com cuidado e rode os testes."}]}
+```
+
+**Como cada arquivo começa.** Todo módulo de `src/` abre com o mesmo bloco de
+comentário, nesta ordem: *o que é* → *o que entra / o que sai* → *quem usa* (e de quem
+ele importa). Os cabeçalhos não são enfeite: eles dizem o papel do arquivo antes de
+você precisar ler uma linha de código.
+
+**Funções pequenas, de propósito.** A média do projeto é de ~23 linhas por função. As
+que passavam de 100 foram quebradas em peças com nome que explica o que fazem
+(`montarCabecalhos`, `guardarNoCache`, `criarColetorDeLinks`, `tentarFinalizar`,
+`enfileirarNaChave`). Se você encontrar uma função longa, é sinal de que ela ainda não
+foi visitada — não de que o padrão é esse.
+
+**Números com nome, não soltos.** Tetos e limiares de regra de negócio vivem em
+constante nomeada em `config.mjs` ou junto da função que os usa
+(`TEXTO_MINIMO_UTIL`, `FATOR_KERNING_ESPACO`, `CHARS_POR_BLOCO_LEGENDA`). Número solto
+no meio do código só aparece quando é unidade (`60`, `3600`, `1024`) ou código de
+caractere (`48`, `57`).
+
 ## Ferramentas
 
 | Ferramenta                  | O que faz                                                                               |

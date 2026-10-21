@@ -1,7 +1,22 @@
 
 /**
- * Ferramentas do MCP: read_page, extract_links, read_multiple_pages,
- * read_dynamic_page, discover_urls, crawl_site, read_video.
+ * tools.mjs — as ferramentas do MCP e o pipeline de leitura de uma página.
+ *
+ * O QUE É
+ *   O arquivo que liga o nome da ferramenta (`read_page`, `crawl_site`,
+ *   `read_video`...) à função que faz o trabalho. E, principalmente, o dono de
+ *   `lerPaginaCompleta`: o caminho ÚNICO de "baixar → converter → responder"
+ *   compartilhado por read_page, read_multiple_pages, crawl_site e as demais.
+ *   Ter um caminho só é o que garante que o teto de caracteres, o cache, o
+ *   robots e o aviso de truncamento valham igual em todas as ferramentas.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: o nome da ferramenta e os argumentos que o cliente MCP mandou.
+ *   Sai:   o resultado no formato MCP (conteúdo + isError quando falhou).
+ *
+ * QUEM USA
+ *   Usado por: server.mjs (stdio) e http-transport.mjs (HTTP).
+ *   Importa de: config, errors, feeds, fetch, html-parser, pdf, snapshot, video.
  */
 
 import { appendFileSync } from "node:fs";
@@ -414,11 +429,30 @@ function htmlIndicaDinamico(html) {
 }
 
 /**
+ * Quanto texto visível já basta para considerar a página "lida".
+ *
+ * Existem dois limiares, e eles NÃO são contraditórios — respondem perguntas
+ * diferentes:
+ *
+ *   - TEXTO_MINIMO_UTIL (300): abaixo disto, a página quase certamente é uma
+ *     casca de JavaScript e vale tentar extrair os dados embutidos. É usado
+ *     pelo read_page para decidir se aciona a extração de fallback.
+ *
+ *   - TEXTO_MINIMO_ESTATICO (500): abaixo disto, a página é considerada
+ *     dependente de JavaScript (isDynamicPage). É mais alto porque aqui a
+ *     pergunta é outra: "dá para confiar que esta página é estática?". Entre
+ *     300 e 500 caracteres a resposta honesta é "não sei" — e o código prefere
+ *     dizer que é dinâmica a afirmar que é estática e entregar pouco texto.
+ */
+const TEXTO_MINIMO_UTIL = 300;
+const TEXTO_MINIMO_ESTATICO = 500;
+
+/**
  * Detecta se uma página provavelmente precisa de JavaScript.
  */
 function isDynamicPage(html, markdown) {
   const visibleText = markdown.replace(/\s+/g, " ").trim();
-  return htmlIndicaDinamico(html) || visibleText.length < 500;
+  return htmlIndicaDinamico(html) || visibleText.length < TEXTO_MINIMO_ESTATICO;
 }
 
 /**
@@ -563,7 +597,7 @@ export async function toolReadPage(args) {
   const meta = metaMemo(payload);
   let markdown = markdownMemo(payload);
   let interrompida = markdownInterrompida(payload);
-  if (markdown.replace(/\s+/g, " ").trim().length < 300 && isDynamicPage(html, markdown)) {
+  if (markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown)) {
     const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
       markdown = dynamicMarkdown;
@@ -788,12 +822,13 @@ export async function toolReadMultiplePages(args) {
   let proximo = 0;
   const trabalhador = async () => {
     for (;;) {
-      const i = proximo++;
-      if (i >= unicas.length) return;
+      const posicao = proximo++;
+      if (posicao >= unicas.length) return;
+      const url = unicas[posicao];
       try {
-        lidos[i] = { ok: true, text: (await lerPaginaCompleta(unicas[i], maxChars, timeoutMs)).conteudo };
+        lidos[posicao] = { ok: true, text: (await lerPaginaCompleta(url, maxChars, timeoutMs)).conteudo };
       } catch (err) {
-        lidos[i] = { ok: false, text: `# Erro ao ler ${unicas[i]}\n${err.message}` };
+        lidos[posicao] = { ok: false, text: `# Erro ao ler ${url}\n${err.message}` };
       }
     }
   };
@@ -807,20 +842,20 @@ export async function toolReadMultiplePages(args) {
   urls.forEach((u, pos) => {
     if (!primeiraPosicao.has(u)) primeiraPosicao.set(u, pos);
   });
-  urls.forEach((u, pos) => {
-    const primeiraVez = pos === primeiraPosicao.get(u);
+  urls.forEach((url, posicao) => {
+    const primeiraVez = posicao === primeiraPosicao.get(url);
     if (!primeiraVez) {
-      secoes.push(`(URL repetida — mesma leitura da seção ${primeiraPosicao.get(u) + 1} acima)`);
+      secoes.push(`(URL repetida — mesma leitura da seção ${primeiraPosicao.get(url) + 1} acima)`);
       return;
     }
-    const r = lidos[indice.get(u)];
+    const leitura = lidos[indice.get(url)];
     if (total >= MULTI_MAX_TOTAL_CHARS) {
       omitidas++;
       secoes.push(`(omitida: teto de saída de ${MULTI_MAX_TOTAL_CHARS} caracteres já foi alcançado)`);
       return;
     }
     const restante = MULTI_MAX_TOTAL_CHARS - total;
-    const texto = r.text.length > restante ? truncate(r.text, restante).text : r.text;
+    const texto = leitura.text.length > restante ? truncate(leitura.text, restante).text : leitura.text;
     total += texto.length;
     secoes.push(texto);
   });
@@ -870,7 +905,7 @@ export async function toolReadDynamicPage(args) {
   }
 
   const markdown = markdownMemo(payload);
-  const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= 300;
+  const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= TEXTO_MINIMO_UTIL;
 
   if (estaticoCompleto) {
     const { text, truncated } = truncate(markdown, maxChars);
@@ -1034,6 +1069,34 @@ async function lerPaginaCompleta(url, maxChars, timeoutMs) {
 /**
  * Lê um site sozinho: BFS com extração de links.
  */
+/**
+ * Lê UMA página do crawl, sem deixar o erro escapar.
+ *
+ * O crawl continua quando uma página falha: o resultado dela vira uma linha
+ * de erro no texto final e a URL entra na lista de falhas. Por isso o formato
+ * `{ ok, url, ... }` em vez de try/catch espalhado pelo trabalhador.
+ */
+async function lerUmaDoCrawl(url, maxChars, timeoutMs) {
+  try {
+    return { ok: true, url, ...(await lerPaginaCompleta(url, maxChars, timeoutMs)) };
+  } catch (erro) {
+    return { ok: false, url, erro };
+  }
+}
+
+/** Cabeçalho do crawl: quantas páginas foram lidas e, se houve, o resumo das falhas. */
+function cabecalhoDoCrawl({ start, lidas, maxPages, baseHost, falhas }) {
+  let texto = `Crawl de ${start}: ${lidas} pagina(s) lida(s) (limite ${maxPages}, dominio ${baseHost}).`;
+  if (falhas.length === 0) return texto;
+  const agrupado = new Map();
+  for (const f of falhas) agrupado.set(f.motivo, (agrupado.get(f.motivo) || 0) + 1);
+  const motivos = [...agrupado.entries()].map(([motivo, n]) => `${n} ${motivo}`).join(", ");
+  texto +=
+    `\nRESULTADO PARCIAL: ${falhas.length} pagina(s) falharam — ${motivos}.` +
+    `\nAs paginas marcadas com "# Erro ao ler" abaixo nao foram lidas.`;
+  return texto;
+}
+
 export async function toolCrawlSite(args) {
   const start = validateHttpUrl(args.url);
   const maxPages = Math.max(2, Math.min(30, Number(args.maxPages) || 10));
@@ -1047,16 +1110,22 @@ export async function toolCrawlSite(args) {
   const falhas = [];
   let lidas = 0;
 
+  /** Enfileira os links ainda não visitados de uma leitura. */
+  const enfileirarLinks = (links) => {
+    for (const href of links) {
+      if (visited.has(href)) continue;
+      visited.add(href);
+      queue.push(href);
+    }
+  };
+
+  // A primeira página é lida fora do pool: se ela falhar, o crawl não começa
+  // (não faz sentido devolver 10 páginas de um site cuja entrada não abriu).
   try {
     const primeira = await lerPaginaCompleta(start.href, maxChars, timeoutMs);
     conteudos.push(primeira.conteudo);
     lidas++;
-    for (const href of primeira.links) {
-      if (!visited.has(href)) {
-        visited.add(href);
-        queue.push(href);
-      }
-    }
+    enfileirarLinks(primeira.links);
   } catch (err) {
     throw new CrawlError(start.href, err.message);
   }
@@ -1081,6 +1150,7 @@ export async function toolCrawlSite(args) {
     while (emEspera.length > 0) emEspera.shift()();
   };
   let ativos = 0;
+
   const trabalhador = async () => {
     for (;;) {
       if (lidas + ativos >= maxPages) return;
@@ -1091,23 +1161,13 @@ export async function toolCrawlSite(args) {
       }
       const url = queue.shift();
       ativos++;
-      let r;
-      try {
-        r = { ok: true, url, ...(await lerPaginaCompleta(url, maxChars, timeoutMs)) };
-      } catch (err) {
-        r = { ok: false, url, erro: err };
-      }
+      const r = await lerUmaDoCrawl(url, maxChars, timeoutMs);
       ativos--;
       if (r.ok) {
         conteudos.push(r.conteudo);
         lidas++;
         // Só os links de uma leitura BEM-SUCEDIDA entram na fila.
-        for (const href of r.links) {
-          if (!visited.has(href)) {
-            visited.add(href);
-            queue.push(href);
-          }
-        }
+        enfileirarLinks(r.links);
       } else {
         falhas.push({ url: r.url, motivo: classifyFetchError(r.erro), mensagem: r.erro.message });
         conteudos.push(`# Erro ao ler ${r.url}\n${r.erro.message}`);
@@ -1117,16 +1177,7 @@ export async function toolCrawlSite(args) {
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, trabalhador));
 
-  let cabecalho =
-    `Crawl de ${start.href}: ${lidas} pagina(s) lida(s) (limite ${maxPages}, dominio ${baseHost}).`;
-  if (falhas.length > 0) {
-    const agrupado = new Map();
-    for (const f of falhas) agrupado.set(f.motivo, (agrupado.get(f.motivo) || 0) + 1);
-    const motivos = [...agrupado.entries()].map(([motivo, n]) => `${n} ${motivo}`).join(", ");
-    cabecalho +=
-      `\nRESULTADO PARCIAL: ${falhas.length} pagina(s) falharam — ${motivos}.` +
-      `\nAs paginas marcadas com "# Erro ao ler" abaixo nao foram lidas.`;
-  }
+  const cabecalho = cabecalhoDoCrawl({ start: start.href, lidas, maxPages, baseHost, falhas });
   return cabecalho + "\n\n" + conteudos.join("\n\n========================================\n\n");
 }
 

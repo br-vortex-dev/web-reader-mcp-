@@ -1,6 +1,29 @@
 /**
- * Segurança: proteção SSRF, robots.txt e DNS rebinding.
- * (O Agent com IP fixado vive em net.mjs, junto do transporte que o usa.)
+ * security.mjs — os dois portões que toda URL precisa passar.
+ *
+ * O QUE É
+ *   1. assertPublicHost: recusa host privado/loopback/link-local e protege
+ *      contra DNS rebinding (o nome resolve para um IP, e é ESSE IP que vai
+ *      ser usado na conexão — não uma segunda resolução que poderia devolver
+ *      outra coisa).
+ *   2. checarRobots: lê o robots.txt do site e diz se o caminho pedido é
+ *      permitido para o nosso User-Agent, com cache e fail-open quando o
+ *      robots está inacessível.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma URL (e, no robots, o user-agent).
+ *   Sai:   nada, se passou — a função LANÇA erro tipado se bloqueou. Quem
+ *          chama não precisa checar retorno: passar da chamada é a permissão.
+ *
+ * POR QUE LANÇA EM VEZ DE DEVOLVER FALSE
+ *   Porque o caso de erro é o caminho raro e precisa de motivo explícito na
+ *   resposta ao cliente MCP. Com `return false`, alguém esquece de checar e
+ *   a requisição sai mesmo assim.
+ *
+ * O Agent com IP fixado vive em net.mjs, junto do transporte que o usa.
+ *
+ * QUEM USA
+ *   Usado por: fetch (que é usado por todos os outros).
  */
 
 import { lookup } from "node:dns/promises";

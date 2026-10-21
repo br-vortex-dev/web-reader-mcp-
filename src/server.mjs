@@ -1,6 +1,19 @@
 /**
- * Roteador JSON-RPC do MCP e transporte stdio. O transporte HTTP vive em
- * http-transport.mjs; os schemas das ferramentas, em tool-schemas.mjs.
+ * server.mjs — o cérebro do MCP: recebe a mensagem, decide, responde.
+ *
+ * O QUE É
+ *   O roteador JSON-RPC e o transporte stdio. É ele que entende `initialize`,
+ *   `tools/list` e `tools/call`, e que devolve o erro certo quando a mensagem
+ *   não faz sentido. A lógica de cada ferramenta NÃO está aqui: está em
+ *   tools.mjs (e nos módulos que ele chama).
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma linha JSON-RPC (stdio) ou uma mensagem já lida (HTTP).
+ *   Sai:   a resposta JSON-RPC — resultado ou erro, com id preservado.
+ *
+ * QUEM USA
+ *   É o ponto de entrada, chamado por server.js. Usa http-transport.mjs
+ *   (transporte HTTP), tool-schemas.mjs (catálogo) e tools.mjs (execução).
  */
 
 import {

@@ -1,6 +1,30 @@
 /**
- * Parser HTML → markdown feito à mão (tokenizer + regras de emissão).
- * Trata tags void, skip, tabelas GFM, deduplicação de código e limpeza de artefatos.
+ * html-parser.mjs — de HTML para markdown, sem biblioteca nenhuma.
+ *
+ * O QUE É
+ *   Um tokenizador e um conjunto de regras de emissão escritos à mão. O
+ *   objetivo não é reproduzir um navegador: é devolver o TEXTO ÚTIL de uma
+ *   página, legível para uma IA, com o mínimo de ruído.
+ *
+ *   O que ele resolve: tags void, blocos que devem ser ignorados (script,
+ *   style, nav, footer...), tabelas em formato GFM, blocos de código,
+ *   entidades HTML, aria-hidden, e limpeza de artefatos do markdown final.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: o HTML como string e a URL base (para tornar link relativo em
+ *          absoluto).
+ *   Sai:   markdown, ou a lista de links, ou os metadados (título, descrição,
+ *          canonical...) — dependendo da função chamada.
+ *
+ * AS TRÊS FUNÇÕES PÚBLICAS
+ *   htmlToMarkdown          → só o markdown.
+ *   htmlToMarkdownComLinks  → markdown + links numa passada só (o caminho
+ *                             usado pelo read_page, mais rápido).
+ *   extractLinks / extractMeta → só links, ou só metadados.
+ *
+ * QUEM USA
+ *   Usado por: feeds, fetch, tools, video. É o arquivo mais reaproveitado do
+ *   projeto — e por isso o que tem golden files em tests/golden/.
  */
 
 // Tags que não têm conteúdo (void elements).
@@ -878,15 +902,115 @@ export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
  * (tags de skip e blocos `aria-hidden`), e a saída é verificada contra o golden
  * e contra o próprio `extractLinks` nos testes.
  */
+/**
+ * Cria o coletor de links da passada única.
+ *
+ * Ele mantém o próprio estado (pilha de tags ignoradas, link aberto no
+ * momento) e roda em PARALELO à conversão do markdown, token a token. Duas
+ * consequências que importam:
+ *
+ *   - Não depende do estado da conversão: `processar()` pode ser chamado
+ *     antes, depois ou mesmo quando o markdown já foi finalizado pela parada
+ *     antecipada — e continua coletando o rabo da página.
+ *   - As regras de "o que não é conteúdo" são as MESMAS do `extractLinks`
+ *     (SKIP_TAGS e blocos aria-hidden). Se divergissem, a passada única
+ *     devolveria links diferentes da função dedicada.
+ *
+ * Devolve um objeto com `processar(token)` e o array `links`, que já sai
+ * deduplicado por href e com a marca de interno/externo.
+ */
+function criarColetorDeLinks(baseUrl) {
+  const links = [];
+  const vistos = new Set();
+  const baseHost = hostOf(baseUrl);
+  const pilhaAria = [];
+  let profundidadeSkip = 0;
+  let linkAtual = null;
+
+  function abrir(token, tagIgnorada, oculto) {
+    if (tagIgnorada || oculto) {
+      if (!token.selfClosing) {
+        profundidadeSkip++;
+        pilhaAria.push(token.tag);
+      }
+      return;
+    }
+    if (profundidadeSkip !== 0) return;
+    if (token.tag === "a") {
+      linkAtual = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
+    }
+    if (token.tag === "img" && linkAtual && !linkAtual.imgAlt) {
+      const alt = (token.attrs.alt || "").trim();
+      if (alt) linkAtual.imgAlt = alt;
+    }
+  }
+
+  function fechar(token, tagIgnorada) {
+    const idx = pilhaAria.lastIndexOf(token.tag);
+    if (idx !== -1) {
+      pilhaAria.length = idx;
+      if (profundidadeSkip > 0) profundidadeSkip--;
+      return;
+    }
+    if (tagIgnorada) {
+      if (profundidadeSkip > 0) profundidadeSkip--;
+      return;
+    }
+    if (profundidadeSkip !== 0) return;
+    if (token.tag !== "a" || !linkAtual) return;
+    const href = linkAtual.href;
+    // O texto do link é o que estava entre <a>...</a>; sem texto, cai para o
+    // alt da imagem (link que é só imagem) e, por último, para um marcador.
+    const texto =
+      decodeEntities(linkAtual.parts.join("")).replace(/\s+/g, " ").trim() ||
+      linkAtual.imgAlt ||
+      "(sem texto)";
+    linkAtual = null;
+    if (href && !vistos.has(href)) {
+      vistos.add(href);
+      links.push({ text: texto, href, internal: hostOf(href) === baseHost });
+    }
+  }
+
+  return {
+    links,
+    processar(token) {
+      const tagIgnorada = SKIP_TAGS.has(token.tag);
+      const oculto = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
+      if (token.type === "open") abrir(token, tagIgnorada, oculto);
+      else if (token.type === "close") fechar(token, tagIgnorada);
+      else if (token.type === "text" && linkAtual && profundidadeSkip === 0) {
+        linkAtual.parts.push(token.value);
+      }
+    },
+  };
+}
+
+/**
+ * Decide se já dá para finalizar o markdown agora (parada antecipada).
+ *
+ * A limpeza final (máscara de cercas + polimento) só é fiel ao prefixo
+ * completo se as cercas "```" estiverem TODAS emparelhadas no buffer: com uma
+ * cerca ímpar, a máscara da limpeza mudaria de comportamento dentro do trecho
+ * exibido. Paridade par = mascaramento idêntico. Por isso uma cerca ímpar
+ * bloqueia a parada, mesmo que o tamanho já tenha passado do mínimo.
+ *
+ * Devolve o markdown finalizado, ou null para continuar convertendo.
+ */
+function tentarFinalizar(st, { minimo, diagnostico }) {
+  const bruto = materializar(st);
+  const cercasPareadas = (bruto.match(/```/g) || []).length % 2 === 0;
+  if (!cercasPareadas) return null;
+  const limpo = polirTexto(cleanMarkdown(bruto));
+  if (limpo.length < minimo + MARGEM_SEGURANCA) return null;
+  if (diagnostico) diagnostico.interrompida = true;
+  return finalizarConversao(st);
+}
+
 export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   const st = criarEstadoConversao();
   const emit = (chunk) => st.emit(chunk);
-  const links = [];
-  const lkVistos = new Set();
-  const lkBaseHost = hostOf(baseUrl);
-  const lkAria = [];
-  let lkSkip = 0;
-  let linkAtual = null;
+  const coletor = criarColetorDeLinks(baseUrl);
   let markdownFinal = null;
   const minimo = Number(opcoes.minCharsEntregaveis) > 0 ? Math.floor(opcoes.minCharsEntregaveis) : 0;
   const diagnostico = opcoes.diagnostico || null;
@@ -898,67 +1022,16 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
     // ---- coleta de links (mesma passada) ----------------------------
     // Roda ANTES do markdown para não depender do estado da conversão e
     // continua valendo depois da parada antecipada.
-    {
-      const lkSkipTag = SKIP_TAGS.has(token.tag);
-      const lkOculto = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
-      if (token.type === "open") {
-        if (lkSkipTag || lkOculto) {
-          if (!token.selfClosing) {
-            lkSkip++;
-            lkAria.push(token.tag);
-          }
-        } else if (lkSkip === 0) {
-          if (token.tag === "a") {
-            linkAtual = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
-          }
-          if (token.tag === "img" && linkAtual && !linkAtual.imgAlt) {
-            const alt = (token.attrs.alt || "").trim();
-            if (alt) linkAtual.imgAlt = alt;
-          }
-        }
-      } else if (token.type === "close") {
-        const lkIdx = lkAria.lastIndexOf(token.tag);
-        if (lkIdx !== -1) {
-          lkAria.length = lkIdx;
-          if (lkSkip > 0) lkSkip--;
-        } else if (lkSkipTag) {
-          if (lkSkip > 0) lkSkip--;
-        } else if (lkSkip === 0) {
-          if (token.tag === "a" && linkAtual) {
-            const href = linkAtual.href;
-            const texto =
-              decodeEntities(linkAtual.parts.join("")).replace(/\s+/g, " ").trim() ||
-              linkAtual.imgAlt ||
-              "(sem texto)";
-            linkAtual = null;
-            if (href && !lkVistos.has(href)) {
-              lkVistos.add(href);
-              links.push({ text: texto, href, internal: hostOf(href) === lkBaseHost });
-            }
-          }
-        }
-      } else if (token.type === "text" && linkAtual && lkSkip === 0) {
-        linkAtual.parts.push(token.value);
-      }
-    }
+    coletor.processar(token);
 
     // Markdown já finalizado (parada antecipada): só segue coletando links.
     if (markdownFinal !== null) continue;
 
     if (paradaAtiva && st.outLen >= limiar && fronteiraSegura(st)) {
-      // A limpeza final (máscara de cercas + polimento) só é fiel ao prefixo
-      // completo se as cercas "```" estiverem TODAS emparelhadas no buffer:
-      // com uma cerca ímpar, a máscara da limpeza mudaria de comportamento
-      // dentro do trecho exibido. Paridade par = mascaramento idêntico.
-      const bruto = materializar(st);
-      const cercasPareadas = (bruto.match(/```/g) || []).length % 2 === 0;
-      if (cercasPareadas) {
-        const limpo = polirTexto(cleanMarkdown(bruto));
-        if (limpo.length >= minimo + MARGEM_SEGURANCA) {
-          if (diagnostico) diagnostico.interrompida = true;
-          markdownFinal = finalizarConversao(st);
-          continue;
-        }
+      const finalizado = tentarFinalizar(st, { minimo, diagnostico });
+      if (finalizado !== null) {
+        markdownFinal = finalizado;
+        continue;
       }
       if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
       else limiar = st.outLen + PASSO_RECHECAGEM;
@@ -1045,7 +1118,7 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   }
 
   const markdown = markdownFinal !== null ? markdownFinal : finalizarConversao(st);
-  return { markdown, links };
+  return { markdown, links: coletor.links };
 }
 
 /**

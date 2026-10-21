@@ -10,6 +10,15 @@
  * Nada aqui baixa nada: o download, o SSRF, o robots.txt, o cache e a junção
  * em voo continuam no `fetchTextCached` (fetch.mjs). Este módulo só interpreta
  * o texto que já chegou, com parser próprio para XML (zero dependências).
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: o texto já baixado (XML de feed, ou JSON de uma API pública).
+ *   Sai:   uma lista de itens legível — título, link, data e resumo — ou os
+ *          campos que o chamador pediu, quando é JSON.
+ *
+ * QUEM USA
+ *   Usado por: tools.mjs (read_feed e read_json).
+ *   Importa de: fetch, html-parser.
  */
 
 import {
@@ -27,9 +36,9 @@ import { decodeEntities } from "./html-parser.mjs";
  * olhar o começo do texto basta.
  */
 function tipoDoCorpo(contentType, texto) {
-  const ct = String(contentType || "").toLowerCase();
-  if (ct.includes("json")) return "json";
-  if (ct.includes("html")) return "html";
+  const tipoConteudo = String(contentType || "").toLowerCase();
+  if (tipoConteudo.includes("json")) return "json";
+  if (tipoConteudo.includes("html")) return "html";
   if (/^\s*<(!doctype\s+html|html[\s>])/i.test(String(texto || ""))) return "html";
   return "outro";
 }
@@ -98,19 +107,19 @@ export function linkDoBloco(bloco) {
 function dataLegivel(bruto) {
   const texto = limparTextoXml(bruto);
   if (!texto) return "";
-  const d = new Date(texto);
-  if (Number.isNaN(d.getTime())) return texto;
-  return d.toISOString().replace(".000Z", "Z");
+  const dataPublicada = new Date(texto);
+  if (Number.isNaN(dataPublicada.getTime())) return texto;
+  return dataPublicada.toISOString().replace(".000Z", "Z");
 }
 
 /** Identifica o formato do texto recebido. */
 export function detectarFormato(texto, contentType = "") {
-  const ct = String(contentType || "").toLowerCase();
+  const tipoConteudo = String(contentType || "").toLowerCase();
   const inicio = String(texto || "").slice(0, 2000);
   if (/<(rss|rdf:RDF)\b/i.test(inicio) && /<channel\b/i.test(inicio)) return "rss";
   if (/<feed\b/i.test(inicio) && /xmlns\s*=\s*["']http:\/\/www\.w3\.org\/2005\/Atom/i.test(inicio)) return "atom";
   if (/<feed\b/i.test(inicio) && /<entry\b/i.test(inicio)) return "atom";
-  if (ct.includes("json") || /^\s*[{[]/.test(inicio)) return "json";
+  if (tipoConteudo.includes("json") || /^\s*[{[]/.test(inicio)) return "json";
   return "desconhecido";
 }
 

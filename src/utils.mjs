@@ -1,5 +1,27 @@
 /**
- * Utilitários: fila FIFO, limitadores de concorrência e bytes, cache LRU.
+ * utils.mjs — as peças de infraestrutura que não sabem nada de web.
+ *
+ * O QUE É
+ *   Quatro utilidades genéricas, cada uma resolvendo um problema que aparece
+ *   em vários pontos do projeto:
+ *   - chaveCanonica: a MESMA página chega com utm_*, gclid, fbclid... Sem
+ *     normalizar, cada variação seria outra URL (baixa de novo, converte de
+ *     novo, ocupa outra vaga no cache).
+ *   - criarFila: fila FIFO para não disparar tudo de uma vez.
+ *   - criarLimitador / criarLimitadorDeBytes / criarLimitadorPorChave: quantas
+ *     requisições cabem ao mesmo tempo, no total e por host.
+ *   - CacheLRU: cache com teto de entradas e de bytes, que despeja o mais
+ *     antigo quando enche.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma URL, ou os parâmetros do limitador (concorrência, teto).
+ *   Sai:   a chave normalizada, ou um objeto com o método que você chama
+ *          (`fila.executar(fn)`, `cache.obter(chave)`).
+ *
+ * Nada aqui faz rede: é só controle de fluxo, memória e endereço.
+ *
+ * QUEM USA
+ *   Usado por: fetch, security, snapshot.
  */
 
 import { ServidorOcupadoError } from "./errors.mjs";
@@ -308,6 +330,33 @@ export function criarLimitador({ limite, filaMax, nome, esperaMaxMs = 0 }) {
  * - Chave sem ninguém ativo nem esperando sai do mapa: o estado não cresce
  *   com hosts que passaram por aqui.
  */
+/**
+ * Cria o item de fila de UMA chave, com o prazo de espera opcional.
+ *
+ * O item existe para resolver uma corrida real: entre entrar na fila e ser
+ * atendido, o prazo pode estourar. `decidido` marca que a sorte já foi
+ * lançada (atendido OU desistiu), e quem chega depois vê a marca e não age —
+ * sem isso, o timeout podia recusar uma vaga que já tinha sido dada.
+ *
+ * Devolve a promessa que o chamador aguarda.
+ */
+function enfileirarNaChave({ entrada, chave, esperaMaxMs, aoDesistir, aoEntrarNaFila, ocupado }) {
+  return new Promise((resolve, reject) => {
+    const item = { decidido: false, timer: null, resolve, reject };
+    if (esperaMaxMs > 0) {
+      item.timer = setTimeout(() => {
+        if (item.decidido) return;
+        entrada.fila.remover(item);
+        aoDesistir();
+        reject(ocupado());
+      }, esperaMaxMs);
+      item.timer.unref();
+    }
+    entrada.fila.push(item);
+    aoEntrarNaFila();
+  });
+}
+
 export function criarLimitadorPorChave({ limite, filaMax, nome, esperaMaxMs = 0 }) {
   const porChave = new Map();
   const stats = {
@@ -373,30 +422,28 @@ export function criarLimitadorPorChave({ limite, filaMax, nome, esperaMaxMs = 0 
 
   const adquirir = (chave) => {
     const entrada = estado(chave);
+    // Caminho feliz: tem vaga nesta chave agora.
     if (entrada.ativos < limite) {
       entrada.ativos++;
       ajustar(+1, 0);
       return Promise.resolve();
     }
+    // Fila da chave cheia: recusa na hora, sem travar o chamador.
     if (entrada.fila.tamanho >= filaMax) {
       stats.recusados++;
       return Promise.reject(ocupado(chave, entrada));
     }
-    return new Promise((resolve, reject) => {
-      const item = { decidido: false, timer: null, resolve, reject };
-      if (esperaMaxMs > 0) {
-        item.timer = setTimeout(() => {
-          if (item.decidido) return;
-          entrada.fila.remover(item);
-          stats.recusados++;
-          ajustar(0, -1);
-          limparSeOcioso(chave, entrada);
-          reject(ocupado(chave, entrada));
-        }, esperaMaxMs);
-        item.timer.unref();
-      }
-      entrada.fila.push(item);
-      ajustar(0, +1);
+    return enfileirarNaChave({
+      entrada,
+      chave,
+      esperaMaxMs,
+      ocupado: () => ocupado(chave, entrada),
+      aoDesistir: () => {
+        stats.recusados++;
+        ajustar(0, -1);
+        limparSeOcioso(chave, entrada);
+      },
+      aoEntrarNaFila: () => ajustar(0, +1),
     });
   };
 

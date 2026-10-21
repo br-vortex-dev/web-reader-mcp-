@@ -1,5 +1,28 @@
 /**
- * Fetch HTTP com cache LRU, redirects manuais, retries e proteção SSRF.
+ * fetch.mjs — a porta de saída da internet. Tudo que é baixado passa por aqui.
+ *
+ * O QUE É
+ *   O único lugar do projeto que faz requisição HTTP. Concentrar isso aqui é
+ *   intencional: SSRF, redirect, retry, timeout, teto de bytes, cache e
+ *   junção de buscas repetidas são regras de segurança e de desempenho — se
+ *   cada módulo baixasse do seu jeito, cada um precisaria acertar as seis.
+ *
+ * O QUE ENTRA / O QUE SAI
+ *   Entra: uma URL (e opções: timeout, teto de bytes, se aceita cache).
+ *   Sai:   o texto ou os bytes já validados, descomprimidos e decodificados —
+ *          ou um erro tipado de errors.mjs explicando por que não deu.
+ *
+ * AS SEIS REGRAS QUE VIVEM AQUI
+ *   1. SSRF:     só host público; IP privado/loopback/link-local é recusado.
+ *   2. DNS:      o IP validado é o IP usado na conexão (ver net.mjs).
+ *   3. Redirect: seguido à mão, com cada salto revalidado pela regra 1.
+ *   4. Retry:    só o que vale a pena repetir, com espera crescente.
+ *   5. Cache:    LRU com TTL e teto de bytes; revalida em vez de proibir.
+ *   6. Coalescer: duas chamadas simultâneas da mesma URL = um download só.
+ *
+ * QUEM USA
+ *   Usado por: feeds, http-transport, pdf, snapshot, tools, video.
+ *   Importa de: config, errors, html-parser, net, security, utils.
  */
 
 import {
@@ -282,6 +305,77 @@ async function decodeBuffer(buffer, contentType) {
  * ela, devolve `buffer` cru — é o que o leitor de PDF precisa, porque PDF é
  * binário e passar por decodificação de texto corromperia os bytes.
  */
+/* --------------------------------------------------------------------- *
+ * Peças de uma requisição                                                 *
+ * --------------------------------------------------------------------- */
+
+/**
+ * Monta os cabeçalhos de UMA tentativa.
+ *
+ * O User-Agent muda a cada tentativa de propósito: alguns sites recusam um
+ * agente específico, e alternar aumenta a chance de a segunda tentativa
+ * passar. A revalidação condicional (If-None-Match / If-Modified-Since) só
+ * entra na primeira: retry é por falha de rede, não faz sentido repetir.
+ */
+function montarCabecalhos({ userAgent, headersExtra, condicional, primeiraTentativa }) {
+  const headers = {
+    "User-Agent": userAgent,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    // Revalidação em vez de proibição de cache. "no-cache" + "Pragma:
+    // no-cache" obrigavam CDN e proxy a irem SEMPRE até a origem, e num site
+    // atrás de Cloudflare/Fastly isso custa a maior parte do TTFB.
+    // "max-age=0, must-revalidate" continua sem servir conteúdo velho (o
+    // cache de borda revalida antes de responder), e a revalidação
+    // condicional por ETag/Last-Modified faz o servidor devolver 304 sem
+    // corpo quando nada mudou.
+    "Cache-Control": "max-age=0, must-revalidate",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+  };
+  // Cabeçalhos extras do chamador (ex.: Authorization). A chave viaja AQUI,
+  // nunca na URL — assim não entra na chave de cache nem em mensagem de erro.
+  // O que o chamador mandar vence o padrão.
+  if (headersExtra) Object.assign(headers, headersExtra);
+  if (primeiraTentativa && condicional) {
+    if (condicional.etag) headers["If-None-Match"] = condicional.etag;
+    if (condicional.lastModified) headers["If-Modified-Since"] = condicional.lastModified;
+  }
+  return headers;
+}
+
+/**
+ * Monta o objeto que descreve o que chegou — comum aos dois modos de retorno
+ * (bytes crus ou texto decodificado).
+ */
+function descreverPayload({ finalUrl, resposta, buffer }) {
+  return {
+    finalUrl,
+    contentType: String(resposta.headers["content-type"] || "").toLowerCase(),
+    etag: resposta.headers["etag"] || null,
+    lastModified: resposta.headers["last-modified"] || null,
+    // Marca de corte: o documento veio INCOMPLETO porque o teto apertado
+    // parou o download. Quem recebe isto precisa avisar e NÃO guardar.
+    cortado: buffer.cortado === true,
+    // Bytes que de fato vieram (e o que o servidor declarou, quando ele
+    // declara). É o que diz se o corte tirou texto: com content-length a
+    // decisão é exata; sem ele, `bytes` é o tamanho do teto.
+    bytes: buffer.length,
+    bytesDeclarados: Number(resposta.headers["content-length"]) || null,
+  };
+}
+
+/**
+ * Traduz o status HTTP de erro em texto legível: "NOT_FOUND" -> "Not found".
+ */
+function fraseDeStatus(statusMessage) {
+  return (statusMessage || "").replace(/\b([A-Z]{2,})\b/, (m) => m.charAt(0) + m.slice(1).toLowerCase()).trim();
+}
+
 export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null, permitirCorte = false } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
@@ -311,35 +405,12 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
     }
     const userAgent = attempt === 0 ? USER_AGENT : ALT_USER_AGENTS[(attempt - 1) % ALT_USER_AGENTS.length];
     try {
-      const headers = {
-        "User-Agent": userAgent,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        // Revalidação em vez de proibição de cache. "no-cache" + "Pragma:
-        // no-cache" obrigavam CDN e proxy a irem SEMPRE até a origem, e num
-        // site atrás de Cloudflare/Fastly isso custa a maior parte do TTFB.
-        // "max-age=0, must-revalidate" continua sem servir conteúdo velho
-        // (o cache de borda revalida antes de responder), e a revalidação
-        // condicional por ETag/Last-Modified — que já existe logo abaixo —
-        // faz o servidor devolver 304 sem corpo quando nada mudou.
-        "Cache-Control": "max-age=0, must-revalidate",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-      };
-      // Headers extras do chamador (ex.: Authorization da API de busca). A
-      // chave viaja AQUI, nunca na URL — assim não entra na chave de cache
-      // nem em mensagem de erro. O que o chamador mandar vence o padrão.
-      if (headersExtra) Object.assign(headers, headersExtra);
-      // Revalidação condicional: só na primeira tentativa (o retry é por
-      // falha de rede, não vale repetir o If-None-Match).
-      if (attempt === 0 && condicional) {
-        if (condicional.etag) headers["If-None-Match"] = condicional.etag;
-        if (condicional.lastModified) headers["If-Modified-Since"] = condicional.lastModified;
-      }
+      const headers = montarCabecalhos({
+        userAgent,
+        headersExtra,
+        condicional,
+        primeiraTentativa: attempt === 0,
+      });
       const { resposta, finalUrl } = await buscarComRedirects(url, headers, controller.signal);
       if (resposta.statusCode === 304 && condicional && condicional.payload) {
         descartarCorpo(resposta.stream);
@@ -347,10 +418,7 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         return { ...condicional.payload, naoModificado: true };
       }
       if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
-        const statusFrase = (resposta.statusMessage || "").replace(/\b([A-Z]{2,})\b/, (m) =>
-          m.charAt(0) + m.slice(1).toLowerCase()
-        );
-        const err = new HttpError(resposta.statusCode, statusFrase.trim(), url);
+        const err = new HttpError(resposta.statusCode, fraseDeStatus(resposta.statusMessage), url);
         err.retryAfterMs = parseRetryAfter(resposta.headers["retry-after"]);
         descartarCorpo(resposta.stream);
         throw err;
@@ -363,25 +431,11 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         controller.signal,
         permitirCorte
       );
-      const contentType = String(resposta.headers["content-type"] || "").toLowerCase();
-      const base = {
-        finalUrl,
-        contentType,
-        etag: resposta.headers["etag"] || null,
-        lastModified: resposta.headers["last-modified"] || null,
-        // Marca de corte: o documento veio INCOMPLETO porque o teto apertado
-        // parou o download. Quem recebe isto precisa avisar e NÃO guardar.
-        cortado: buffer.cortado === true,
-        // Bytes que de fato vieram (e o que o servidor declarou, quando ele
-        // declara). É o que diz se o corte tirou texto: com content-length, a
-        // decisão é exata; sem ele, `bytes` = tamanho do teto.
-        bytes: buffer.length,
-        bytesDeclarados: Number(resposta.headers["content-length"]) || null,
-      };
+      const base = descreverPayload({ finalUrl, resposta, buffer });
       if (!decodificar) {
         return { ...base, buffer };
       }
-      return { ...base, text: await decodeBuffer(buffer, contentType) };
+      return { ...base, text: await decodeBuffer(buffer, base.contentType) };
     } catch (errBruto) {
       // Nao reatribuir a variavel do catch: o `finally` roda depois do catch e
       // uma reatribuicao aqui se perde, fazendo o throw final lancar o erro
@@ -738,6 +792,68 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
  * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
  * propósito; o objetivo é atualizá-la.
  */
+/**
+ * Guarda no cache o resultado de um download, decidindo ANTES se pode guardar.
+ *
+ * Duas regras que existem por motivo concreto:
+ *
+ *   1. Documento CORTADO nunca entra — nem o corpo, nem os validadores.
+ *      Guardar HTML truncado envenenaria toda leitura futura da mesma URL
+ *      (uma leitura com maxChars maior receberia o pedaço) e os validadores
+ *      fariam o servidor responder 304 para um conteúdo que aqui está
+ *      incompleto. O cache é por URL, não por tamanho pedido: só entra o que
+ *      está inteiro.
+ *   2. Entrada maior que o teto de bytes por entrada não entra, para uma
+ *      página gigante não expulsar todas as outras do cache.
+ *
+ * `extrair` é a transformação opcional que roda ANTES do cache: o leitor de
+ * PDF baixa bytes e converte em texto aqui, para que a entrada guardada (e a
+ * junção em voo) já tenham o RESULTADO — e uma releitura não reparseie o PDF.
+ */
+function guardarNoCache({ cacheKey, payload, extrair }) {
+  // A flag `naoModificado` é sinal interno de transporte: não vai para o cache.
+  const { naoModificado, ...semFlag } = payload;
+
+  if (extrair) {
+    const { text, extraido } = extrair(semFlag);
+    const comTexto = { ...semFlag, text, extraido };
+    if (payloadBytes(comTexto) <= CACHE_MAX_ENTRY_BYTES) {
+      pageCache.set(cacheKey, comTexto, payloadBytes(comTexto));
+    }
+    guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, comTexto);
+    return comTexto;
+  }
+
+  if (semFlag.cortado) return semFlag;
+
+  const bytes = payloadBytes(semFlag);
+  if (bytes <= CACHE_MAX_ENTRY_BYTES) pageCache.set(cacheKey, semFlag, bytes);
+  guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, semFlag);
+  return semFlag;
+}
+
+/**
+ * Lembra o tamanho real do documento para a próxima leitura da MESMA página
+ * decidir de primeira — sem esta memória, toda leitura de página maior que o
+ * teto pagaria dois downloads (o pedaço e o resto).
+ *
+ * A chave ignora a query de rastreio (`?utm_*`, `?v=`, `?releitura=`): duas
+ * visitas à mesma página com parâmetro diferente são a mesma página, e é
+ * justamente nelas que o cliente repete a leitura.
+ *
+ * Só registra quando o número é CONFIÁVEL:
+ *  - o servidor declarou o tamanho (content-length é o tamanho real), ou
+ *  - o download NÃO foi cortado (então `bytes` é o documento inteiro).
+ * Um download cortado sem content-length tem `bytes` = tamanho do teto, que
+ * não diz nada sobre a página — gravar isso envenenava a memória e desligava
+ * o corte na leitura seguinte (medido: o valor do teto virava "tamanho da
+ * página" e `restoPequeno` passava a ser verdadeiro por engano).
+ */
+function lembrarTamanho(cacheKey, payload) {
+  const confiavel = payload.bytesDeclarados || (!payload.cortado ? payload.bytes : 0);
+  if (confiavel) registrarTamanho(chaveDeTamanho(cacheKey), confiavel);
+}
+
 async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null, maxBytes = MAX_RESPONSE_BYTES, permissoDeCorte = false } = {}) {
   const cacheKey = chave || chaveCanonica(url);
   if (!revalidacao) {
@@ -788,51 +904,11 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   await robotsEmCurso;
 
   // Tamanho real do documento fica lembrado para a próxima leitura da MESMA
-  // página decidir de primeira — sem esta memória, toda leitura de página maior
-  // que o teto pagaria dois downloads (o pedaço e o resto).
-  //
-  // A chave ignora a query de rastreio (`?utm_*`, `?v=`, `?releitura=`): duas
-  // visitas à mesma página com parâmetro diferente são a mesma página, e é
-  // justamente nelas que o cliente repete a leitura.
-  //
-  // Só registra quando o número é CONFIÁVEL:
-  //  - o servidor declarou o tamanho (content-length é o tamanho real), ou
-  //  - o download NÃO foi cortado (então `bytes` é o documento inteiro).
-  // Um download cortado sem content-length tem `bytes` = tamanho do teto, que
-  // não diz nada sobre a página — gravar isso envenenava a memória e desligava
-  // o corte na leitura seguinte (medido: o valor do teto virava "tamanho da
-  // página" e `restoPequeno` passava a ser verdadeiro por engano).
-  const tamanhoConfiavel = payload.bytesDeclarados || (!payload.cortado ? payload.bytes : 0);
-  if (tamanhoConfiavel) registrarTamanho(chaveDeTamanho(cacheKey), tamanhoConfiavel);
-  // Transformação opcional ANTES do cache: o leitor de PDF baixa bytes e
-  // converte em texto aqui, para que a entrada do cache (e a junção em voo)
-  // guardem o RESULTADO e uma releitura não reparseie o PDF.
-  if (extrair) {
-    const { text, extraido } = extrair(payload);
-    const comTexto = { ...payload, text, extraido };
-    const bytes = payloadBytes(comTexto);
-    if (bytes <= CACHE_MAX_ENTRY_BYTES) {
-      pageCache.set(cacheKey, comTexto, bytes);
-    }
-    guardarValidadores(cacheKey, payload.etag, payload.lastModified, comTexto);
-    return comTexto;
-  }
-  // A flag `naoModificado` é sinal interno de transporte: não vai para o cache.
-  const { naoModificado, ...semFlag } = payload;
-  // Documento CORTADO nunca entra no cache — nem o corpo, nem os validadores.
-  // Guardar HTML truncado envenenaria toda leitura futura da mesma URL (uma
-  // lateria com maxChars maior receberia o pedaço) e os validadores fariam o
-  // servidor responder 304 para um conteúdo que aqui está incompleto. O cache
-  // é por URL, não por tamanho pedido: só entra o que está inteiro.
-  if (semFlag.cortado) {
-    return semFlag;
-  }
-  const bytes = payloadBytes(semFlag);
-  if (bytes <= CACHE_MAX_ENTRY_BYTES) {
-    pageCache.set(cacheKey, semFlag, bytes);
-  }
-  guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, semFlag);
-  return semFlag;
+  // página decidir de primeira.
+  lembrarTamanho(cacheKey, payload);
+
+  // Gravação no cache (com a transformação opcional do PDF, quando houver).
+  return guardarNoCache({ cacheKey, payload, extrair });
 }
 
 /**
