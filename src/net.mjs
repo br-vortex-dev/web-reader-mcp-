@@ -24,6 +24,7 @@
 import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
+import { Transform } from "node:stream";
 import { isIP } from "node:net";
 import { AGENT_CACHE_MAX } from "./config.mjs";
 import { UrlInvalidaError, RedeError, RespostaMuitoGrandeError, WebReaderError } from "./errors.mjs";
@@ -169,6 +170,79 @@ export function httpGetUmSalto(url, { headers = {}, ipValido = null, signal } = 
 const CODIGOS_ZLIB = new Set(["Z_DATA_ERROR", "Z_STREAM_ERROR", "Z_BUF_ERROR", "Z_NEED_DICT"]);
 
 /**
+ * Descompressor de "deflate" que aceita também o fluxo CRU.
+ *
+ * O RFC 9110 diz que `Content-Encoding: deflate` é o formato zlib, com o
+ * cabeçalho de 2 bytes na frente. Só que existe servidor — e não é raro —
+ * mandando o fluxo deflate CRU, sem cabeçalho nenhum. O `createInflate`
+ * recusa esse corpo com Z_DATA_ERROR, e a página inteira virava
+ * `RedeError: falha ao descomprimir a resposta`. O fetch do navegador faz
+ * fallback para o modo cru justamente por causa disso.
+ *
+ * Aqui a escolha é feita ANTES de descomprimir, olhando os dois primeiros
+ * bytes: um cabeçalho zlib válido tem método 8 (deflate), janela até 32 KB
+ * e o checksum de 16 bits (CMF*256+FLG) divisível por 31. Se não bater, é
+ * fluxo cru e vai para o `createInflateRaw`. Nada é tentado às cegas e
+ * nenhum byte é lido duas vezes.
+ */
+class DescompressorDeflate extends Transform {
+  constructor() {
+    super();
+    this._pendente = Buffer.alloc(0);
+    this._alvo = null;
+  }
+
+  /** Abre o inflate certo para o que já chegou (2 bytes bastam). */
+  _escolher() {
+    const cmf = this._pendente.length > 0 ? this._pendente[0] : 0;
+    const flg = this._pendente.length > 1 ? this._pendente[1] : 0;
+    const cabecalhoZlib = (cmf & 0x0f) === 8 && cmf >> 4 <= 7 && (((cmf << 8) | flg) % 31) === 0;
+    this._alvo = cabecalhoZlib ? zlib.createInflate() : zlib.createInflateRaw();
+    this._alvo.on("data", (pedaco) => this.push(pedaco));
+    this._alvo.on("error", (err) => this.destroy(err));
+  }
+
+  _transform(pedaco, _enc, cb) {
+    if (!this._alvo) {
+      this._pendente = Buffer.concat([this._pendente, pedaco]);
+      // Com menos de 2 bytes não há como decidir o formato: segura e espera.
+      if (this._pendente.length < 2) return cb();
+      this._escolher();
+      const inicial = this._pendente;
+      this._pendente = Buffer.alloc(0);
+      if (this._alvo.write(inicial)) return cb();
+      return this._alvo.once("drain", () => cb());
+    }
+    if (this._alvo.write(pedaco)) return cb();
+    this._alvo.once("drain", () => cb());
+  }
+
+  _flush(cb) {
+    // Corpo com 0 ou 1 byte: decide com o que houver (vai falhar no inflate,
+    // virando RedeError — que é o certo para um fluxo deflate truncado).
+    if (!this._alvo) {
+      this._escolher();
+      const inicial = this._pendente;
+      this._pendente = Buffer.alloc(0);
+      this._alvo.write(inicial);
+    }
+    this._alvo.once("end", () => cb());
+    this._alvo.end();
+  }
+
+  _destroy(err, cb) {
+    if (this._alvo && !this._alvo.destroyed) {
+      try {
+        this._alvo.destroy();
+      } catch {
+        // já destruído
+      }
+    }
+    cb(err);
+  }
+}
+
+/**
  * Embrulha o stream no descompressor do content-encoding (headers à parte,
  * porque quem chama já pode ter desacoplado o corpo da resposta).
  * Encoding desconhecido sai como veio (mesmo comportamento do fetch).
@@ -179,7 +253,7 @@ export function desembrulhar(stream, headers) {
   let filtro = null;
   if (enc === "gzip" || enc === "x-gzip") filtro = zlib.createGunzip();
   else if (enc === "br") filtro = zlib.createBrotliDecompress();
-  else if (enc === "deflate" || enc === "x-deflate") filtro = zlib.createInflate();
+  else if (enc === "deflate" || enc === "x-deflate") filtro = new DescompressorDeflate();
   else return stream;
   // O erro é lido no for-await do coletor; o listener evita "unhandled error"
   // na janela entre o pipe e a leitura começar.
