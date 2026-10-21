@@ -1,42 +1,42 @@
 {
   "base": "https://web-reader-mcp-13z0.onrender.com",
-  "quando": "2026-10-20T00:20:09.247Z",
-  "voltas": 4,
+  "quando": "2026-10-21T16:34:32.111Z",
+  "voltas": 3,
   "resumo": [
     {
       "site": "amazon.com",
-      "medianaMs": 261,
-      "minMs": 253,
-      "maxMs": 266,
-      "amostras": 4
+      "medianaMs": 278,
+      "minMs": 250,
+      "maxMs": 1286,
+      "amostras": 3
     },
     {
       "site": "washingtonpost.com",
-      "medianaMs": 1370,
-      "minMs": 1245,
-      "maxMs": 1807,
-      "amostras": 4
+      "medianaMs": 2154,
+      "minMs": 1791,
+      "maxMs": 4903,
+      "amostras": 3
     },
     {
       "site": "guardian.com",
-      "medianaMs": 273,
-      "minMs": 245,
-      "maxMs": 291,
-      "amostras": 4
+      "medianaMs": 241,
+      "minMs": 236,
+      "maxMs": 989,
+      "amostras": 3
     },
     {
       "site": "wikipedia/Brazil",
-      "medianaMs": 280,
-      "minMs": 254,
-      "maxMs": 309,
-      "amostras": 4
+      "medianaMs": 1651,
+      "minMs": 217,
+      "maxMs": 3000,
+      "amostras": 3
     },
     {
       "site": "bbc.com/news",
       "medianaMs": 257,
-      "minMs": 251,
-      "maxMs": 262,
-      "amostras": 4
+      "minMs": 231,
+      "maxMs": 403,
+      "amostras": 3
     }
   ]
 }
