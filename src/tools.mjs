@@ -651,7 +651,7 @@ async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs, largoByte
 /**
  * Lê uma página web e devolve o conteúdo extraído em markdown.
  */
-export async function toolReadPage(args) {
+export async function toolReadPage(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -696,7 +696,7 @@ export async function toolReadPage(args) {
  * surpresa) ou expressão regular quando `regex: true`. A busca é
  * case-insensitive por padrão (ligue `matchCase` para diferenciar).
  */
-export async function toolFindOnPage(args) {
+export async function toolFindOnPage(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const query = String(args.query ?? "");
   if (!query) throw new ParametroInvalidoError("query", "informe o termo a buscar");
@@ -788,7 +788,7 @@ export async function toolFindOnPage(args) {
  * Sem a marca, a primeira chamada grava o ponto de comparação (não é erro);
  * `force: true` grava de novo sem comparar ("marque como lido").
  */
-export async function toolDiffPage(args) {
+export async function toolDiffPage(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -854,7 +854,7 @@ export async function toolDiffPage(args) {
 /**
  * Acessa uma página e lista seus links.
  */
-export async function toolExtractLinks(args) {
+export async function toolExtractLinks(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -881,7 +881,7 @@ export async function toolExtractLinks(args) {
 /**
  * Lê várias páginas por chamada (máx 30 URLs, em lotes paralelos).
  */
-export async function toolReadMultiplePages(args) {
+export async function toolReadMultiplePages(args = {}) {
   const urls = Array.isArray(args.urls) ? args.urls.map((u) => String(u)) : [];
   if (urls.length === 0) throw new ParametroInvalidoError("urls", "informe uma lista de URLs");
   if (urls.length > MAX_PAGES_PER_CALL) {
@@ -1022,7 +1022,7 @@ export async function toolReadMultiplePages(args) {
 /**
  * Lê páginas que dependem de JavaScript (React, Vue, Angular, Next.js, etc.).
  */
-export async function toolReadDynamicPage(args) {
+export async function toolReadDynamicPage(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -1115,7 +1115,7 @@ export async function toolReadDynamicPage(args) {
 /**
  * Descobre as URLs de um site (sitemap.xml ou links internos).
  */
-export async function toolDiscoverUrls(args) {
+export async function toolDiscoverUrls(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const origin = `${parsed.protocol}//${parsed.host}`;
@@ -1275,7 +1275,7 @@ function cabecalhoDoCrawl({ start, lidas, maxPages, baseHost, falhas }) {
   return texto;
 }
 
-export async function toolCrawlSite(args) {
+export async function toolCrawlSite(args = {}) {
   const start = validateHttpUrl(args.url);
   const maxPages = Math.max(2, Math.min(30, Number(args.maxPages) || 10));
   const maxChars = clampMaxChars(args.maxChars ?? 2000);

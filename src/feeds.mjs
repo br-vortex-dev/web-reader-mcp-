@@ -238,7 +238,7 @@ function rotuloFormato(f) {
  * O que ela NÃO faz: não segue os links dos itens (isso é read_page) e não
  * inventa campo que o feed não publicou.
  */
-export async function toolReadFeed(args) {
+export async function toolReadFeed(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -305,7 +305,7 @@ export function resumirForma(valor) {
  * o produto: o JSON é parseado, indentado e entregue com a forma declarada —
  * e, se tiver um envelope comum de API, o caminho dos dados é apontado.
  */
-export async function toolReadJson(args) {
+export async function toolReadJson(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
