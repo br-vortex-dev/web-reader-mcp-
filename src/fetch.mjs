@@ -455,6 +455,38 @@ function tamanhoConhecido(chave) {
   return r.bytes;
 }
 
+/**
+ * URLs em que o corte JÁ se mostrou inútil: a leitura do pedaço não cobriu o
+ * `maxChars`, então o chamador teve de refazer o download inteiro. Guardar isso
+ * poupa a segunda conexão nas próximas leituras.
+ *
+ * O caso real medido: a home do washingtonpost tem 4 MB de markdown, mas o
+ * topo do HTML é quase todo marcação — cortar em 480 KB entrega pouco texto,
+ * refaz largo, e cada leitura pagava DOIS downloads (46% mais lenta que sem o
+ * recurso). Com a memória, a estreia ainda paga dois; as seguintes pagam um.
+ */
+const semCorteUtil = new Map();
+const SEM_CORTE_TTL_MS = 10 * 60 * 1000;
+
+/** Marca que, para esta URL, cortar o download não vale a pena. */
+export function marcarCorteInutil(url) {
+  const chave = chaveDeTamanho(chaveCanonica(url));
+  if (semCorteUtil.size >= TAMANHO_CONHECIDO_MAX && !semCorteUtil.has(chave)) {
+    semCorteUtil.delete(semCorteUtil.keys().next().value);
+  }
+  semCorteUtil.set(chave, Date.now());
+}
+
+function corteInutil(chave) {
+  const at = semCorteUtil.get(chave);
+  if (!at) return false;
+  if (Date.now() - at > SEM_CORTE_TTL_MS) {
+    semCorteUtil.delete(chave);
+    return false;
+  }
+  return true;
+}
+
 export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
   const cacheKey = chaveCanonica(url);
   const guardado = pageCache.get(cacheKey);
@@ -467,6 +499,9 @@ export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, si
   // acontece quando o corte custou texto que o cliente ia receber. Na prática,
   // é a PRIMEIRA leitura de uma página cujo topo não cobre o pedido.
   if (forcarLargo) apertado = largoBytes;
+  // Cortar já se mostrou inútil nesta URL (o pedaço não cobria o pedido):
+  // vai direto ao largo em vez de pagar dois downloads de novo.
+  if (!forcarLargo && corteInutil(chaveDeTamanho(cacheKey))) apertado = largoBytes;
   // A memória de tamanho manda direto ao teto largo quando a página já se
   // mostrou MAIOR que o teto apertado numa leitura anterior — mas só quando o
   // que falta é pequeno a ponto de não valer a economia.

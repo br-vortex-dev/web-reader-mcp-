@@ -20,6 +20,7 @@ import {
 import {
   fetchTextCached,
   fetchTextComTeto,
+  marcarCorteInutil,
   validateHttpUrl,
   clampMaxChars,
   clampTimeoutMs,
@@ -538,6 +539,10 @@ async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs }) {
   // errado: uma página com o texto todo no topo e o rodapé com links perdia
   // 109 caracteres, e o "falta grande" não disparava porque o content-length
   // declarado engana. Entre otimizar e entregar menos, entregar inteiro.
+  // Memoriza que, NESTA url, cortar não compensa: sem isso toda leitura pagava
+  // dois downloads (medido: +46% no washingtonpost, cujo topo é quase todo
+  // marcação e entrega pouco texto).
+  marcarCorteInutil(parsed.href);
   payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, forcarLargo: true });
   return { ...payload, perdeuTexto: true };
 }

@@ -738,15 +738,15 @@ antivírus, indexação e GC):
 
 | Alvo | Antes | Depois | Ganho |
 |---|---|---|---|
-| `iana.org/domains/reserved` | 591 ms | 97 ms | **-84%** |
-| `html.spec.whatwg.org` (spec de 12 MB) | 451 ms | 384 ms | **-15%** |
-| `nodejs.org/api/http.html` | 285 ms | 311 ms | ruído (+9%) |
-| `washingtonpost.com` | 623 ms | 918 ms | ruído (+47%) |
+| `iana.org/domains/reserved` | 527 ms | 83 ms | **-84%** |
+| `html.spec.whatwg.org` (spec de 12 MB) | 343 ms | 209 ms | **-39%** |
+| `nodejs.org/api/http.html` | 252 ms | 165 ms | **-35%** |
+| `washingtonpost.com` | 368 ms | 382 ms | ruído (+4%) |
 
-O washingtonpost tem **4,02 MB de markdown**: o corte não o atinge (ele já
-cabe nos 5 MB), então a diferença é do servidor deles — as faixas se sobrepõem
-(antes 610–1054 ms, depois 758–1106 ms). O texto divergiu em 46 caracteres de
-4.020.283 (0,001%): conteúdo rotativo da home, não o corte.
+O washingtonpost tem 4 MB de markdown e o topo do HTML é quase todo marcação:
+cortar entregava pouco texto, o código refazia largo e cada leitura pagava dois
+downloads (**+46%** antes da correção). Agora a URL fica marcada e vai direto ao
+download largo — daí o empate.
 
 Em fixture com banda controlada (`dev/_mede-teto.mjs`, 8 MB/s), páginas de
 3,9 MB: **-68%** com `content-length` e **-71%** sem ele, tanto na primeira

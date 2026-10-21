@@ -1,21 +1,21 @@
 {
-  "quando": "2026-10-21T16:27:34.930Z",
+  "quando": "2026-10-21T16:32:37.594Z",
   "voltas": 5,
   "max_chars": 2000,
   "resultados": [
     {
       "alvo": "whatwg (spec 12 MB)",
       "voltas": 5,
-      "antes_mediana": 451,
-      "depois_mediana": 384,
-      "delta_pct": -15,
+      "antes_mediana": 343,
+      "depois_mediana": 209,
+      "delta_pct": -39,
       "antes_dispersao": [
-        331,
-        1586
+        189,
+        946
       ],
       "depois_dispersao": [
-        240,
-        1172
+        177,
+        960
       ],
       "texto_identico": true,
       "header_antes": "Conteudo: 60057+ caracteres (exibidos 2119)",
@@ -24,34 +24,34 @@
     {
       "alvo": "washingtonpost",
       "voltas": 5,
-      "antes_mediana": 623,
-      "depois_mediana": 918,
-      "delta_pct": 47,
+      "antes_mediana": 368,
+      "depois_mediana": 382,
+      "delta_pct": 4,
       "antes_dispersao": [
-        610,
-        1054
+        358,
+        496
       ],
       "depois_dispersao": [
-        758,
-        1106
+        322,
+        685
       ],
-      "texto_identico": false,
-      "header_antes": "Conteudo: 4020283 caracteres (exibidos 2119)",
-      "header_depois": "Conteudo: 4020237 caracteres (exibidos 2119)"
+      "texto_identico": true,
+      "header_antes": "Conteudo: 4021167 caracteres (exibidos 2119)",
+      "header_depois": "Conteudo: 4021167 caracteres (exibidos 2119)"
     },
     {
       "alvo": "iana",
       "voltas": 5,
-      "antes_mediana": 591,
-      "depois_mediana": 97,
+      "antes_mediana": 527,
+      "depois_mediana": 83,
       "delta_pct": -84,
       "antes_dispersao": [
-        36,
-        700
+        24,
+        728
       ],
       "depois_dispersao": [
-        43,
-        686
+        45,
+        706
       ],
       "texto_identico": true,
       "header_antes": "Conteudo: 2287 caracteres (exibidos 2119)",
@@ -60,16 +60,16 @@
     {
       "alvo": "nodejs docs",
       "voltas": 5,
-      "antes_mediana": 285,
-      "depois_mediana": 311,
-      "delta_pct": 9,
+      "antes_mediana": 252,
+      "depois_mediana": 165,
+      "delta_pct": -35,
       "antes_dispersao": [
-        84,
-        482
+        71,
+        342
       ],
       "depois_dispersao": [
-        168,
-        365
+        136,
+        319
       ],
       "texto_identico": true,
       "header_antes": "Conteudo: 59474+ caracteres (exibidos 2119)",
