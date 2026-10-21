@@ -32,6 +32,7 @@ import {
   MAX_REDIRECTS,
   RETRY_AFTER_MAX_MS,
   MAX_RESPONSE_BYTES,
+  MAX_RESPONSE_BYTES_DOCUMENTO,
   CACHE_TTL_MS,
   CACHE_MAX_ENTRIES,
   CACHE_MAX_BYTES,
@@ -956,6 +957,44 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
     return hit.payload;
   }
   return coalescedorDeBuscas.executar(chave, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
+}
+
+/**
+ * Fetch para as ferramentas que precisam do DOCUMENTO INTEIRO:
+ * extract_links, find_on_page e diff_page.
+ *
+ * Diferença para `fetchTextCached`: aqui o teto é MAX_RESPONSE_BYTES_DOCUMENTO
+ * (24 MB) em vez do teto duro de 5 MB, e acima dele o download é CORTADO e
+ * sinalizado (`cortado: true`) em vez de virar erro. Antes, uma página de 8 MB
+ * fazia essas três ferramentas falharem por completo enquanto o read_page lia a
+ * mesma URL normalmente — devolver o parcial com aviso é o comportamento certo
+ * para quem pediu "liste os links" ou "ache este termo".
+ *
+ * O corte NÃO entra no cache (ver `guardarNoCache`): HTML truncado envenenaria
+ * toda leitura futura da mesma URL. Ou seja, a segunda chamada paga o download
+ * de novo — é o preço de não guardar documento incompleto.
+ */
+export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
+  const chave = chaveCanonica(url);
+  const hit = pageCache.get(chave);
+  if (hit) {
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
+    return hit.payload;
+  }
+  return coalescedorDeBuscas.executar(chave, async () => {
+    const quente = pageCache.get(chave);
+    if (quente && !quente.stale) return quente.payload;
+    return await buscarEAquecer(url, {
+      timeoutMs,
+      signal,
+      retries,
+      chave,
+      maxBytes: MAX_RESPONSE_BYTES_DOCUMENTO,
+      // O documento inteiro importa aqui: cortar é aceitável só como último
+      // recurso, para não perder a chamada toda.
+      permissoDeCorte: true,
+    });
+  });
 }
 
 /**

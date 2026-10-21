@@ -1,6 +1,6 @@
 {
-  "base": "http://127.0.0.1:6401",
-  "quando": "2026-10-20T23:34:38.776Z",
+  "base": "http://127.0.0.1:6480",
+  "quando": "2026-10-21T17:56:44.285Z",
   "dispositivo": "win32",
   "resultados": [
     {
@@ -8,7 +8,7 @@
       "ferramenta": "tools/list",
       "alvo": "catalogo",
       "ok": true,
-      "ms": 28,
+      "ms": 33,
       "status": 200,
       "chars": 8879,
       "erro": "",
@@ -18,11 +18,11 @@
       "fase": "1",
       "ferramenta": "read_page",
       "alvo": "nodejs.org/api/all.html maxChars 25000",
-      "ok": false,
-      "ms": 519,
+      "ok": true,
+      "ms": 1799,
       "status": 200,
-      "chars": 53,
-      "erro": "Erro: Resposta muito grande (acima de 5242880 bytes).",
+      "chars": 25242,
+      "erro": "",
       "alvoBytes": "~8 MB HTML"
     },
     {
@@ -30,7 +30,7 @@
       "ferramenta": "read_page",
       "alvo": "whatwg spec maxChars 25000",
       "ok": true,
-      "ms": 1058,
+      "ms": 975,
       "status": 200,
       "chars": 25227,
       "erro": "",
@@ -41,7 +41,7 @@
       "ferramenta": "read_page",
       "alvo": "docs.python stdtypes maxChars 25000",
       "ok": true,
-      "ms": 346,
+      "ms": 570,
       "status": 200,
       "chars": 25479,
       "erro": "",
@@ -52,9 +52,9 @@
       "ferramenta": "extract_links",
       "alvo": "guardian limit 200",
       "ok": true,
-      "ms": 515,
+      "ms": 557,
       "status": 200,
-      "chars": 21867,
+      "chars": 22577,
       "erro": ""
     },
     {
@@ -62,29 +62,29 @@
       "ferramenta": "extract_links",
       "alvo": "bbc/news limit 200",
       "ok": true,
-      "ms": 255,
+      "ms": 889,
       "status": 200,
-      "chars": 8482,
+      "chars": 8769,
       "erro": ""
     },
     {
       "fase": "1",
       "ferramenta": "extract_links",
       "alvo": "nodejs all limit 200",
-      "ok": false,
-      "ms": 246,
+      "ok": true,
+      "ms": 2645,
       "status": 200,
-      "chars": 53,
-      "erro": "Erro: Resposta muito grande (acima de 5242880 bytes)."
+      "chars": 18882,
+      "erro": ""
     },
     {
       "fase": "1",
       "ferramenta": "read_multiple_pages",
       "alvo": "30 sites pesados, maxChars 25000 (pico de carga)",
       "ok": true,
-      "ms": 23954,
+      "ms": 23709,
       "status": 200,
-      "chars": 251999,
+      "chars": 252061,
       "erro": "",
       "urls": 30
     },
@@ -93,7 +93,7 @@
       "ferramenta": "discover_urls",
       "alvo": "bbc.com limit 300 (sitemap)",
       "ok": true,
-      "ms": 32,
+      "ms": 83,
       "status": 200,
       "chars": 291,
       "erro": ""
@@ -103,7 +103,7 @@
       "ferramenta": "discover_urls",
       "alvo": "nytimes limit 300",
       "ok": false,
-      "ms": 2411,
+      "ms": 2326,
       "status": 200,
       "chars": 60,
       "erro": "Erro: HTTP 403 Forbidden ao acessar https://www.nytimes.com/"
@@ -113,7 +113,7 @@
       "ferramenta": "crawl_site",
       "alvo": "iana.org maxPages 10 maxChars 25000",
       "ok": true,
-      "ms": 3598,
+      "ms": 2128,
       "status": 200,
       "chars": 68576,
       "erro": ""
@@ -123,7 +123,7 @@
       "ferramenta": "read_dynamic_page",
       "alvo": "nextjs.org maxChars 25000",
       "ok": true,
-      "ms": 10,
+      "ms": 18,
       "status": 200,
       "chars": 6026,
       "erro": ""
@@ -133,7 +133,7 @@
       "ferramenta": "read_dynamic_page",
       "alvo": "react.dev maxChars 25000",
       "ok": true,
-      "ms": 24,
+      "ms": 15,
       "status": 200,
       "chars": 17022,
       "erro": ""
@@ -143,7 +143,7 @@
       "ferramenta": "read_video",
       "alvo": "youtube maxChars 25000",
       "ok": true,
-      "ms": 975,
+      "ms": 968,
       "status": 200,
       "chars": 1382,
       "erro": ""
@@ -153,7 +153,7 @@
       "ferramenta": "read_pdf",
       "alvo": "rfc9000.pdf (~150 pág) maxChars 25000",
       "ok": true,
-      "ms": 1018,
+      "ms": 925,
       "status": 200,
       "chars": 25246,
       "erro": ""
@@ -163,7 +163,7 @@
       "ferramenta": "read_pdf",
       "alvo": "arxiv 1706.03762 maxChars 25000",
       "ok": true,
-      "ms": 2284,
+      "ms": 3102,
       "status": 200,
       "chars": 25233,
       "erro": ""
@@ -173,9 +173,9 @@
       "ferramenta": "read_feed",
       "alvo": "hnrss limit 100",
       "ok": true,
-      "ms": 4572,
+      "ms": 1813,
       "status": 200,
-      "chars": 6823,
+      "chars": 7282,
       "erro": ""
     },
     {
@@ -183,7 +183,7 @@
       "ferramenta": "read_json",
       "alvo": "github commits 100 (raiz)",
       "ok": true,
-      "ms": 973,
+      "ms": 584,
       "status": 200,
       "chars": 25303,
       "erro": ""
@@ -193,7 +193,7 @@
       "ferramenta": "read_json",
       "alvo": "github contents (raiz)",
       "ok": true,
-      "ms": 282,
+      "ms": 255,
       "status": 200,
       "chars": 25277,
       "erro": ""
@@ -202,11 +202,11 @@
       "fase": "1",
       "ferramenta": "find_on_page",
       "alvo": "nodejs all 'function' maxHits 100 ctx 5",
-      "ok": false,
-      "ms": 397,
+      "ok": true,
+      "ms": 2147,
       "status": 200,
-      "chars": 53,
-      "erro": "Erro: Resposta muito grande (acima de 5242880 bytes)."
+      "chars": 6173,
+      "erro": ""
     },
     {
       "fase": "1",
@@ -223,7 +223,7 @@
       "ferramenta": "diff_page",
       "alvo": "guardian force (grava marca)",
       "ok": true,
-      "ms": 28,
+      "ms": 16,
       "status": 200,
       "chars": 258,
       "erro": ""
@@ -233,7 +233,7 @@
       "ferramenta": "diff_page",
       "alvo": "guardian compara (diff)",
       "ok": true,
-      "ms": 4,
+      "ms": 19,
       "status": 200,
       "chars": 150,
       "erro": ""
@@ -243,7 +243,7 @@
       "ferramenta": "crawl_site",
       "alvo": "iana.org maxPages 30 maxChars 25000 (teto)",
       "ok": true,
-      "ms": 2602,
+      "ms": 448,
       "status": 200,
       "chars": 127023,
       "erro": ""
@@ -253,7 +253,7 @@
       "ferramenta": "crawl_site",
       "alvo": "python.org docs maxPages 30",
       "ok": true,
-      "ms": 1306,
+      "ms": 1447,
       "status": 200,
       "chars": 153383,
       "erro": ""
@@ -263,9 +263,9 @@
       "ferramenta": "read_multiple_pages",
       "alvo": "30 URLs de HTML gigante maxChars 25000",
       "ok": true,
-      "ms": 21074,
+      "ms": 21135,
       "status": 200,
-      "chars": 79380,
+      "chars": 104529,
       "erro": "",
       "urls": 30
     },
@@ -283,18 +283,18 @@
       "fase": "cache",
       "ferramenta": "read_page",
       "alvo": "nodejs all (2a chamada)",
-      "ok": false,
-      "ms": 248,
+      "ok": true,
+      "ms": 2484,
       "status": 200,
-      "chars": 53,
-      "erro": "Erro: Resposta muito grande (acima de 5242880 bytes)."
+      "chars": 25242,
+      "erro": ""
     },
     {
       "fase": "cache",
       "ferramenta": "read_page",
       "alvo": "whatwg (2a chamada)",
       "ok": true,
-      "ms": 16,
+      "ms": 15,
       "status": 200,
       "chars": 25227,
       "erro": ""
@@ -304,9 +304,9 @@
       "ferramenta": "extract_links",
       "alvo": "guardian (2a chamada)",
       "ok": true,
-      "ms": 8,
+      "ms": 10,
       "status": 200,
-      "chars": 21867,
+      "chars": 22577,
       "erro": ""
     },
     {
@@ -314,7 +314,7 @@
       "ferramenta": "read_pdf",
       "alvo": "rfc9000.pdf (2a chamada)",
       "ok": true,
-      "ms": 5,
+      "ms": 18,
       "status": 200,
       "chars": 25246,
       "erro": ""
@@ -323,11 +323,11 @@
       "fase": "cache",
       "ferramenta": "find_on_page",
       "alvo": "nodejs all (2a chamada)",
-      "ok": false,
-      "ms": 285,
+      "ok": true,
+      "ms": 1958,
       "status": 200,
-      "chars": 53,
-      "erro": "Erro: Resposta muito grande (acima de 5242880 bytes)."
+      "chars": 6173,
+      "erro": ""
     }
   ]
 }

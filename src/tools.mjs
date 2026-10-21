@@ -30,11 +30,13 @@ import {
   HARD_MAX_CHARS,
   MEMO_CONVERSAO,
   MAX_RESPONSE_BYTES,
+  MAX_RESPONSE_BYTES_DOCUMENTO,
   tetoDownloadPara,
 } from "./config.mjs";
 import {
   fetchTextCached,
   fetchTextComTeto,
+  fetchTextDocumentoCached,
   marcarCorteInutil,
   validateHttpUrl,
   clampMaxChars,
@@ -62,6 +64,7 @@ import {
   LimiteExcedidoError,
   FerramentaDesconhecidaError,
   CrawlError,
+  RespostaMuitoGrandeError,
 } from "./errors.mjs";
 
 /* ===================================================================== *
@@ -634,7 +637,7 @@ export async function toolFindOnPage(args) {
   const maxHits = Math.max(1, Math.min(100, Number(args.maxHits) || 20));
   const contexto = Math.max(0, Math.min(5, Number(args.contexto) || 1));
 
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
 
@@ -700,7 +703,13 @@ export async function toolFindOnPage(args) {
     `# Busca em: ${finalUrl}\n` +
     `Termo: "${query}"${args.regex ? " (regex)" : ""}\n` +
     `Ocorrencias: ${total} em ${linhas.length} linha(s)` +
-    (total > mostradas ? ` — exibindo ${mostradas}` : "");
+    (total > mostradas ? ` — exibindo ${mostradas}` : "") +
+    // Documento gigante: o download foi cortado e a busca cobre só o começo.
+    // Sem este aviso, "nenhuma ocorrência" seria indistinguível de "não achei".
+    (payload.cortado
+      ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
+        `${payload.bytes} bytes, nao a pagina inteira.`
+      : "");
   return cabecalho + "\n\n" + blocos.join("\n\n") + (total > usadas ? `\n\n[... ${total - usadas} ocorrencia(s) alem do limite; aumente maxHits ...]` : "");
 }
 
@@ -718,9 +727,15 @@ export async function toolDiffPage(args) {
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const chave = chaveSnapshot(parsed.href);
 
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
+
+  // Leitura parcial num diff é pior que erro: o fim que faltou apareceria como
+  // "removido" e o cliente leria uma mudança que não houve. Recusa explícita.
+  if (payload.cortado) {
+    throw new RespostaMuitoGrandeError(MAX_RESPONSE_BYTES_DOCUMENTO, finalUrl);
+  }
 
   const conteudo = isConteudoBruto(contentType, html) ? html : markdownMemo(payload);
   const hashDepois = hashConteudo(conteudo);
@@ -776,12 +791,19 @@ export async function toolExtractLinks(args) {
   const parsed = validateHttpUrl(args.url);
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   const { finalUrl } = payload;
   ensureHtml("", payload.text, finalUrl);
   const all = linksMemo(payload);
   const shown = all.slice(0, limit);
-  const lines = [`Links em ${finalUrl}: ${all.length} encontrados, exibindo ${shown.length}.`, ""];
+  const lines = [`Links em ${finalUrl}: ${all.length} encontrados, exibindo ${shown.length}.`];
+  if (payload.cortado) {
+    lines.push(
+      `AVISO: documento maior que o teto de download — os links foram extraidos apenas dos ` +
+        `primeiros ${payload.bytes} bytes; pode haver mais no restante da pagina.`
+    );
+  }
+  lines.push("");
   shown.forEach((link, index) => {
     lines.push(`${index + 1}. ${link.text}`);
     lines.push(`   ${link.href}${link.internal ? " (interno)" : " (externo)"}`);

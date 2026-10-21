@@ -56,6 +56,26 @@ export const MAX_RESPONSE_BYTES = Math.max(
   Math.floor(Number(process.env.MAX_RESPONSE_BYTES) || 5 * 1024 * 1024)
 );
 
+// Teto de download das ferramentas que precisam do DOCUMENTO INTEIRO para
+// funcionar: extract_links, find_on_page e diff_page.
+//
+// Por que não MAX_RESPONSE_BYTES: nessas três, cortar destrói o resultado —
+// os links moram no rodapé e o termo buscado pode estar em qualquer lugar.
+// Só que a alternativa que existia era pior: acima de 5 MB a chamada FALHAVA
+// inteira. Medido em dev/load/bateria-limite.json: em
+// nodejs.org/api/all.html (~8 MB) o read_page respondia em 1.487 ms e o
+// extract_links devolvia "Resposta muito grande" — na MESMA URL. Devolver 200
+// links de um documento parcial é melhor que devolver zero links.
+//
+// Por isso este teto é maior, e o corte acima dele é SINALIZADO na saída (e,
+// como todo corte, não entra no cache). 24 MB cobre com folga a documentação
+// densa real (whatwg 12 MB, nodejs 8 MB) sem abrir a porta para um arquivo
+// absurdo consumir memória: acima disso a chamada responde parcial e avisa.
+export const MAX_RESPONSE_BYTES_DOCUMENTO = Math.max(
+  MAX_RESPONSE_BYTES,
+  Math.floor(Number(process.env.MAX_RESPONSE_BYTES_DOCUMENTO) || 24 * 1024 * 1024)
+);
+
 // Teto de download PROPORCIONAL ao texto pedido (só nas ferramentas de UMA
 // página cujo objetivo é TEXTO: read_page e read_dynamic_page).
 //
