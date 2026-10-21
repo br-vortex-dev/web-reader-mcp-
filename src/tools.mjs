@@ -1102,7 +1102,9 @@ export async function toolDiscoverUrls(args) {
   let sitemapUrls = [];
   for (const candidato of candidatos) {
     try {
-      const { text, contentType } = await fetchTextCached(candidato, { timeoutMs });
+      // Sitemap é documento, não página: um sitemap de 40.000 URLs passa fácil
+      // do teto duro de 5 MB. O teto de documento evita perder as URLs do fim.
+      const { text, contentType } = await fetchTextDocumentoCached(candidato, { timeoutMs });
       if (/xml/.test(contentType) || text.includes("<loc>")) {
         const locs = [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
         if (locs.length > 0) {
@@ -1120,7 +1122,7 @@ export async function toolDiscoverUrls(args) {
     const expandidas = [];
     for (const filho of filhos.slice(0, 5)) {
       try {
-        const { text } = await fetchTextCached(filho, { timeoutMs });
+        const { text } = await fetchTextDocumentoCached(filho, { timeoutMs });
         const locs = [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
         expandidas.push(...locs);
       } catch {
@@ -1144,7 +1146,7 @@ export async function toolDiscoverUrls(args) {
     ].join("\n");
   }
 
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   ensureHtml("", payload.text, payload.finalUrl);
   const internos = linksMemo(payload).filter((l) => l.internal);
   const mostrados = internos.slice(0, limite);
@@ -1189,7 +1191,13 @@ async function lerPaginaCompleta(url, maxChars, timeoutMs) {
   //
   // O corte proporcional vale no read_page, que é uma página só e onde o
   // cabeçalho `Conteudo: N+` avisa que havia mais. Aqui, não.
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  //
+  // O teto é o de DOCUMENTO (24 MB) e não o duro (5 MB): esta função alimenta
+  // read_multiple_pages e crawl_site, e uma página de 8 MB fazia a chamada
+  // inteira falhar aqui enquanto o read_page lia a MESMA URL normalmente. O
+  // payload vem cortado (e sinalizado) só acima do teto de documento, que é o
+  // comportamento certo: 200 links de um documento parcial valem mais que zero.
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {

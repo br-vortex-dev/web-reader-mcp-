@@ -8,7 +8,7 @@
  *   - autenticação por token (comparação em tempo constante);
  *   - leitura do corpo com teto de bytes e descompressão;
  *   - resposta comprimida (gzip/deflate/br) e resposta JSON;
- *   - as rotas de serviço: /health, OPTIONS e o 404.
+ *   - as rotas de serviço: /health, /metrics, OPTIONS e o 404.
  *
  *   Ele NÃO interpreta JSON-RPC: só entrega a mensagem para o roteador em
  *   server.mjs e devolve a resposta dele. Essa separação é o que permite
@@ -360,6 +360,229 @@ export function handlerOptions(res) {
     "access-control-allow-headers": "content-type, mcp-session-id, last-event-id, authorization",
   });
   res.end();
+}
+
+/* ===================================================================== *
+ * Métricas (/metrics)                                                     *
+ * ===================================================================== */
+
+/**
+ * Coletor de métricas de requisição, no formato que o Prometheus entende.
+ *
+ * Por que existe: até aqui o único sinal de produção era o `/health`, que
+ * mostra o estado AGORA (cache, filas, memória). Ele responde "como está" mas
+ * não "quanto está servindo" e "quão lento está" — e sem taxa e latência não
+ * se mede nada em produção. Este coletor acrescenta só o que falta: quantas
+ * requisições, quanto demoraram e de que tamanho, separadas por rota e status.
+ *
+ * O que ele NÃO faz, de propósito: não guarda histórico ilimitado, não faz
+ * amostragem aleatória e não mede cada URL lida (a etiqueta explodiria com a
+ * variedade da internet). São contadores fixos por rota: memória constante.
+ */
+export const metricasHttp = {
+  // [rota][status] -> contagem. Rota é o caminho normalizado, não a URL crua.
+  requisicoes: new Map(),
+  // Soma de segundos observados e contagem (para a média).
+  duracaoSoma: 0,
+  duracaoContagem: 0,
+  // Histograma de latência, em segundos. Buckets em potência de 2 de ms até
+  // 30 s: cobre da resposta de cache (1 ms) ao crawl de 30 páginas (30 s).
+  buckets: [
+    0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
+  ].map((limite) => ({ limite, contagem: 0 })),
+  total: 0,
+  bytesResposta: 0,
+  inicioMs: Date.now(),
+};
+
+/** Registra uma requisição concluída. Chamado no fim de cada resposta. */
+export function registrarRequisicao(rota, status, segundos, bytes) {
+  const chave = `${rota}|${status}`;
+  metricasHttp.requisicoes.set(chave, (metricasHttp.requisicoes.get(chave) || 0) + 1);
+  metricasHttp.total += 1;
+  metricasHttp.duracaoSoma += segundos;
+  metricasHttp.duracaoContagem += 1;
+  metricasHttp.bytesResposta += bytes || 0;
+  for (const b of metricasHttp.buckets) {
+    if (segundos <= b.limite) b.contagem += 1;
+  }
+}
+
+/** Normaliza o caminho para uma etiqueta curta e estável (sem cardinalidade). */
+function rotaDe(req) {
+  try {
+    const path = new URL(req.url || "/", "http://localhost").pathname;
+    if (path === "/" || path === "/health") return "/health";
+    if (path === "/metrics") return "/metrics";
+    if (path === "/mcp") return "/mcp";
+    return "outra";
+  } catch {
+    return "outra";
+  }
+}
+
+/**
+ * Monta o texto /metrics no formato de exposição do Prometheus.
+ *
+ * Formato: um nome por linha, etiquetas entre chaves, valor, e `# TYPE`/`# HELP`
+ * antes de cada família. Não há dependência: o formato é texto delimitado por
+ * quebra de linha, e é isso que o Prometheus busca a cada raspagem.
+ */
+export async function montarTextoMetrics(server) {
+  const linhas = [];
+  const agora = Date.now();
+  const cache = cacheStats();
+  const req_ = admissaoHttp.stats;
+  const out = limiteSaida.stats;
+  const mem = process.memoryUsage();
+  let conexoes = 0;
+  if (typeof server.getConnections === "function") {
+    conexoes = await new Promise((resolve) => {
+      server.getConnections((err, count) => resolve(err ? 0 : count));
+    });
+  }
+
+  const familia = (nome, tipo, ajuda, valores) => {
+    linhas.push(`# HELP ${nome} ${ajuda}`);
+    linhas.push(`# TYPE ${nome} ${tipo}`);
+    for (const v of valores) linhas.push(v);
+  };
+
+  familia(
+    "web_reader_up",
+    "gauge",
+    "Sempre 1 enquanto o processo estiver servindo.",
+    ["web_reader_up 1"]
+  );
+  familia(
+    "web_reader_uptime_segundos",
+    "gauge",
+    "Tempo desde a subida do processo.",
+    [`web_reader_uptime_segundos ${((agora - metricasHttp.inicioMs) / 1000).toFixed(3)}`]
+  );
+  familia(
+    "web_reader_info",
+    "gauge",
+    "Versão do servidor exposta como etiqueta.",
+    [`web_reader_info{versao="${SERVER_VERSION}"} 1`]
+  );
+  familia(
+    "web_reader_requisicoes_total",
+    "counter",
+    "Requisições HTTP atendidas, por rota e status.",
+    [...metricasHttp.requisicoes.entries()]
+      .sort()
+      .map(([chave, n]) => {
+        const [rota, status] = chave.split("|");
+        return `web_reader_requisicoes_total{rota="${rota}",status="${status}"} ${n}`;
+      })
+  );
+  familia(
+    "web_reader_duracao_segundos",
+    "histogram",
+    "Latência das requisições HTTP, do primeiro byte recebido ao último enviado.",
+    [
+      ...metricasHttp.buckets.map(
+        (b) => `web_reader_duracao_segundos_bucket{le="${b.limite}"} ${b.contagem}`
+      ),
+      `web_reader_duracao_segundos_bucket{le="+Inf"} ${metricasHttp.duracaoContagem}`,
+      `web_reader_duracao_segundos_sum ${metricasHttp.duracaoSoma.toFixed(6)}`,
+      `web_reader_duracao_segundos_count ${metricasHttp.duracaoContagem}`,
+    ]
+  );
+  familia(
+    "web_reader_resposta_bytes_total",
+    "counter",
+    "Bytes de corpo enviados ao cliente (sem cabeçalhos).",
+    [`web_reader_resposta_bytes_total ${metricasHttp.bytesResposta}`]
+  );
+  familia(
+    "web_reader_cache_entradas",
+    "gauge",
+    "Entradas no cache de páginas.",
+    [`web_reader_cache_entradas ${cache.entries}`]
+  );
+  familia(
+    "web_reader_cache_bytes",
+    "gauge",
+    "Bytes ocupados no cache de páginas.",
+    [`web_reader_cache_bytes ${cache.bytes}`, `web_reader_cache_bytes_max ${cache.maxBytes}`]
+  );
+  familia(
+    "web_reader_admissao_ativas",
+    "gauge",
+    "Requisições em processamento e na fila de admissão.",
+    [
+      `web_reader_admissao_ativas ${req_.ativos}`,
+      `web_reader_admissao_na_fila ${req_.naFila}`,
+      `web_reader_admissao_recusadas_total ${req_.recusados}`,
+    ]
+  );
+  familia(
+    "web_reader_downloads_ativos",
+    "gauge",
+    "Downloads de saída em andamento e na fila.",
+    [
+      `web_reader_downloads_ativos ${out.ativos}`,
+      `web_reader_downloads_na_fila ${out.naFila}`,
+      `web_reader_downloads_recusados_total ${out.recusados}`,
+    ]
+  );
+  familia(
+    "web_reader_coalescidas_total",
+    "counter",
+    "Buscas simultâneas da mesma URL que aproveitaram uma só requisição.",
+    [`web_reader_coalescidas_total ${coalescedorDeBuscas.stats.colapsadas}`]
+  );
+  familia(
+    "web_reader_memoria_bytes",
+    "gauge",
+    "Memória do processo por região.",
+    [
+      `web_reader_memoria_bytes{tipo="rss"} ${mem.rss}`,
+      `web_reader_memoria_bytes{tipo="heap_usado"} ${mem.heapUsed}`,
+      `web_reader_memoria_bytes{tipo="heap_total"} ${mem.heapTotal}`,
+      `web_reader_memoria_bytes{tipo="externo"} ${mem.external}`,
+    ]
+  );
+  familia(
+    "web_reader_conexoes_abertas",
+    "gauge",
+    "Conexões TCP abertas no servidor HTTP.",
+    [`web_reader_conexoes_abertas ${conexoes}`]
+  );
+  familia(
+    "web_reader_sessoes_abertas",
+    "gauge",
+    "Sessões MCP ativas e canais SSE abertos.",
+    [
+      `web_reader_sessoes_abertas ${estatisticasSessoes().sessoes}`,
+      `web_reader_sessoes_canais_sse ${estatisticasSessoes().canaisSse}`,
+    ]
+  );
+
+  return linhas.join("\n") + "\n";
+}
+
+/**
+ * Handler de /metrics.
+ *
+ * Público como o /health por padrão — ninguém precisa de token para ver que o
+ * serviço está no ar, e é isso que o Prometheus espera de uma raspagem. Quem
+ * quiser fechado define `METRICS_PUBLIC=0`: aí a rota passa a exigir o mesmo
+ * Bearer do /mcp.
+ */
+export async function handlerMetrics(server, res, req, ctx) {
+  if (process.env.METRICS_PUBLIC === "0" && !autorizado(req, ctx?.authToken)) {
+    return handlerNaoAutorizado(res);
+  }
+  const texto = await montarTextoMetrics(server);
+  res.writeHead(200, {
+    "content-type": "text/plain; version=0.0.4; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+  });
+  res.end(texto);
 }
 
 /** Handler de /health e /. */
@@ -841,6 +1064,17 @@ export function criarContextoMcp() {
  */
 export function criarServidorHttp(ctx) {
   const server = http.createServer(async (req, res) => {
+    // Medição de latência e status SEM tocar nos handlers: o "finish" do
+    // response chega depois que qualquer rota terminou, então um único ponto
+    // cobre /health, /metrics, /mcp e o 404 — sem repetir código em cada um.
+    const inicio = process.hrtime.bigint();
+    const rota = rotaDe(req);
+    res.on("finish", () => {
+      const segundos = Number(process.hrtime.bigint() - inicio) / 1e9;
+      const bytes = Number(res.getHeader("content-length")) || 0;
+      registrarRequisicao(rota, res.statusCode || 0, segundos, bytes);
+    });
+
     let path;
     try {
       path = new URL(req.url || "/", "http://localhost").pathname;
@@ -850,6 +1084,9 @@ export function criarServidorHttp(ctx) {
 
     if (req.method === "OPTIONS") return handlerOptions(res);
     if (path === "/health" || path === "/") return handlerHealth(server, res);
+    if (path === "/metrics" && (req.method === "GET" || req.method === "HEAD")) {
+      return handlerMetrics(server, res, req, ctx);
+    }
     if (path !== "/mcp") return handlerNotFound(res);
 
     // Rotas da spec do transporte HTTP do MCP. Continuam exigindo o token.

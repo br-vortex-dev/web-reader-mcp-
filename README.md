@@ -97,7 +97,7 @@ caractere (`48`, `57`).
 npm test
 ```
 
-Roda os arquivos de `tests/` (31 arquivos, 263 testes, ~90 s, sem rede na maioria):
+Roda os arquivos de `tests/` (32 arquivos, 268 testes, ~90 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -128,6 +128,7 @@ Roda os arquivos de `tests/` (31 arquivos, 263 testes, ~90 s, sem rede na maiori
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão) |
+| `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
 | `tests/golden.test.mjs` | `htmlToMarkdown` bate com os 20 golden files em `tests/golden/` (saída byte a byte) |
 | `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
@@ -284,7 +285,13 @@ servidor tambem fala o transporte **HTTP remoto do MCP** (Streamable HTTP): quan
 variavel `PORT` existe (o Render define automaticamente), ele sobe um servidor HTTP com:
 
 - `POST /mcp` — endpoint MCP (JSON-RPC; aceita 1 mensagem ou lote)
-- `GET /health` — health check do Render
+- `GET /health` — health check do Render (estado **agora**: cache, filas, memória)
+- `GET /metrics` — métricas no formato de exposição do **Prometheus** (taxa, latência, bytes)
+
+O `/health` responde "como está"; o `/metrics` responde "quanto serviu e quão
+lento" — é a diferença entre ver a fila e ver o throughput. As duas rotas são
+públicas por padrão, como o `/health` (raspagem não pede token); para exigir o
+mesmo Bearer do `/mcp`, defina `METRICS_PUBLIC=0`.
 
 O modo e escolhido sozinho: local sem `PORT` → stdio; no Render → HTTP.  
 Para forcar: `node server.js --http` ou `node server.js --stdio`.
@@ -299,6 +306,17 @@ Para forcar: `node server.js --http` ou `node server.js --stdio`.
    - Start Command: `node server.js`
    - Health Check Path: `/health`
 3. O Render gera uma URL tipo `https://web-reader-mcp.onrender.com`.
+
+### Fora do Render (Docker)
+
+O `Dockerfile` na raiz sobe a mesma coisa em qualquer lugar: imagem
+`node:22-alpine`, **sem `npm install`** (o projeto é zero dependências), usuário
+`node` (não root) e `HEALTHCHECK` no `/health`.
+
+```bash
+docker build -t web-reader-mcp .
+docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token web-reader-mcp
+```
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
    `web-reader-mcp v1.7.0 OK | cache: 0 entradas, 0 bytes / 33554432 bytes (max 100 entradas, ttl 7.5 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
