@@ -22,6 +22,8 @@
 import { appendFileSync } from "node:fs";
 import {
   MAX_PAGES_PER_CALL,
+  MAX_PRAZO_MULTI_MS,
+  PRAZO_MINIMO_MULTI_MS,
   API_MAX_CANDIDATES,
   API_TOTAL_BUDGET_MS,
   MULTI_MAX_TOTAL_CHARS,
@@ -567,9 +569,17 @@ function classifyFetchError(err) {
  *     levado conteúdo, então refaz com o teto largo (MEMORIZADO pelo tamanho,
  *     então essa segunda conexão acontece uma vez só por URL).
  */
-async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs }) {
-  const teto = tetoDownloadPara(maxChars, MAX_RESPONSE_BYTES);
-  let payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto });
+async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs, largoBytes = MAX_RESPONSE_BYTES }) {
+  // O teto largo NUNCA passa do teto duro declarado pelo servidor. Tentar
+  // abrir até MAX_RESPONSE_BYTES_DOCUMENTO aqui parecia um ganho (lia a
+  // documentação de 8 MB do nodejs), mas quebrava o contrato que
+  // tests/parada-antecipada.test.mjs trava: com MAX_RESPONSE_BYTES baixo, o
+  // read_page TEM de falhar com "Resposta muito grande" em vez de baixar
+  // tudo. Ferramenta que precisa do documento inteiro tem caminho próprio
+  // (fetchTextDocumentoCached), e é lá que esse teto vale.
+  const largo = Math.max(largoBytes, MAX_RESPONSE_BYTES);
+  const teto = tetoDownloadPara(maxChars, largo);
+  let payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, largoBytes: largo });
   if (!payload.cortado) return payload;
 
   // O corte tira o fim do HTML. Converter o que veio é a única forma honesta de
@@ -607,7 +617,7 @@ async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs }) {
   // dois downloads (medido: +46% no washingtonpost, cujo topo é quase todo
   // marcação e entrega pouco texto).
   marcarCorteInutil(parsed.href);
-  payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, forcarLargo: true });
+  payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, largoBytes: largo, forcarLargo: true });
   return { ...payload, perdeuTexto: true };
 }
 
@@ -618,6 +628,9 @@ export async function toolReadPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  // `largoBytes` NÃO recebe MAX_RESPONSE_BYTES_DOCUMENTO: o read_page respeita
+  // o teto duro do servidor (é o contrato que tests/parada-antecipada.mjs
+  // trava). O read_dynamic_page, sim — ver abaixo.
   const payload = await buscarComTetoInteligente(parsed, { maxChars, timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
@@ -862,6 +875,22 @@ export async function toolReadMultiplePages(args) {
 
   const CONCURRENCY = FETCH_CONCURRENCY;
   const lidos = new Array(unicas.length);
+  // PRAZO FINAL da chamada inteira.
+  //
+  // Antes, a resposta só saía quando a ÚLTIMA URL terminasse: 29 páginas
+  // prontas em 300 ms ficavam presas atrás de uma que demorava 12 s. Como o
+  // cliente MCP tem o próprio teto de tempo, o pior caso era perder tudo.
+  //
+  // Agora a chamada tem um orçamento (o timeout de UMA leitura, que é o que
+  // o cliente pediu, limitado a um teto duro) e, ao estourar, devolve o que já
+  // leu marcando as que faltaram. O trabalho em voo NÃO é cancelado: ele
+  // termina no fetch, aquece o cache e a próxima chamada acha pronto.
+  //
+  // O prazo nunca é menor que o timeout de uma leitura: numa lista de uma URL
+  // só, o comportamento tem de ser idêntico ao de antes.
+  const prazoMs = Math.min(MAX_PRAZO_MULTI_MS, Math.max(timeoutMs, PRAZO_MINIMO_MULTI_MS));
+  const prazoFinal = Date.now() + prazoMs;
+  let estourouPrazo = false;
   // Pool contínuo em vez de lotes de CONCURRENCY com Promise.all por bloco.
   // No lote, os índices seguintes só começavam quando o MAIS LENTO do bloco
   // terminava: 31 URLs rápidas esperavam a 32ª. Aqui cada vaga puxa a próxima
@@ -873,6 +902,13 @@ export async function toolReadMultiplePages(args) {
     for (;;) {
       const posicao = proximo++;
       if (posicao >= unicas.length) return;
+      // Prazo estourado: as vagas param de puxar trabalho novo. As leituras
+      // já em curso continuam (e terminam sozinhas), mas não seguram a
+      // resposta — o Promise.race abaixo devolve o que houver.
+      if (Date.now() >= prazoFinal) {
+        estourouPrazo = true;
+        return;
+      }
       const url = unicas[posicao];
       try {
         lidos[posicao] = { ok: true, text: (await lerPaginaCompleta(url, maxChars, timeoutMs)).conteudo };
@@ -882,11 +918,31 @@ export async function toolReadMultiplePages(args) {
     }
   };
   const vagas = Math.min(CONCURRENCY, unicas.length);
-  await Promise.all(Array.from({ length: vagas }, trabalhador));
+  const trabalho = Promise.all(Array.from({ length: vagas }, trabalhador));
+  // Corrida contra o relógio. `unref` não se aplica a setTimeout de prazo
+  // curto: queremos que ele dispare. O clearTimeout no finally evita deixar
+  // o timer pendurado quando o trabalho termina primeiro.
+  let timerPrazo;
+  const prazo = new Promise((resolve) => {
+    timerPrazo = setTimeout(() => {
+      estourouPrazo = true;
+      resolve();
+    }, prazoMs);
+  });
+  try {
+    await Promise.race([trabalho, prazo]);
+  } finally {
+    clearTimeout(timerPrazo);
+    // O trabalho segue em segundo plano (aquece o cache). Sem este catch, uma
+    // rejeição depois do prazo viraria "unhandled rejection", que neste
+    // projeto derruba o processo de propósito.
+    trabalho.catch(() => {});
+  }
 
   const secoes = [];
   let total = 0;
   let omitidas = 0;
+  let naoLidas = 0;
   const primeiraPosicao = new Map();
   urls.forEach((u, pos) => {
     if (!primeiraPosicao.has(u)) primeiraPosicao.set(u, pos);
@@ -898,6 +954,16 @@ export async function toolReadMultiplePages(args) {
       return;
     }
     const leitura = lidos[indice.get(url)];
+    // Fila barrada pelo prazo: a URL nem chegou a ser pedida. É diferente de
+    // erro — nada falhou, o orçamento de tempo acabou. A mensagem diz isso e
+    // aponta a saída, senão o cliente lê como se a página estivesse quebrada.
+    if (!leitura) {
+      naoLidas++;
+      secoes.push(
+        `(não lida: o prazo de ${prazoMs} ms da chamada terminou antes — peça esta URL em outra chamada, o cache está quente)`
+      );
+      return;
+    }
     if (total >= MULTI_MAX_TOTAL_CHARS) {
       omitidas++;
       secoes.push(`(omitida: teto de saída de ${MULTI_MAX_TOTAL_CHARS} caracteres já foi alcançado)`);
@@ -909,11 +975,14 @@ export async function toolReadMultiplePages(args) {
     secoes.push(texto);
   });
 
-  const ok = unicas.filter((u) => lidos[indice.get(u)].ok).length;
+  const ok = unicas.filter((u) => lidos[indice.get(u)] && lidos[indice.get(u)].ok).length;
   const resumo = [
     `Leitura concluida: ${ok}/${unicas.length} paginas OK (ate ${CONCURRENCY} em paralelo).`,
     duplicadas > 0 ? ` ${duplicadas} URL(s) repetida(s) lida(s) uma vez so.` : "",
     omitidas > 0 ? ` ${omitidas} secao(oes) omitida(s) por teto de saida total.` : "",
+    naoLidas > 0
+      ? ` ${naoLidas} URL(s) nao chegaram a ser lidas: o prazo da chamada terminou — peca de novo, o cache das ja lidas esta quente.`
+      : "",
     "",
   ].join("");
   return (
@@ -930,7 +999,30 @@ export async function toolReadDynamicPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  // Mesmo teto proporcional do read_page, e não o teto duro de 5 MB.
+  //
+  // Era o último caminho de leitura de UMA página ainda baixando até 5 MB
+  // para devolver `maxChars` caracteres: numa página de 12 MB (o whatwg, que
+  // a bateria usa) o read_page já parava em ~480 KB e o read_dynamic_page
+  // baixava os 5 MB inteiros para entregar 8.000 caracteres.
+  //
+  // O `buscarComTetoInteligente` é reaproveitado de propósito em vez de um
+  // teto "na unha": ele já resolve o caso perigoso desta ferramenta — se o
+  // pedaço baixado não cobre o pedido (o que aconteceria se os dados bons
+  // estivessem num script no fim do documento), ele refaz uma vez com o teto
+  // largo e marca a URL para ir direto no largo nas próximas. Ou seja: o
+  // resultado é o mesmo de antes quando o corte custaria conteúdo, e é mais
+  // rápido quando não custa.
+  const payload = await buscarComTetoInteligente(parsed, {
+    maxChars,
+    timeoutMs,
+    // Aqui o teto de DOCUMENTO é o certo, ao contrário do read_page: esta
+    // ferramenta existe para páginas pesadas (React/Vue/Next com muitos
+    // dados embutidos), e o que se quer do HTML é justamente o miolo de
+    // script onde os dados moram — cortar em 5 MB devolvia erro numa
+    // documentação de 8 MB, que é exatamente o caso de uso dela.
+    largoBytes: MAX_RESPONSE_BYTES_DOCUMENTO,
+  });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
@@ -1159,6 +1251,22 @@ export async function toolCrawlSite(args) {
   const falhas = [];
   let lidas = 0;
 
+  // PRAZO FINAL do crawl, pelo mesmo motivo do read_multiple_pages: a resposta
+  // só saía quando o último trabalhador terminasse. Num site com páginas
+  // lentas (o crawl do iana.org já foi de 6,9 s para 9,1 s por causa da
+  // origem, não do código), o cliente desistia e perdia as páginas já lidas.
+  // Estourou o prazo: devolve o que foi lido, marca o resto como não lido, e
+  // o que está em voo segue aquecendo o cache.
+  //
+  // O relógio começa AQUI, antes da página raiz. A primeira versão contava a
+  // partir do pool, e a medição (dev/_probe-crawl-tempo.mjs) mostrou o efeito:
+  // raiz de 540 ms com prazo de 1000 ms devolvia em 1746 ms — o prazo virava
+  // "raiz + prazo", sempre mais que o prometido. O prazo é da CHAMADA, não de
+  // um pedaço dela.
+  const prazoMs = Math.min(MAX_PRAZO_MULTI_MS, Math.max(timeoutMs, PRAZO_MINIMO_MULTI_MS));
+  const prazoFinal = Date.now() + prazoMs;
+  let estourouPrazo = false;
+
   /** Enfileira os links ainda não visitados de uma leitura. */
   const enfileirarLinks = (links) => {
     for (const href of links) {
@@ -1203,6 +1311,12 @@ export async function toolCrawlSite(args) {
   const trabalhador = async () => {
     for (;;) {
       if (lidas + ativos >= maxPages) return;
+      // Prazo estourado: ninguém puxa trabalho novo. Quem está lendo termina
+      // sozinho, mas a resposta não espera — o Promise.race abaixo decide.
+      if (Date.now() >= prazoFinal) {
+        estourouPrazo = true;
+        return;
+      }
       if (queue.length === 0) {
         if (ativos === 0) return; // não há leitura em curso para descobrir mais URLs
         await new Promise((res) => emEspera.push(res));
@@ -1224,10 +1338,42 @@ export async function toolCrawlSite(args) {
       acordar();
     }
   };
-  await Promise.all(Array.from({ length: CONCURRENCY }, trabalhador));
+  const trabalho = Promise.all(Array.from({ length: CONCURRENCY }, trabalhador));
+  let timerPrazo;
+  const prazo = new Promise((resolve) => {
+    // `prazoFinal - Date.now()`, e não `prazoMs`: o prazo é um INSTANTE, não
+    // uma duração que recomeça. Criar o timer com a duração cheia aqui fazia
+    // o crawl esperar "tempo da raiz + prazo" — medido em
+    // dev/_probe-crawl-tempo.mjs: prazo de 1000 ms retornando em 1784 ms.
+    // Com o resto do prazo, o timer fecha no instante prometido.
+    timerPrazo = setTimeout(() => {
+      estourouPrazo = true;
+      // Acorda quem está parado esperando fila: sem isso o trabalhador
+      // dormiria até a última leitura terminar, e a resposta ficaria presa
+      // no prazo justamente no caso em que ele existe para salvar.
+      acordar();
+      resolve();
+    }, Math.max(0, prazoFinal - Date.now()));
+  });
+  try {
+    await Promise.race([trabalho, prazo]);
+  } finally {
+    clearTimeout(timerPrazo);
+    // Trabalho remanescente segue em segundo plano (aquece o cache). O catch
+    // evita "unhandled rejection", que neste projeto derruba o processo.
+    trabalho.catch(() => {});
+    // Quem ficou dormindo esperando fila precisa sair, senão o processo
+    // seguraria promessas penduradas para sempre.
+    acordar();
+  }
 
   const cabecalho = cabecalhoDoCrawl({ start: start.href, lidas, maxPages, baseHost, falhas });
-  return cabecalho + "\n\n" + conteudos.join("\n\n========================================\n\n");
+  const avisoPrazo = estourouPrazo
+    ? `\nPRAZO ENCERRADO: a chamada parou em ${prazoMs} ms antes de ler tudo.` +
+      `\nForam ${lidas} pagina(s) lidas; as que faltaram nao foram tentadas.` +
+      `\nAs paginas ja lidas estao no cache — peca de novo para continuar de onde parou.`
+    : "";
+  return cabecalho + avisoPrazo + "\n\n" + conteudos.join("\n\n========================================\n\n");
 }
 
 /**

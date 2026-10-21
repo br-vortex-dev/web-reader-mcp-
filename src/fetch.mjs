@@ -39,6 +39,8 @@ import {
   CACHE_MAX_ENTRY_BYTES,
   CACHE_SWR,
   CACHE_STALE_WINDOW_MS,
+  CACHE_NEGATIVO_TTL_MS,
+  CACHE_NEGATIVO_MAX_ENTRIES,
   OUTBOUND_MAX_CONCURRENCY,
   OUTBOUND_MAX_QUEUE,
   OUTBOUND_MEMORY_BUDGET,
@@ -114,6 +116,62 @@ export const pageCache = new CacheLRU({
 
 // Junção de buscas em voo: N pedidos simultâneos da MESMA URL viram 1 download.
 export const coalescedorDeBuscas = criarCoalescedorDeBuscas();
+
+/* --------------------------------------------------------------------- *
+ * Cache NEGATIVO (falha permanente)                                       *
+ * --------------------------------------------------------------------- *
+ * Uma URL que responde 404 é 404 amanhã também, quase sempre. Sem esta
+ * memória, cada pedido da mesma URL pagava conexão + TLS + headers para
+ * receber o mesmo "não existe" — o pior tipo de trabalho: gastar rede para
+ * confirmar uma negativa que já se sabia.
+ *
+ * O que entra é só status PERMANENTE (4xx que não seja 429). 5xx e 429 são
+ * transitórios: guardá-los transformaria um tropeço do servidor em erro fixo.
+ * O TTL é curto (2 min) porque um 404 pode virar 200 a qualquer momento.
+ *
+ * Guarda o erro já pronto e o devolve num clone: quem recebe pode inspecionar
+ * `status` sem que um chamador contamine o outro.
+ * --------------------------------------------------------------------- */
+const cacheNegativo = new Map();
+export const cacheNegativoStats = { hits: 0, gravados: 0 };
+
+/** Status que valem ser lembrados (permanentes). */
+function statusNegativoCacheavel(status) {
+  return status >= 400 && status < 500 && status !== 429 && status !== 408;
+}
+
+/** Devolve o HttpError guardado para a URL, ou null. */
+function lerNegativo(cacheKey) {
+  if (CACHE_NEGATIVO_MAX_ENTRIES === 0) return null;
+  const entrada = cacheNegativo.get(cacheKey);
+  if (!entrada) return null;
+  if (Date.now() - entrada.at > CACHE_NEGATIVO_TTL_MS) {
+    cacheNegativo.delete(cacheKey);
+    return null;
+  }
+  // Reordena para o LRU: a negativa mais consultada é a última a sair.
+  cacheNegativo.delete(cacheKey);
+  cacheNegativo.set(cacheKey, entrada);
+  cacheNegativoStats.hits++;
+  return new HttpError(entrada.status, entrada.statusText, entrada.url);
+}
+
+/** Guarda uma falha permanente (se o status permitir). */
+function guardarNegativo(cacheKey, err) {
+  if (CACHE_NEGATIVO_MAX_ENTRIES === 0) return;
+  if (!(err instanceof HttpError) || !statusNegativoCacheavel(err.status)) return;
+  cacheNegativo.delete(cacheKey);
+  cacheNegativo.set(cacheKey, {
+    at: Date.now(),
+    status: err.status,
+    statusText: err.statusText,
+    url: err.url,
+  });
+  cacheNegativoStats.gravados++;
+  while (cacheNegativo.size > CACHE_NEGATIVO_MAX_ENTRIES) {
+    cacheNegativo.delete(cacheNegativo.keys().next().value);
+  }
+}
 
 // Revalidações em segundo plano (SWR): contadores para o /health.
 export const revalidacoes = { tentadas: 0, falhas: 0 };
@@ -542,8 +600,7 @@ function corteInutil(chave) {
   return true;
 }
 
-export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
-  const cacheKey = chaveCanonica(url);
+export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {  const cacheKey = chaveCanonica(url);
   const guardado = pageCache.get(cacheKey);
   if (guardado) {
     if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries });
@@ -862,6 +919,13 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
     // de gravar — nesse caso não baixa de novo.
     const hitQuente = pageCache.get(cacheKey);
     if (hitQuente && !hitQuente.stale) return hitQuente.payload;
+
+    // Falha permanente já vista nesta URL: devolve o MESMO erro sem tocar a
+    // rede. Fica DEPOIS da checagem de conteúdo (um 404 não pode encobrir uma
+    // página que já está em cache) e ANTES de qualquer trabalho de segurança,
+    // que é justamente o que se quer economizar.
+    const negativa = lerNegativo(cacheKey);
+    if (negativa) throw negativa;
   }
 
   // O SSRF do host é validado ANTES de qualquer outra saída (o fetch do robots
@@ -893,11 +957,20 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   if (condicional) {
     revalidacaoCondicional.tentadas++;
   }
-  const payload = await limitesPorHost.executar(hostOf(url), () =>
-    limiteSaida.executar(() =>
-      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair, maxBytes, permitirCorte: permissoDeCorte })
-    )
-  );
+  let payload;
+  try {
+    payload = await limitesPorHost.executar(hostOf(url), () =>
+      limiteSaida.executar(() =>
+        fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair, maxBytes, permitirCorte: permissoDeCorte })
+      )
+    );
+  } catch (err) {
+    // Falha permanente (404, 410, 403...): lembra para não repagar a conexão
+    // na próxima chamada da mesma URL. O erro sobe igual — o que muda é só
+    // que, da segunda vez em diante, ele sai da memória sem ir à rede.
+    guardarNegativo(cacheKey, err);
+    throw err;
+  }
 
   // O robots rodou em paralelo com o download; aqui a decisão dele é cobrada.
   // Negado => RobotBloqueadoError sobe e o corpo baixado é descartado sem

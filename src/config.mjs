@@ -50,6 +50,32 @@ export const DEFAULT_MAX_CHARS = clampEnv(process.env.DEFAULT_MAX_CHARS, 8000, 2
 // Teto de páginas por chamada em read_multiple_pages e crawl_site.
 export const MAX_PAGES_PER_CALL = 30;
 
+// PRAZO FINAL das ferramentas de VÁRIAS páginas (read_multiple_pages e
+// crawl_site).
+//
+// O problema que isto resolve: a resposta só saía quando a última página
+// terminasse. Numa lista de 30, uma página lenta segurava as 29 prontas, e
+// como o cliente MCP desiste no próprio teto de tempo, o pior caso era perder
+// TUDO o que já estava lido.
+//
+// O prazo é o timeout de UMA leitura (o que o cliente pediu), com um piso
+// para listas curtas não serem cortadas cedo demais e um teto duro para a
+// chamada não passar de dois minutos em nenhuma hipótese. Estourou: devolve o
+// que já leu, avisa quantas faltaram, e o trabalho em voo segue aquecendo o
+// cache — a chamada seguinte acha pronto.
+export const MAX_PRAZO_MULTI_MS = clampEnv(
+  process.env.MAX_PRAZO_MULTI_MS,
+  60000,
+  5000,
+  120000
+);
+export const PRAZO_MINIMO_MULTI_MS = clampEnv(
+  process.env.PRAZO_MINIMO_MULTI_MS,
+  15000,
+  1000,
+  120000
+);
+
 // Teto de download por requisição.
 export const MAX_RESPONSE_BYTES = Math.max(
   64 * 1024,
@@ -233,6 +259,27 @@ export const CACHE_STALE_WINDOW_MS = clampEnvZero(
   0,
   0,
   Number.MAX_SAFE_INTEGER
+);
+
+// Cache NEGATIVO: respostas HTTP que não vão mudar tão cedo (404, 410, 401,
+// 403...) ficam lembradas por um tempo curto, para não pagar a mesma conexão
+// de novo a cada chamada. Sem ele, uma URL que responde 404 custava o
+// download inteiro toda vez que alguém a pedia.
+//
+// Só entra status PERMANENTE. 429 e 5xx ficam fora de propósito: são falhas
+// passageiras, e o retry já cuida delas — guardá-las transformaria um tropeço
+// momentâneo em erro fixo por minutos. O TTL é curto porque um 404 de hoje
+// pode virar 200 amanhã (publicação, deploy, correção do site).
+export const CACHE_NEGATIVO_TTL_MS = Math.max(
+  1000,
+  Math.floor(Number(process.env.CACHE_NEGATIVO_TTL_MS) || 2 * 60 * 1000)
+);
+// 0 desliga o recurso (é assim que a bateria mede o comportamento antigo).
+export const CACHE_NEGATIVO_MAX_ENTRIES = clampEnvZero(
+  process.env.CACHE_NEGATIVO_MAX_ENTRIES,
+  256,
+  0,
+  10000
 );
 
 // Memoização da conversão (HTML -> markdown/meta/links) por conteúdo baixado.
