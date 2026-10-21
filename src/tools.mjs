@@ -520,6 +520,33 @@ function isNavigationUrl(url) {
   return url.includes("#");
 }
 
+/**
+ * Arquivo que NUNCA é uma página legível: folha de estilo, script, imagem,
+ * fonte, mídia ou pacote. O crawl medido em dev/_probe-crawl-fases.mjs gastava
+ * 93% do tempo baixando, e uma página inicial típica tem dezenas destes links
+ * — baixar um .css de 300 KB para concluir que não tem texto é download
+ * jogado fora em cada rodada do BFS.
+ */
+const EXTENSOES_ASSET = new Set([
+  "css", "js", "mjs", "map",
+  "ico", "png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "bmp",
+  "woff", "woff2", "ttf", "otf", "eot",
+  "mp3", "mp4", "m4a", "webm", "ogg", "wav",
+  "zip", "gz", "tar", "rar", "7z",
+]);
+
+function ehArquivoEstatico(href) {
+  let parsed;
+  try {
+    parsed = new URL(href);
+  } catch {
+    return false;
+  }
+  const ponto = parsed.pathname.lastIndexOf(".");
+  if (ponto < 0) return false;
+  return EXTENSOES_ASSET.has(parsed.pathname.slice(ponto + 1).toLowerCase());
+}
+
 /** Decodifica um segmento de URL sem lançar: % malformado fica como veio. */
 function decodificarSegmento(segmento) {
   const minúsculo = segmento.toLowerCase();
@@ -1099,36 +1126,38 @@ export async function toolDiscoverUrls(args) {
     `${origin}/wp-sitemap.xml`,
   ];
 
-  let sitemapUrls = [];
-  for (const candidato of candidatos) {
-    try {
+  // Dispara os 4 candidatos DE UMA VEZ e fica com o primeiro que responder
+  // com <loc>, na ordem de prioridade. Site sem sitemap punha 4 idas de 404
+  // em série (o iana.org levava 1.454 ms); em paralelo o custo é o de UMA
+  // ida. O limitador por host do fetch.mjs segura a concorrência.
+  const respostas = await Promise.allSettled(
+    candidatos.map(async (candidato) => {
       // Sitemap é documento, não página: um sitemap de 40.000 URLs passa fácil
       // do teto duro de 5 MB. O teto de documento evita perder as URLs do fim.
       const { text, contentType } = await fetchTextDocumentoCached(candidato, { timeoutMs });
-      if (/xml/.test(contentType) || text.includes("<loc>")) {
-        const locs = [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
-        if (locs.length > 0) {
-          sitemapUrls.push(...locs);
-          break;
-        }
-      }
-    } catch {
-      // tenta o próximo candidato
+      if (!/xml/.test(contentType) && !text.includes("<loc>")) return [];
+      return [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
+    }),
+  );
+  let sitemapUrls = [];
+  for (const resposta of respostas) {
+    const locs = resposta.status === "fulfilled" ? resposta.value : [];
+    if (locs.length > 0) {
+      sitemapUrls.push(...locs);
+      break;
     }
   }
 
   const filhos = sitemapUrls.filter((u) => /\.xml($|\?)/i.test(u));
   if (filhos.length > 0 && filhos.length === sitemapUrls.length) {
-    const expandidas = [];
-    for (const filho of filhos.slice(0, 5)) {
-      try {
+    // Mesma economia de cima: até 5 sitemaps filhos em paralelo, não em série.
+    const respostasFilhos = await Promise.allSettled(
+      filhos.slice(0, 5).map(async (filho) => {
         const { text } = await fetchTextDocumentoCached(filho, { timeoutMs });
-        const locs = [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
-        expandidas.push(...locs);
-      } catch {
-        // ignora sitemap filho com falha
-      }
-    }
+        return [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
+      }),
+    );
+    const expandidas = respostasFilhos.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
     if (expandidas.length > 0) sitemapUrls = expandidas;
   }
 
@@ -1170,7 +1199,7 @@ export async function toolDiscoverUrls(args) {
  */
 function linksParaCrawl(payload) {
   return linksMemo(payload)
-    .filter((l) => l.internal && l.href !== payload.finalUrl && !isNavigationUrl(l.href))
+    .filter((l) => l.internal && l.href !== payload.finalUrl && !isNavigationUrl(l.href) && !ehArquivoEstatico(l.href))
     .map((l) => l.href);
 }
 
