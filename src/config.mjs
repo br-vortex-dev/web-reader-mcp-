@@ -41,6 +41,64 @@ export const MAX_RESPONSE_BYTES = Math.max(
   Math.floor(Number(process.env.MAX_RESPONSE_BYTES) || 5 * 1024 * 1024)
 );
 
+// Teto de download PROPORCIONAL ao texto pedido (só nas ferramentas de UMA
+// página cujo objetivo é TEXTO: read_page e read_dynamic_page).
+//
+// O problema que isto resolve: antes, toda leitura baixava até
+// MAX_RESPONSE_BYTES (5 MB) mesmo quando a pessoa pediu 2.000 caracteres —
+// o whatwg (12 MB) e o washingtonpost gastavam a maior parte do tempo
+// baixando marcação que seria jogada 99% fora. Medido em dev/_bateria-*:
+// era o único gargalo de CPU/rede que sobrava no caminho de leitura.
+//
+// A folga de 60x existe porque HTML tem muita marcação em volta do texto
+// (script, style, atributos, navegação). O piso de 1 MB protege as páginas
+// comuns: a esmagadora maioria dos sites tem menos que isso, então o teto
+// só entra em ação nas páginas gigantes — exatamente onde o desperdício
+// estava. O corte é SINALIZADO no resultado e NÃO entra no cache (HTML
+// truncado envenenaria toda leitura futura da mesma URL).
+//
+// Ferramenta que precisa do HTML INTEIRO para funcionar NÃO usa este teto:
+// extract_links, discover_urls, find_on_page e diff_page (que cortariam
+// links e o termo buscado), e também read_multiple_pages e crawl_site — no
+// crawl os links moram no rodapé, e medir mostrou que o corte ali fazia o
+// texto entregue sair menor. Ver a seção "Download proporcional ao texto
+// pedido" no README.
+export const DOWNLOAD_FOLGA_POR_CHAR = clampEnv(
+  process.env.DOWNLOAD_FOLGA_POR_CHAR,
+  60,
+  1,
+  1000
+);
+// Piso do teto proporcional. Quando ele ENCOSTA no teto duro, o teto deixa de
+// ser proporcional (toda leitura baixa até o máximo) — é assim que a bateria
+// desliga o recurso para medir o comportamento antigo.
+// NÃO é 1 MB: com piso de 1 MB e folga de 60x, todo
+// `maxChars` abaixo de ~17.000 caía no piso e o teto deixava de ser
+// proporcional — o washingtonpost (3,7 MB) era cortado em 1 MB, tinha de ser
+// relido inteiro, e ficava 50% mais LENTO que sem o recurso. O piso existe só
+// para páginas pequenas não virarem download minúsculo; 256 KB cumpre isso.
+export const DOWNLOAD_MIN_BYTES = Math.min(
+  MAX_RESPONSE_BYTES,
+  Math.max(64 * 1024, Math.floor(Number(process.env.DOWNLOAD_MIN_BYTES) || 256 * 1024))
+);
+
+/** O teto proporcional está ativo? (piso abaixo do teto duro) */
+export const DOWNLOAD_PROPORCIONAL_ATIVO = DOWNLOAD_MIN_BYTES < MAX_RESPONSE_BYTES;
+
+/**
+ * Teto de download para uma leitura que busca `maxChars` caracteres de texto.
+ * Nunca passa do teto duro (MAX_RESPONSE_BYTES): acima dele o erro continua.
+ */
+export function tetoDownloadPara(maxChars, tetoDuro = MAX_RESPONSE_BYTES) {
+  // Desligado: devolve o teto duro, e o caminho do código que depende de
+  // "existe um teto maior para refazer" se desarma sozinho (corte e retry só
+  // acontecem quando apertado < largo).
+  if (!DOWNLOAD_PROPORCIONAL_ATIVO) return tetoDuro;
+  const pedido = Math.max(200, Math.floor(Number(maxChars) || DEFAULT_MAX_CHARS));
+  const proporcional = pedido * DOWNLOAD_FOLGA_POR_CHAR;
+  return Math.min(tetoDuro, Math.max(DOWNLOAD_MIN_BYTES, proporcional));
+}
+
 // Concorrência de downloads (sockets/tarefas simultâneas).
 // 32 permite que read_multiple_pages e crawl_site processem lotes maiores sem travar.
 export const FETCH_CONCURRENCY = Math.max(

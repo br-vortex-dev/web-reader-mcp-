@@ -437,7 +437,9 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `ROBOTS_MAX_ORIGINS` | `1000` | Teto de origens com `robots.txt` em cache. |
 | `ROBOTS_MAX_CONCURRENCY` | `16` | Quantas buscas de `robots.txt` (uma por origem nova) rodam ao mesmo tempo. |
 | `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
-| `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. |
+| `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. É o teto DURO: acima dele a leitura falha com "Resposta muito grande". |
+| `DOWNLOAD_FOLGA_POR_CHAR` | `60` | Teto de download PROPORCIONAL ao `maxChars` pedido, no `read_page`/`read_dynamic_page`: `maxChars × folga`, limitado ao `MAX_RESPONSE_BYTES`. A folga existe porque HTML tem muita marcação em volta do texto. Só corta página grande; abaixo do piso nada muda. |
+| `DOWNLOAD_MIN_BYTES` | `262144` (256 KB) | Piso do teto proporcional. Página menor que isto nunca é cortada. **Não subir para 1 MB**: com folga de 60x, todo `maxChars` abaixo de ~17.000 encosta no piso e o teto deixa de ser proporcional — o washingtonpost (3,7 MB) era cortado em 1 MB, tinha de ser relido inteiro e ficava 50% mais lento que sem o recurso. Definir igual ao `MAX_RESPONSE_BYTES` **desliga** o recurso (útil para medir o comportamento antigo). |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
 | `FETCH_CONCURRENCY` | `32` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
 | `API_MAX_CANDIDATES` | `2` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
@@ -697,6 +699,65 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
     com corte (não carrega a resposta inteira antes de conferir).
   - pico simultâneo: 32 requisições em paralelo × 5 MB = 160 MB transitórios.
   - Se subir `FETCH_CONCURRENCY` ou `MAX_RESPONSE_BYTES`, refaça essa conta.
+
+## Download proporcional ao texto pedido
+
+O `read_page` não baixa mais 5 MB para entregar 2.000 caracteres. O teto de
+download acompanha o `maxChars` pedido (`maxChars × 60`, com piso de 256 KB e
+teto de `MAX_RESPONSE_BYTES`), porque HTML tem muita marcação em volta do texto.
+
+**Onde vale:** `read_page` e `read_dynamic_page` — uma página por chamada, onde
+o cabeçalho `Conteudo: N+` avisa quando o documento tem mais do que foi lido.
+
+**Onde NÃO vale, de propósito:**
+
+- `read_multiple_pages` e `crawl_site`: o crawl precisa dos links, que moram no
+  rodapé — justamente o que o corte tira. Medido com 20 páginas de 2 MB, o
+  corte fazia o texto entregue sair **3% menor**. Entregar menos não é
+  otimização.
+- `extract_links`, `discover_urls`, `find_on_page`, `diff_page`: precisam do
+  documento inteiro para achar links, sitemap, o termo buscado ou o diff.
+
+**Como o corte se protege contra perder conteúdo:**
+
+1. o download para no teto, mas o HTML **nunca** entra no cache nesse estado
+   (HTML truncado envenenaria toda leitura futura da mesma URL);
+2. o texto convertido é comparado com o pedido: se o que ficou **não** cobre o
+   `maxChars`, a leitura refaz o download inteiro e entrega completo;
+3. a URL fica com o tamanho memorizado (10 min, sem a query), então a próxima
+   leitura vai direto ao teto largo — sem pagar dois downloads;
+4. o aviso de interrupção só aparece quando o corte **custou** texto; quando não
+   custou, fica apenas o `+` no tamanho.
+
+**Números medidos.** Texto entregue idêntico em todos os alvos — se divergisse,
+não seria otimização.
+
+Contra a internet real (`dev/_bateria-real-repete.mjs`, `maxChars=2000`, 5
+voltas por alvo em rodízio, mediana — uma rodada isolada oscila demais com
+antivírus, indexação e GC):
+
+| Alvo | Antes | Depois | Ganho |
+|---|---|---|---|
+| `iana.org/domains/reserved` | 591 ms | 97 ms | **-84%** |
+| `html.spec.whatwg.org` (spec de 12 MB) | 451 ms | 384 ms | **-15%** |
+| `nodejs.org/api/http.html` | 285 ms | 311 ms | ruído (+9%) |
+| `washingtonpost.com` | 623 ms | 918 ms | ruído (+47%) |
+
+O washingtonpost tem **4,02 MB de markdown**: o corte não o atinge (ele já
+cabe nos 5 MB), então a diferença é do servidor deles — as faixas se sobrepõem
+(antes 610–1054 ms, depois 758–1106 ms). O texto divergiu em 46 caracteres de
+4.020.283 (0,001%): conteúdo rotativo da home, não o corte.
+
+Em fixture com banda controlada (`dev/_mede-teto.mjs`, 8 MB/s), páginas de
+3,9 MB: **-68%** com `content-length` e **-71%** sem ele, tanto na primeira
+leitura quanto nas repetidas. Página de 957 KB e de 9 KB: sem mudança — com
+`maxChars` padrão o teto proporcional (480 KB) manda, e o piso existe para as
+pequenas.
+
+O que **não** dá ganho, e é honesto dizer: página cujo texto do topo não cobre o
+`maxChars` pedido. Nesse caso o código detecta que o corte custaria conteúdo,
+refaz a leitura inteira e o tempo fica igual ao de antes. Custa uma leitura
+dupla na estreia; a partir daí a URL vai direto ao teto largo.
 - **Sem navegador, por escolha**: `read_dynamic_page` não usa Playwright nem
   Chromium (o plano free não tem RAM para isso, e o deploy continua sem build).
   Ela extrai os dados que o site já embute no HTML — ver a seção abaixo.

@@ -185,14 +185,33 @@ function normalizarErroDeLeitura(err, signal, url) {
  * chamado ANTES de aceitar cada pedaço — é o gancho do orçamento de memória,
  * que assim acompanha os bytes REAIS, sem confiar no content-length.
  */
-export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida", signal, aoChunk } = {}) {
+export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida", signal, aoChunk, permitirCorte = false } = {}) {
   const chunks = [];
   let total = 0;
+  let cortado = false;
   try {
     for await (const pedaco of fonte) {
       const pedacoBuf = Buffer.isBuffer(pedaco) ? pedaco : Buffer.from(pedaco);
       if (total + pedacoBuf.length > maxBytes) {
-        throw new RespostaMuitoGrandeError(maxBytes, url);
+        // Teto estourado. Sem `permitirCorte`, é erro (comportamento de sempre:
+        // quem precisa do documento INTEIRO — links, sitemap, busca no texto —
+        // não pode receber um pedaço e achar que leu tudo).
+        if (!permitirCorte) {
+          throw new RespostaMuitoGrandeError(maxBytes, url);
+        }
+        // Com `permitirCorte`, guarda o que coube, sinaliza e para de ler. O
+        // resto do corpo é descartado sem drenar (um corpo infinito não pode
+        // segurar a vaga de admissão).
+        const falta = maxBytes - total;
+        if (falta > 0) {
+          const parcial = pedacoBuf.subarray(0, falta);
+          if (aoChunk) await aoChunk(total + parcial.length);
+          chunks.push(parcial);
+          total += parcial.length;
+        }
+        cortado = true;
+        descartarCorpo(fonte);
+        break;
       }
       if (aoChunk) await aoChunk(total + pedacoBuf.length);
       chunks.push(pedacoBuf);
@@ -206,7 +225,11 @@ export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida"
     }
     throw normalizarErroDeLeitura(err, signal, url);
   }
-  return Buffer.concat(chunks, total);
+  const buffer = Buffer.concat(chunks, total);
+  // Propriedade não-enumerável: o retorno continua sendo um Buffer (nada que
+  // já consumia coletarComTeto muda), e quem quiser sabe que houve corte.
+  if (cortado) Object.defineProperty(buffer, "cortado", { value: true, enumerable: false });
+  return buffer;
 }
 
 /**

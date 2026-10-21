@@ -1,0 +1,79 @@
+{
+  "quando": "2026-10-21T16:27:34.930Z",
+  "voltas": 5,
+  "max_chars": 2000,
+  "resultados": [
+    {
+      "alvo": "whatwg (spec 12 MB)",
+      "voltas": 5,
+      "antes_mediana": 451,
+      "depois_mediana": 384,
+      "delta_pct": -15,
+      "antes_dispersao": [
+        331,
+        1586
+      ],
+      "depois_dispersao": [
+        240,
+        1172
+      ],
+      "texto_identico": true,
+      "header_antes": "Conteudo: 60057+ caracteres (exibidos 2119)",
+      "header_depois": "Conteudo: 60057+ caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "washingtonpost",
+      "voltas": 5,
+      "antes_mediana": 623,
+      "depois_mediana": 918,
+      "delta_pct": 47,
+      "antes_dispersao": [
+        610,
+        1054
+      ],
+      "depois_dispersao": [
+        758,
+        1106
+      ],
+      "texto_identico": false,
+      "header_antes": "Conteudo: 4020283 caracteres (exibidos 2119)",
+      "header_depois": "Conteudo: 4020237 caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "iana",
+      "voltas": 5,
+      "antes_mediana": 591,
+      "depois_mediana": 97,
+      "delta_pct": -84,
+      "antes_dispersao": [
+        36,
+        700
+      ],
+      "depois_dispersao": [
+        43,
+        686
+      ],
+      "texto_identico": true,
+      "header_antes": "Conteudo: 2287 caracteres (exibidos 2119)",
+      "header_depois": "Conteudo: 2287 caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "nodejs docs",
+      "voltas": 5,
+      "antes_mediana": 285,
+      "depois_mediana": 311,
+      "delta_pct": 9,
+      "antes_dispersao": [
+        84,
+        482
+      ],
+      "depois_dispersao": [
+        168,
+        365
+      ],
+      "texto_identico": true,
+      "header_antes": "Conteudo: 59474+ caracteres (exibidos 2119)",
+      "header_depois": "Conteudo: 59474+ caracteres (exibidos 2119)"
+    }
+  ]
+}

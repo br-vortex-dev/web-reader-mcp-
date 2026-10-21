@@ -1,8 +1,10 @@
+
 /**
  * Ferramentas do MCP: read_page, extract_links, read_multiple_pages,
  * read_dynamic_page, discover_urls, crawl_site, read_video.
  */
 
+import { appendFileSync } from "node:fs";
 import {
   MAX_PAGES_PER_CALL,
   API_MAX_CANDIDATES,
@@ -12,9 +14,12 @@ import {
   DEFAULT_MAX_CHARS,
   HARD_MAX_CHARS,
   MEMO_CONVERSAO,
+  MAX_RESPONSE_BYTES,
+  tetoDownloadPara,
 } from "./config.mjs";
 import {
   fetchTextCached,
+  fetchTextComTeto,
   validateHttpUrl,
   clampMaxChars,
   clampTimeoutMs,
@@ -109,9 +114,15 @@ function markdownInterrompida(payload) {
   return conversaoInterrompidaDe.get(payload) === true;
 }
 
-/** Valor do campo `Conteudo:` — com `+` quando a conversão foi interrompida. */
+/**
+ * Valor do campo `Conteudo:` — com `+` quando havia MAIS do que o número
+ * informado. Dois motivos, a mesma marca: a conversão foi interrompida no teto
+ * de saída, ou o download parou no teto de bytes. Nos dois casos o número é o
+ * do texto que se tem, e o `+` diz que não é a página inteira.
+ */
 function fullLengthDe(payload, markdown) {
-  return markdownInterrompida(payload) ? `${markdown.length}+` : markdown.length;
+  if (markdownInterrompida(payload) || payload?.cortado) return `${markdown.length}+`;
+  return markdown.length;
 }
 
 function markdownMemo(payload) {
@@ -478,13 +489,67 @@ function classifyFetchError(err) {
  * ===================================================================== */
 
 /**
+ * Busca uma página com o teto de download proporcional — e REFAZ grande
+ * quando o corte tirou texto que o cliente ia receber.
+ *
+ * A regra é a diferença entre otimizar e quebrar: cortar só é seguro quando o
+ * que ficou de fora é o rabo que o truncate jogaria fora de qualquer jeito.
+ * Então a decisão é tomada com o markdown na mão, não com bytes:
+ *
+ *   - o texto convertido já cobre o `maxChars` pedido  -> o corte não custou
+ *     nada, entrega assim (é o caso das páginas gigantes de notícia);
+ *   - o texto convertido é MENOR que o pedido          -> o corte pode ter
+ *     levado conteúdo, então refaz com o teto largo (MEMORIZADO pelo tamanho,
+ *     então essa segunda conexão acontece uma vez só por URL).
+ */
+async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs }) {
+  const teto = tetoDownloadPara(maxChars, MAX_RESPONSE_BYTES);
+  let payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto });
+  if (!payload.cortado) return payload;
+
+  // O corte tira o fim do HTML. Converter o que veio é a única forma honesta de
+  // saber se isso custou algo ao cliente — e é barato, porque a conversão é
+  // memoizada pelo conteúdo e vai ser reaproveitada na resposta.
+  const parcial = payload.text.replace(/\r\n?/g, "\n");
+  const markdownParcial =
+    parcial.length === 0 ? "" : isConteudoBruto(payload.contentType, parcial) ? parcial : markdownMemo(payload);
+
+  // O texto do pedaço já cobre o pedido? O corte não custou nada: o cliente
+  // pediu N e recebe N, mesmo que a página tenha mais no fim. Entregar agora
+  // evita a segunda conexão — e este é o caso das páginas grandes de verdade
+  // (jornais, documentação), o inverso do fixture sintético em que o peso é
+  // só script.
+  //
+  // Dois sinais diferentes, de propósito:
+  //   `cortado`     -> o download parou antes do fim (o `Conteudo:` ganha `+`)
+  //   `perdeuTexto` -> além de parar, o que sobrou não cobre o pedido, então a
+  //                    página pode ter mais conteúdo útil e vale refazer.
+  if (markdownParcial.length >= maxChars) {
+    return { ...payload, perdeuTexto: false };
+  }
+
+  // Chegou aqui: o texto do pedaço não cobre o pedido, logo o corte PODE ter
+  // tirado conteúdo. Refaz uma vez com o teto largo, e a partir daí a URL fica
+  // marcada para ir direto no largo nas próximas leituras (memória em
+  // fetch.mjs) — sem ela, cada leitura pagaria dois downloads (medido: 40
+  // requisições para 20 páginas).
+  //
+  // A tentação era "só refazer se o que falta for grande". Foi medido e é
+  // errado: uma página com o texto todo no topo e o rodapé com links perdia
+  // 109 caracteres, e o "falta grande" não disparava porque o content-length
+  // declarado engana. Entre otimizar e entregar menos, entregar inteiro.
+  payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, forcarLargo: true });
+  return { ...payload, perdeuTexto: true };
+}
+
+/**
  * Lê uma página web e devolve o conteúdo extraído em markdown.
  */
 export async function toolReadPage(args) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  const payload = await fetchTextCached(parsed.href, { timeoutMs });
+  const payload = await buscarComTetoInteligente(parsed, { maxChars, timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
   if (isConteudoBruto(contentType, html)) {
@@ -501,11 +566,14 @@ export async function toolReadPage(args) {
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
-  const extraLabel =
+  let extraLabel =
     markdown.trim().length === 0
       ? "Aviso: 0 caracteres de conteudo estatico — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page."
       : undefined;
-  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: interrompida ? `${markdown.length}+` : markdown.length, extraLabel });
+  if (payload.cortado && payload.perdeuTexto) {
+    extraLabel = `${extraLabel ? extraLabel + " " : ""}Aviso: o download foi interrompido no teto de bytes e a pagina continuava — se o fim dela importa, peca de novo.`;
+  }
+  return formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown), extraLabel });
 }
 
 /**
@@ -930,6 +998,16 @@ function linksParaCrawl(payload) {
  */
 async function lerPaginaCompleta(url, maxChars, timeoutMs) {
   const parsed = validateHttpUrl(url);
+  // Sempre baixa a página INTEIRA aqui, de propósito.
+  //
+  // Esta função alimenta read_multiple_pages e crawl_site, e nas duas o custo
+  // de cortar é maior que a economia: o crawl precisa dos links (que moram no
+  // rodapé, justo o que o corte tira) e no multi o erro se multiplica por até
+  // 30 páginas. Medido em dev/_mede-multi-teto.mjs: com corte, o texto saía
+  // 3% menor — entregar menos não é otimização.
+  //
+  // O corte proporcional vale no read_page, que é uma página só e onde o
+  // cabeçalho `Conteudo: N+` avisa que havia mais. Aqui, não.
   const payload = await fetchTextCached(parsed.href, { timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);

@@ -1,0 +1,37 @@
+{
+  "quando": "2026-10-21T00:53:29.928Z",
+  "banda_mb_s": 8,
+  "max_chars": 2000,
+  "resultados": [
+    {
+      "ferramenta": "read_multiple_pages",
+      "paginas": 20,
+      "kb_por_pagina": 2000,
+      "antes_ms": 2334,
+      "depois_ms": 2238,
+      "delta_pct": -4,
+      "kb_baixados_antes": 40006,
+      "kb_baixados_depois": 40006,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 45014,
+      "chars_depois": 45014,
+      "texto_identico": true
+    },
+    {
+      "ferramenta": "crawl_site",
+      "paginas": 20,
+      "kb_por_pagina": 2000,
+      "antes_ms": 3251,
+      "depois_ms": 3045,
+      "delta_pct": -6,
+      "kb_baixados_antes": 40006,
+      "kb_baixados_depois": 40006,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 45046,
+      "chars_depois": 45046,
+      "texto_identico": false
+    }
+  ]
+}

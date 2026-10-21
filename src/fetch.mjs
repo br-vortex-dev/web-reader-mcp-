@@ -46,6 +46,7 @@ import {
   RedeError,
   TimeoutError,
   RequisicaoCanceladaError,
+  RespostaMuitoGrandeError,
   WebReaderError,
 } from "./errors.mjs";
 
@@ -195,7 +196,7 @@ function classificarErro(errBruto, url, timeoutMs) {
  *
  * O que sobrou da reserva volta no finally, sempre.
  */
-async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal) {
+async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal, permitirCorte = false) {
   const declarado = Number(headers["content-length"]);
   const estimativa = Number.isFinite(declarado) && declarado > 0 ? declarado : 256 * 1024;
   let reservado = Math.min(maxBytes, estimativa);
@@ -205,6 +206,7 @@ async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal) {
       maxBytes,
       url,
       signal,
+      permitirCorte,
       aoChunk: async (bytesTotais) => {
         const falta = bytesTotais - reservado;
         if (falta > 0) {
@@ -280,7 +282,7 @@ async function decodeBuffer(buffer, contentType) {
  * ela, devolve `buffer` cru — é o que o leitor de PDF precisa, porque PDF é
  * binário e passar por decodificação de texto corromperia os bytes.
  */
-export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null } = {}) {
+export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null, permitirCorte = false } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
   // NaN) podia pular o laço inteiro e o throw final lançar `null`.
@@ -358,7 +360,8 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         resposta.headers,
         maxBytes,
         finalUrl,
-        controller.signal
+        controller.signal,
+        permitirCorte
       );
       const contentType = String(resposta.headers["content-type"] || "").toLowerCase();
       const base = {
@@ -366,6 +369,14 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         contentType,
         etag: resposta.headers["etag"] || null,
         lastModified: resposta.headers["last-modified"] || null,
+        // Marca de corte: o documento veio INCOMPLETO porque o teto apertado
+        // parou o download. Quem recebe isto precisa avisar e NÃO guardar.
+        cortado: buffer.cortado === true,
+        // Bytes que de fato vieram (e o que o servidor declarou, quando ele
+        // declara). É o que diz se o corte tirou texto: com content-length, a
+        // decisão é exata; sem ele, `bytes` = tamanho do teto.
+        bytes: buffer.length,
+        bytesDeclarados: Number(resposta.headers["content-length"]) || null,
       };
       if (!decodificar) {
         return { ...base, buffer };
@@ -397,6 +408,95 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
  */
 export function fetchText(url, options) {
   return fetchBytes(url, { ...(options || {}), decodificar: true });
+}
+
+/**
+ * Tamanho REAL já observado por URL: quanto precisou ser baixado para ter o
+ * documento inteiro (ou, no caso do corte, o tamanho do teto que cortou — que
+ * é um piso do tamanho de verdade).
+ *
+ * Serve para não pagar o download em duas etapas duas vezes: sem esta memória,
+ * toda leitura de uma página maior que o teto baixaria o pedaço, descobriria o
+ * corte e baixaria o resto — dois downloads em vez de um.
+ */
+const tamanhosConhecidos = new Map();
+const TAMANHO_CONHECIDO_TTL_MS = 10 * 60 * 1000;
+const TAMANHO_CONHECIDO_MAX = 512;
+
+/**
+ * Chave da memória de tamanho: host + caminho, sem query. Parâmetros de
+ * rastreio não mudam o tamanho do documento, e é comum o cliente repetir a
+ * leitura com a URL "suja" — com a chave completa, a memória nunca acertaria.
+ */
+function chaveDeTamanho(cacheKey) {
+  try {
+    const u = new URL(cacheKey);
+    return `${u.host}${u.pathname}`;
+  } catch {
+    return cacheKey;
+  }
+}
+
+function registrarTamanho(chave, bytes) {
+  if (!chave || !Number.isFinite(bytes) || bytes <= 0) return;
+  if (tamanhosConhecidos.size >= TAMANHO_CONHECIDO_MAX && !tamanhosConhecidos.has(chave)) {
+    tamanhosConhecidos.delete(tamanhosConhecidos.keys().next().value);
+  }
+  tamanhosConhecidos.set(chave, { at: Date.now(), bytes });
+}
+
+function tamanhoConhecido(chave) {
+  const r = tamanhosConhecidos.get(chave);
+  if (!r) return 0;
+  if (Date.now() - r.at > TAMANHO_CONHECIDO_TTL_MS) {
+    tamanhosConhecidos.delete(chave);
+    return 0;
+  }
+  return r.bytes;
+}
+
+export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
+  const cacheKey = chaveCanonica(url);
+  const guardado = pageCache.get(cacheKey);
+  if (guardado) {
+    if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries });
+    return guardado.payload;
+  }
+  let apertado = Math.min(maxBytes || largoBytes, largoBytes);
+  // `forcarLargo` é o chamador dizendo "o documento inteiro importa desta vez":
+  // acontece quando o corte custou texto que o cliente ia receber. Na prática,
+  // é a PRIMEIRA leitura de uma página cujo topo não cobre o pedido.
+  if (forcarLargo) apertado = largoBytes;
+  // A memória de tamanho manda direto ao teto largo quando a página já se
+  // mostrou MAIOR que o teto apertado numa leitura anterior — mas só quando o
+  // que falta é pequeno a ponto de não valer a economia.
+  //
+  // Medido em dev/_mede-teto.mjs (página de 3,8 MB, teto de 1,1 MB): largar o
+  // corte de vez levava a repetição de 310 ms para 1.029 ms. Ou seja, insistir
+  // no corte COMPENSA nesse caso — o download economizado é grande — e a
+  // memória só deve entrar quando o resto é pequeno perto do que já se baixou.
+  const conhecido = forcarLargo ? 0 : tamanhoConhecido(chaveDeTamanho(cacheKey));
+  const restoPequeno = conhecido > 0 && conhecido - apertado <= apertado;
+  if (restoPequeno) apertado = largoBytes;
+
+  const teoCorte = apertado < largoBytes;
+  return coalescedorDeBuscas.executar(cacheKey, async () => {
+    // Quem esperou na junção pode encontrar a entrada que outro acabou de gravar.
+    const quente = pageCache.get(cacheKey);
+    if (quente && !quente.stale) return quente.payload;
+    return await buscarEAquecer(url, {
+      timeoutMs,
+      signal,
+      retries,
+      chave: cacheKey,
+      maxBytes: apertado,
+      // Corte só vale quando existe um teto MAIOR para refazer. Se o apertado
+      // já é o máximo do servidor, cortar em silêncio entregaria um documento
+      // incompleto sem saída — aí o erro é o comportamento correto (e é o que
+      // a suíte trava em tests/parada-antecipada.test.mjs).
+      permissoDeCorte: teoCorte,
+    });
+  });
 }
 
 /**
@@ -603,7 +703,7 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
  * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
  * propósito; o objetivo é atualizá-la.
  */
-async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null } = {}) {
+async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null, maxBytes = MAX_RESPONSE_BYTES, permissoDeCorte = false } = {}) {
   const cacheKey = chave || chaveCanonica(url);
   if (!revalidacao) {
     // Quem esperou na junção pode encontrar a entrada que outro pedido acabou
@@ -643,7 +743,7 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   }
   const payload = await limitesPorHost.executar(hostOf(url), () =>
     limiteSaida.executar(() =>
-      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair })
+      fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair, maxBytes, permitirCorte: permissoDeCorte })
     )
   );
 
@@ -651,6 +751,24 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   // Negado => RobotBloqueadoError sobe e o corpo baixado é descartado sem
   // entrar no cache (mesmo efeito de antes, só sem somar as duas latências).
   await robotsEmCurso;
+
+  // Tamanho real do documento fica lembrado para a próxima leitura da MESMA
+  // página decidir de primeira — sem esta memória, toda leitura de página maior
+  // que o teto pagaria dois downloads (o pedaço e o resto).
+  //
+  // A chave ignora a query de rastreio (`?utm_*`, `?v=`, `?releitura=`): duas
+  // visitas à mesma página com parâmetro diferente são a mesma página, e é
+  // justamente nelas que o cliente repete a leitura.
+  //
+  // Só registra quando o número é CONFIÁVEL:
+  //  - o servidor declarou o tamanho (content-length é o tamanho real), ou
+  //  - o download NÃO foi cortado (então `bytes` é o documento inteiro).
+  // Um download cortado sem content-length tem `bytes` = tamanho do teto, que
+  // não diz nada sobre a página — gravar isso envenenava a memória e desligava
+  // o corte na leitura seguinte (medido: o valor do teto virava "tamanho da
+  // página" e `restoPequeno` passava a ser verdadeiro por engano).
+  const tamanhoConfiavel = payload.bytesDeclarados || (!payload.cortado ? payload.bytes : 0);
+  if (tamanhoConfiavel) registrarTamanho(chaveDeTamanho(cacheKey), tamanhoConfiavel);
   // Transformação opcional ANTES do cache: o leitor de PDF baixa bytes e
   // converte em texto aqui, para que a entrada do cache (e a junção em voo)
   // guardem o RESULTADO e uma releitura não reparseie o PDF.
@@ -666,6 +784,14 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   }
   // A flag `naoModificado` é sinal interno de transporte: não vai para o cache.
   const { naoModificado, ...semFlag } = payload;
+  // Documento CORTADO nunca entra no cache — nem o corpo, nem os validadores.
+  // Guardar HTML truncado envenenaria toda leitura futura da mesma URL (uma
+  // lateria com maxChars maior receberia o pedaço) e os validadores fariam o
+  // servidor responder 304 para um conteúdo que aqui está incompleto. O cache
+  // é por URL, não por tamanho pedido: só entra o que está inteiro.
+  if (semFlag.cortado) {
+    return semFlag;
+  }
   const bytes = payloadBytes(semFlag);
   if (bytes <= CACHE_MAX_ENTRY_BYTES) {
     pageCache.set(cacheKey, semFlag, bytes);

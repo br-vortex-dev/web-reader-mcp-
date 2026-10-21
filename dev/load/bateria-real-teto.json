@@ -1,0 +1,75 @@
+{
+  "quando": "2026-10-21T01:17:10.838Z",
+  "resultados": [
+    {
+      "alvo": "whatwg (spec gigante)",
+      "url": "https://html.spec.whatwg.org/multipage/",
+      "antes_ms": 1099,
+      "depois_ms": 1215,
+      "delta_pct": 11,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 2225,
+      "chars_depois": 2225,
+      "texto_identico": true,
+      "cabecalho_antes": "Conteudo: 60057+ caracteres (exibidos 2119)",
+      "cabecalho_depois": "Conteudo: 60057+ caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "washingtonpost (notícia)",
+      "url": "https://www.washingtonpost.com/",
+      "antes_ms": 2121,
+      "depois_ms": 1230,
+      "delta_pct": -42,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 2587,
+      "chars_depois": 2587,
+      "texto_identico": true,
+      "cabecalho_antes": "Conteudo: 3566551 caracteres (exibidos 2119)",
+      "cabecalho_depois": "Conteudo: 3566551 caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "iana (página de registro)",
+      "url": "https://www.iana.org/domains/reserved",
+      "antes_ms": 152,
+      "depois_ms": 192,
+      "delta_pct": 27,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 2237,
+      "chars_depois": 2237,
+      "texto_identico": true,
+      "cabecalho_antes": "Conteudo: 2287 caracteres (exibidos 2119)",
+      "cabecalho_depois": "Conteudo: 2287 caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "nodejs docs",
+      "url": "https://nodejs.org/api/http.html",
+      "antes_ms": 461,
+      "depois_ms": 431,
+      "delta_pct": -7,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 2242,
+      "chars_depois": 2242,
+      "texto_identico": true,
+      "cabecalho_antes": "Conteudo: 59474+ caracteres (exibidos 2119)",
+      "cabecalho_depois": "Conteudo: 59474+ caracteres (exibidos 2119)"
+    },
+    {
+      "alvo": "exemplo pequeno",
+      "url": "https://example.com/",
+      "antes_ms": 189,
+      "depois_ms": 224,
+      "delta_pct": 18,
+      "erro_antes": false,
+      "erro_depois": false,
+      "chars_antes": 225,
+      "chars_depois": 225,
+      "texto_identico": true,
+      "cabecalho_antes": "Conteudo: 156 caracteres",
+      "cabecalho_depois": "Conteudo: 156 caracteres"
+    }
+  ]
+}
