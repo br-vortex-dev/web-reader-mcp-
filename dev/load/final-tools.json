@@ -1,0 +1,111 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "modo": "tools",
+  "quando": "2026-10-21T18:16:29.714Z",
+  "resultados": [
+    {
+      "conc": 32,
+      "enviados": 1027,
+      "ok": 1027,
+      "reqPorSeg": 122.33,
+      "uteisPorSeg": 122.33,
+      "latP50": 230,
+      "latP95": 385,
+      "latP99": 676,
+      "latMax": 945,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "203",
+        "cache": "44"
+      },
+      "healthDepois": {
+        "rss": "208",
+        "cache": "44",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 128,
+      "enviados": 1326,
+      "ok": 1326,
+      "reqPorSeg": 148.34,
+      "uteisPorSeg": 148.34,
+      "latP50": 801,
+      "latP95": 1412,
+      "latP99": 1445,
+      "latMax": 2306,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "208",
+        "cache": "44"
+      },
+      "healthDepois": {
+        "rss": "208",
+        "cache": "44",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 512,
+      "enviados": 1451,
+      "ok": 1451,
+      "reqPorSeg": 122.33,
+      "uteisPorSeg": 122.33,
+      "latP50": 3202,
+      "latP95": 7299,
+      "latP99": 7508,
+      "latMax": 7811,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "208",
+        "cache": "44"
+      },
+      "healthDepois": {
+        "rss": "209",
+        "cache": "44",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    },
+    {
+      "conc": 1024,
+      "enviados": 1087,
+      "ok": 1087,
+      "reqPorSeg": 90.73,
+      "uteisPorSeg": 90.73,
+      "latP50": 10566,
+      "latP95": 10840,
+      "latP99": 10853,
+      "latMax": 11756,
+      "http": {},
+      "erros": {},
+      "paginasOK": 0,
+      "paginasTotal": 0,
+      "chamadas": 0,
+      "healthAntes": {
+        "rss": "209",
+        "cache": "44"
+      },
+      "healthDepois": {
+        "rss": "209",
+        "cache": "44",
+        "reqRecusadas": "0",
+        "dlRecusados": "0"
+      }
+    }
+  ]
+}

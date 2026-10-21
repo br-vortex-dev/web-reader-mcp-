@@ -193,6 +193,33 @@ function linksMemo(payload) {
 }
 
 /**
+ * O conteúdo embutido (__NEXT_DATA__, JSON-LD, API interna) memoizado por
+ * payload.
+ *
+ * Existe porque essa etapa é a MAIS CARA do read_page numa página dinâmica e
+ * ela rodava de novo a cada leitura do MESMO HTML. Medido no washingtonpost
+ * (dev/_diag-quente.mjs): com o HTML no cache, o fetch custa 1 ms, o meta 7 e
+ * o markdown 33 — mas a chamada inteira levava 561 ms, e 10 chamadas seguidas
+ * levavam 3.567 ms. Todo esse tempo era esta função refazendo o trabalho:
+ * varrer 4,4 MB de HTML em busca de candidatos e depois esperar a API interna
+ * (orçamento de API_TOTAL_BUDGET_MS) para devolver exatamente o mesmo texto.
+ *
+ * A chave `null` é um resultado válido ("esta página não tem conteúdo
+ * embutido") e por isso é testada com `in`, não com comparação de valor.
+ */
+async function embeddedMemo(payload, timeoutMs) {
+  const memo = memoDoPayload(payload);
+  if (!memo) return await extractEmbeddedData(payload.text, payload.finalUrl, timeoutMs);
+  if (!("embedded" in memo)) {
+    memo.embedded = await extractEmbeddedData(payload.text, payload.finalUrl, timeoutMs);
+    conversoesMemo.realizadas++;
+  } else {
+    conversoesMemo.caronas++;
+  }
+  return memo.embedded;
+}
+
+/**
  * Extrai JSON de uma tag <script> pelo id.
  */
 function extractJsonById(html, id) {
@@ -601,7 +628,7 @@ export async function toolReadPage(args) {
   let markdown = markdownMemo(payload);
   let interrompida = markdownInterrompida(payload);
   if (markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown)) {
-    const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
+    const dynamicMarkdown = await embeddedMemo(payload, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
       markdown = dynamicMarkdown;
       interrompida = false;
@@ -941,7 +968,7 @@ export async function toolReadDynamicPage(args) {
     });
   }
 
-  const dynamicMarkdown = await extractEmbeddedData(html, finalUrl, timeoutMs);
+  const dynamicMarkdown = await embeddedMemo(payload, timeoutMs);
 
   if (dynamicMarkdown) {
     const { text, truncated } = truncate(dynamicMarkdown, maxChars);

@@ -1,0 +1,223 @@
+{
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "rotulo": "teto-final",
+  "quando": "2026-10-21T18:15:26.307Z",
+  "resultados": [
+    {
+      "ferramenta": "tools/list",
+      "alvo": "catalogo",
+      "ok": true,
+      "ms": 234,
+      "status": 200,
+      "chars": 8879,
+      "obs": "12 ferramentas"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "whatwg multipage (~12MB)",
+      "ok": true,
+      "ms": 1502,
+      "status": 200,
+      "chars": 25227,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "nodejs all.html (~8MB)",
+      "ok": true,
+      "ms": 3091,
+      "status": 200,
+      "chars": 25242,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "python docs index",
+      "ok": true,
+      "ms": 499,
+      "status": 200,
+      "chars": 25487,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "amazon.com",
+      "ok": true,
+      "ms": 900,
+      "status": 200,
+      "chars": 590,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "washingtonpost.com",
+      "ok": true,
+      "ms": 3712,
+      "status": 200,
+      "chars": 25589,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "reuters.com",
+      "ok": false,
+      "ms": 344,
+      "status": 200,
+      "chars": 65,
+      "obs": "Erro: HTTP 401 Http Forbidden ao acessar https://www.reuters.com/"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "nytimes.com",
+      "ok": false,
+      "ms": 318,
+      "status": 200,
+      "chars": 60,
+      "obs": "Erro: HTTP 403 Forbidden ao acessar https://www.nytimes.com/"
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "reddit.com",
+      "ok": false,
+      "ms": 267,
+      "status": 200,
+      "chars": 136,
+      "obs": "Erro: Bloqueado por robots.txt de www.reddit.com: o caminho / casa com \"Disallow: /\". Defina ROBOTS_RESPECT=0 para ignorar o robots.txt."
+    },
+    {
+      "ferramenta": "read_page",
+      "alvo": "whatwg (cache quente)",
+      "ok": true,
+      "ms": 263,
+      "status": 200,
+      "chars": 25227,
+      "obs": "esperado: muito menor"
+    },
+    {
+      "ferramenta": "extract_links",
+      "alvo": "bbc.com/news limit 200",
+      "ok": true,
+      "ms": 731,
+      "status": 200,
+      "chars": 8612,
+      "obs": ""
+    },
+    {
+      "ferramenta": "extract_links",
+      "alvo": "wikipedia/Brazil limit 200",
+      "ok": true,
+      "ms": 1451,
+      "status": 200,
+      "chars": 17314,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_multiple_pages",
+      "alvo": "30 URLs pesadas (teto)",
+      "ok": true,
+      "ms": 1297,
+      "status": 200,
+      "chars": 47189,
+      "obs": ""
+    },
+    {
+      "ferramenta": "discover_urls",
+      "alvo": "bbc.com sitemap limit 300",
+      "ok": true,
+      "ms": 467,
+      "status": 200,
+      "chars": 291,
+      "obs": ""
+    },
+    {
+      "ferramenta": "discover_urls",
+      "alvo": "iana.org limit 300",
+      "ok": true,
+      "ms": 1403,
+      "status": 200,
+      "chars": 813,
+      "obs": ""
+    },
+    {
+      "ferramenta": "crawl_site",
+      "alvo": "iana.org maxPages 30",
+      "ok": true,
+      "ms": 8244,
+      "status": 200,
+      "chars": 292994,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_dynamic_page",
+      "alvo": "nextjs.org SPA",
+      "ok": true,
+      "ms": 351,
+      "status": 200,
+      "chars": 6026,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_video",
+      "alvo": "youtube",
+      "ok": true,
+      "ms": 645,
+      "status": 200,
+      "chars": 545,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_pdf",
+      "alvo": "arxiv 1706.03762",
+      "ok": true,
+      "ms": 7724,
+      "status": 200,
+      "chars": 25233,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_feed",
+      "alvo": "hnrss limit 100 (teto)",
+      "ok": true,
+      "ms": 20446,
+      "status": 200,
+      "chars": 7284,
+      "obs": ""
+    },
+    {
+      "ferramenta": "read_json",
+      "alvo": "api.github nodejs/node",
+      "ok": true,
+      "ms": 462,
+      "status": 200,
+      "chars": 6807,
+      "obs": ""
+    },
+    {
+      "ferramenta": "find_on_page",
+      "alvo": "wikipedia 'Brasil' hits 100 ctx 5",
+      "ok": true,
+      "ms": 854,
+      "status": 200,
+      "chars": 8178,
+      "obs": ""
+    },
+    {
+      "ferramenta": "diff_page",
+      "alvo": "guardian (grava marca)",
+      "ok": true,
+      "ms": 241,
+      "status": 200,
+      "chars": 258,
+      "obs": ""
+    },
+    {
+      "ferramenta": "diff_page",
+      "alvo": "guardian (compara)",
+      "ok": true,
+      "ms": 222,
+      "status": 200,
+      "chars": 150,
+      "obs": ""
+    }
+  ]
+}

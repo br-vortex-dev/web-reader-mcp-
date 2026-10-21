@@ -28,7 +28,7 @@
  *   Importa de: config, fetch.
  */
 
-import { inflateSync, inflateRawSync, gunzipSync } from "node:zlib";
+import { inflateSync, inflateRawSync, gunzipSync, constants as zlibConstants } from "node:zlib";
 import { DEFAULT_MAX_CHARS, HARD_MAX_CHARS } from "./config.mjs";
 import { fetchPdfCached, truncate, clampTimeoutMs, validateHttpUrl } from "./fetch.mjs";
 
@@ -41,20 +41,54 @@ export function parecePdf(buffer) {
   return buffer.subarray(0, 5).toString("latin1") === ASSINATURA;
 }
 
-/** Tenta inflar um trecho; devolve null quando nenhum filtro reconhecido funciona. */
-function inflar(buf) {
-  for (const fn of [inflateSync, inflateRawSync, gunzipSync]) {
-    try {
-      const out = fn(buf);
-      if (out && out.length) return out;
-    } catch {
-      // tenta o próximo filtro
-    }
-  }
-  return null;
+/**
+ * O cabeçalho de 2 bytes diz qual descompressão usar. Reconhecer isso antes de
+ * tentar é a diferença entre 1,8 s e 0,08 s num PDF de 2 MB (medido em
+ * dev/_diag-filtros-pdf.mjs): num arquivo real, 2.565 dos 2.712 streams NÃO
+ * têm filtro nenhum, e a versão antiga tentava três descompressões em cada um,
+ * gerando 7.695 exceções de zlib que custavam 95% do tempo do extrator.
+ */
+
+/** zlib: CMF/FLG válidos (método 8 e o checksum de 16 bits fechando). */
+function ehZlib(buf) {
+  return buf.length > 1 && (buf[0] & 0x0f) === 8 && (((buf[0] << 8) | buf[1]) % 31) === 0;
 }
 
-/** Coleta os pares "stream ... endstream" do arquivo cru. */
+/** gzip: número mágico 1f 8b. */
+function ehGzip(buf) {
+  return buf.length > 1 && buf[0] === 0x1f && buf[1] === 0x8b;
+}
+
+/** Tenta inflar um trecho pelo filtro que o cabeçalho indica; null se não der. */
+function inflar(buf) {
+  if (!buf || buf.length < 2) return null;
+  try {
+    // Z_SYNC_FLUSH: muitos PDFs vêm com o stream cortado no fim (o trailer
+    // não interessa para extrair texto) e o inflate estrito recusaria.
+    if (ehGzip(buf)) {
+      const out = gunzipSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+      return out && out.length ? out : null;
+    }
+    if (ehZlib(buf)) {
+      const out = inflateSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+      return out && out.length ? out : null;
+    }
+    // Sem cabeçalho reconhecido, pode ser deflate cru. Uma tentativa só.
+    const cru = inflateRawSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+    return cru && cru.length ? cru : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Coleta os pares "stream ... endstream" do arquivo cru.
+ *
+ * Devolve também o DICIONÁRIO do objeto (os bytes logo antes de "stream") e se
+ * ele declara `/FlateDecode`. Isso evita tentar descompressão em stream que não
+ * é comprimido: num PDF real a maioria não é, e cada tentativa frustrada custa
+ * uma exceção de zlib.
+ */
 function streamsDoPdf(buffer) {
   const inicio = Buffer.from("stream");
   const fim = Buffer.from("endstream");
@@ -69,7 +103,15 @@ function streamsDoPdf(buffer) {
     let ini = s + inicio.length;
     if (buffer[ini] === 0x0d) ini++;
     if (buffer[ini] === 0x0a) ini++;
-    out.push(buffer.subarray(ini, e));
+    // O dicionário mora ANTES do "stream". 512 bytes cobrem os dicionários
+    // reais com folga; olhar mais longe só custa tempo.
+    const dicIni = Math.max(0, s - 512);
+    const dict = buffer.subarray(dicIni, s).toString("latin1");
+    out.push({
+      dado: buffer.subarray(ini, e),
+      declaraFlate: dict.includes("/FlateDecode"),
+      declaraSemFiltro: !/\/Filter\s/.test(dict),
+    });
     i = e + fim.length;
   }
   return out;
@@ -276,10 +318,20 @@ export function extrairTextoPdf(buffer) {
   const streams = streamsDoPdf(buffer);
   let contentStreams = 0;
   let texto = "";
-  for (const s of streams) {
-    // Tenta inflar; se não for comprimido, o próprio stream já é conteúdo.
-    const dado = inflar(s) || s;
-    const txt = dado.toString("latin1");
+  for (const { dado, declaraFlate } of streams) {
+    // A decisão que economiza 95% do tempo (medido em dev/_diag-filtros-pdf.mjs:
+    // 1.802 ms -> 81 ms de descompressão num PDF de 2 MB): num PDF real, a
+    // maioria dos streams NÃO é comprimida, e a versão antiga tentava três
+    // descompressões em cada um, colecionando exceções de zlib.
+    //
+    // A ordem importa e custou uma regressão para ser achada (dev/_diag-streams-texto.mjs):
+    // o cabeçalho manda. Ele é uma checagem de 2 bytes e reconhece o stream
+    // comprimido mesmo quando o dicionário está longe demais para ser lido.
+    // O `/FlateDecode` do dicionário é só o reforço, para o stream que vem
+    // comprimido com cabeçalho atípico.
+    const cabe = ehZlib(dado) || ehGzip(dado);
+    const usavel = cabe || declaraFlate ? inflar(dado) || dado : dado;
+    const txt = usavel.toString("latin1");
     if (!ehContentStream(txt)) continue;
     contentStreams++;
     texto += textoDoContent(txt);
