@@ -39,6 +39,16 @@ const agentCache = new Map();
 const agentesGenericos = new Map();
 
 /**
+ * Um agent está ocioso quando não tem socket aberto nem pedido na fila.
+ * É o critério de evicção: só um agent ocioso pode ser destruído sem perda.
+ */
+function agentOcioso(agent) {
+  const soma = (mapa) =>
+    Object.values(mapa || {}).reduce((n, lista) => n + (lista ? lista.length : 0), 0);
+  return soma(agent.sockets) === 0 && soma(agent.requests) === 0;
+}
+
+/**
  * Cria ou reutiliza um Agent HTTP/HTTPS para um IP validado.
  * O Agent sobrescreve o lookup padrão para retornar sempre o IP validado.
  */
@@ -63,10 +73,25 @@ export function agentValidado(url, ipValido) {
   };
   agent = isHttps ? new https.Agent(opts) : new http.Agent(opts);
   if (agentCache.size >= AGENT_CACHE_MAX) {
-    const maisAntigo = agentCache.keys().next().value;
-    const old = agentCache.get(maisAntigo);
-    agentCache.delete(maisAntigo);
-    try { old.destroy(); } catch { /* já destruído */ }
+    // Evicção: destruir um agent com requisição em voo derrubaria o
+    // download no meio do caminho (os sockets são destruídos junto). Então:
+    // prefere-se um agent OCIOSO (sem socket ativo nem pedido pendente); se
+    // todos estiverem ocupados, o mais antigo sai do cache SEM destroy — as
+    // conexões dele morrem sozinhas no timeout de keep-alive, e quem está em
+    // voo completa a leitura normalmente.
+    let alvo = null;
+    for (const [chave, candidato] of agentCache) {
+      if (agentOcioso(candidato)) {
+        alvo = chave;
+        break;
+      }
+    }
+    if (alvo === null) alvo = agentCache.keys().next().value;
+    const old = agentCache.get(alvo);
+    agentCache.delete(alvo);
+    if (old && agentOcioso(old)) {
+      try { old.destroy(); } catch { /* já destruído */ }
+    }
   }
   agentCache.set(cacheKey, agent);
   return agent;

@@ -471,10 +471,17 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
         primeiraTentativa: attempt === 0,
       });
       const { resposta, finalUrl } = await buscarComRedirects(url, headers, controller.signal);
-      if (resposta.statusCode === 304 && condicional && condicional.payload) {
+      if (resposta.statusCode === 304 && condicional) {
         descartarCorpo(resposta.stream);
         revalidacaoCondicional.naoModificadas++;
-        return { ...condicional.payload, naoModificado: true };
+        if (condicional.payload) return { ...condicional.payload, naoModificado: true };
+        // 304 sem payload guardado (a entrada era maior que o teto do cache):
+        // não há o que restaurar — refaz o MESMO pedido sem o cabeçalho
+        // condicional para receber o corpo inteiro. `attempt--` mantém a
+        // contagem: isto não é retry de falha, é a mesma tentativa sem condição.
+        condicional = null;
+        attempt--;
+        continue;
       }
       if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
         const err = new HttpError(resposta.statusCode, fraseDeStatus(resposta.statusMessage), url);
@@ -502,7 +509,7 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
       lastError = classificarErro(errBruto, url, timeoutMs);
       const retriable =
         lastError && (lastError.status === 429 || lastError.status === 503 || lastError.status === 500);
-      if (!retriable || attempt === retries) throw lastError;
+      if (!retriable || attempt === maxTentativas) throw lastError;
       const respeitaRetryAfter =
         (lastError.status === 429 || lastError.status === 503) && lastError.retryAfterMs != null;
       await sleep(respeitaRetryAfter ? lastError.retryAfterMs : 400 * 2 ** attempt);
@@ -600,7 +607,8 @@ function corteInutil(chave) {
   return true;
 }
 
-export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {  const cacheKey = chaveCanonica(url);
+export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
+  const cacheKey = chaveCanonica(url);
   const guardado = pageCache.get(cacheKey);
   if (guardado) {
     if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries });
@@ -875,10 +883,14 @@ function guardarNoCache({ cacheKey, payload, extrair }) {
   if (extrair) {
     const { text, extraido } = extrair(semFlag);
     const comTexto = { ...semFlag, text, extraido };
-    if (payloadBytes(comTexto) <= CACHE_MAX_ENTRY_BYTES) {
-      pageCache.set(cacheKey, comTexto, payloadBytes(comTexto));
+    const comTextoBytes = payloadBytes(comTexto);
+    if (comTextoBytes <= CACHE_MAX_ENTRY_BYTES) {
+      pageCache.set(cacheKey, comTexto, comTextoBytes);
     }
-    guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, comTexto);
+    // O payload guardado junto dos validadores serve para restaurar a entrada
+    // num 304 — ele precisa respeitar o MESMO teto do cache: acima dele, o
+    // 304 traria de volta uma entrada que o LRU nunca aceitaria guardar.
+    guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, comTextoBytes <= CACHE_MAX_ENTRY_BYTES ? comTexto : null);
     return comTexto;
   }
 
@@ -886,7 +898,7 @@ function guardarNoCache({ cacheKey, payload, extrair }) {
 
   const bytes = payloadBytes(semFlag);
   if (bytes <= CACHE_MAX_ENTRY_BYTES) pageCache.set(cacheKey, semFlag, bytes);
-  guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, semFlag);
+  guardarValidadores(cacheKey, semFlag.etag, semFlag.lastModified, bytes <= CACHE_MAX_ENTRY_BYTES ? semFlag : null);
   return semFlag;
 }
 

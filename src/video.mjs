@@ -1106,7 +1106,7 @@ async function lerPaginaGenerica(url, { timeoutMs, maxChars, lang }) {
  * Lê um vídeo (YouTube, Vimeo ou página com vídeo): metadados publicados e a
  * transcrição da legenda, quando acessível. Nunca baixa mídia.
  */
-export async function toolReadVideo(args) {
+export async function toolReadVideo(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxChars(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);

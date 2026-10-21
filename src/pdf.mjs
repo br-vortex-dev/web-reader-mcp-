@@ -371,7 +371,7 @@ export function clampMaxCharsPdf(valor) {
  * A extração roda DENTRO do caminho cacheado (`extrair`): o cache guarda o
  * texto pronto, então reler a mesma URL não reparseia o PDF.
  */
-export async function toolReadPdf(args) {
+export async function toolReadPdf(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const maxChars = clampMaxCharsPdf(args.maxChars);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);

@@ -142,7 +142,24 @@ function etagDe(buffer) {
  * cliente que não a aceita (cache intermediário incluso).
  */
 export function responderJson(req, res, status, payload, extraHeaders = {}) {
-  const corpo = Buffer.from(JSON.stringify(payload), "utf8");
+  let corpo;
+  try {
+    corpo = Buffer.from(JSON.stringify(payload), "utf8");
+  } catch {
+    // Payload circular ou com valor não serializável. Em vez de deixar a
+    // exceção subir (unhandledRejection derruba o processo inteiro no Node
+    // moderno), devolve o erro JSON-RPC padrão de erro interno.
+    corpo = Buffer.from(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32603, message: "Erro interno: resposta não serializável." },
+      }),
+      "utf8"
+    );
+    status = 500;
+    extraHeaders = {};
+  }
   const headers = { "content-type": "application/json", vary: "accept-encoding", ...extraHeaders };
 
   // ETag + 304: as respostas constantes (tools/list, initialize) são as mesmas
@@ -682,6 +699,11 @@ export function handlerParseErro(res) {
  * Processa o corpo já lido: parseia, despacha cada mensagem e monta a resposta.
  */
 export async function processarCorpo(parsed) {
+  if (typeof handleMessageFn !== "function") {
+    // Roteador ainda não registrado (arranque incompleto / import quebrado):
+    // erro claro em vez de TypeError "handleMessageFn is not a function".
+    throw new Error("roteador JSON-RPC não registrado");
+  }
   const messages = Array.isArray(parsed) ? parsed : [parsed];
   const responses = [];
   for (const msg of messages) {
@@ -1020,6 +1042,10 @@ export async function handlerMcp(req, res, ctx) {
 
     const { responses, eraArray } = await processarCorpo(parsed);
 
+    // O watchdog pode ter respondido 503 enquanto o corpo era processado;
+    // tentar escrever de novo lançaria ERR_HTTP_HEADERS_SENT.
+    if (res.writableEnded || res.destroyed) return;
+
     if (responses.length === 0) {
       res.writeHead(202, {
         "content-type": "application/json",
@@ -1082,18 +1108,36 @@ export function criarServidorHttp(ctx) {
       return handlerRequestLineInvalida(res);
     }
 
-    if (req.method === "OPTIONS") return handlerOptions(res);
-    if (path === "/health" || path === "/") return handlerHealth(server, res);
-    if (path === "/metrics" && (req.method === "GET" || req.method === "HEAD")) {
-      return handlerMetrics(server, res, req, ctx);
+    try {
+      if (req.method === "OPTIONS") return handlerOptions(res);
+      if (path === "/health" || path === "/") return handlerHealth(server, res);
+      if (path === "/metrics" && (req.method === "GET" || req.method === "HEAD")) {
+        return handlerMetrics(server, res, req, ctx);
+      }
+      if (path !== "/mcp") return handlerNotFound(res);
+
+      // Rotas da spec do transporte HTTP do MCP. Continuam exigindo o token.
+      if (req.method === "GET") return handlerSse(req, res, ctx);
+      if (req.method === "DELETE") return handlerEncerrarSessao(req, res, ctx);
+
+      return handlerMcp(req, res, ctx);
+    } catch (err) {
+      // Rede de segurança FINAL: uma exceção que escape de qualquer handler
+      // viraria unhandledRejection e derrubaria o processo inteiro (com
+      // WEB_CONCURRENCY, só o worker — mas ainda assim perda de serviço).
+      // Vira 500 JSON-RPC; o log é truncado para um erro não encher o disco.
+      try {
+        console.error(`[${SERVER_NAME}] erro não tratado em ${rota}:`, String(err && err.stack || err).slice(0, 2000));
+      } catch { /* console indisponível */ }
+      if (!res.writableEnded && !res.destroyed) {
+        try {
+          res.writeHead(500, { "content-type": "application/json", "access-control-allow-origin": "*" });
+          res.end(
+            JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "Erro interno do servidor." } })
+          );
+        } catch { /* headers já enviados; nada mais a fazer */ }
+      }
     }
-    if (path !== "/mcp") return handlerNotFound(res);
-
-    // Rotas da spec do transporte HTTP do MCP. Continuam exigindo o token.
-    if (req.method === "GET") return handlerSse(req, res, ctx);
-    if (req.method === "DELETE") return handlerEncerrarSessao(req, res, ctx);
-
-    return handlerMcp(req, res, ctx);
   });
 
   server.keepAliveTimeout = HTTP_KEEPALIVE_TIMEOUT_MS;
