@@ -97,7 +97,7 @@ caractere (`48`, `57`).
 npm test
 ```
 
-Roda os arquivos de `tests/` (30 arquivos, 241 testes, ~90 s, sem rede na maioria):
+Roda os arquivos de `tests/` (31 arquivos, 263 testes, ~90 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -460,8 +460,6 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
 | `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (`ROBOTS_NEGATIVE_TTL_MS`, 60 s fixo). |
 | `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
-| `ROBOTS_MAX_BYTES` | `524288` (512 KB) | Corpo do `robots.txt` acima disso é descartado (fail-open). |
-| `ROBOTS_MAX_ORIGINS` | `1000` | Teto de origens com `robots.txt` em cache. |
 | `ROBOTS_MAX_CONCURRENCY` | `16` | Quantas buscas de `robots.txt` (uma por origem nova) rodam ao mesmo tempo. |
 | `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
 | `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. É o teto DURO: acima dele a leitura falha com "Resposta muito grande". |
@@ -474,14 +472,10 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `API_TOTAL_BUDGET_MS` | `1500` | Orçamento total dessa busca de APIs internas. |
 | `ROBOTS_NEGATIVE_TTL_MS` | `60000` | TTL da falha ao ler o `robots.txt` (fail-open), para não martelar o host. |
 | `MAX_REDIRECTS` | `5` | Máximo de saltos de redirect seguidos (revalidando o destino de cada um). |
-| `RETRY_AFTER_MAX_MS` | `10000` | Teto do `Retry-After` obedecido no retry. |
 | `DEFAULT_TIMEOUT_MS` | `8000` | Timeout padrão de cada requisição HTTP. |
+| `DNS_TIMEOUT_MS` | `5000` | Timeout da resolução de DNS na validação de host (0,5 s–30 s). Passado disso, a resolução é abandonada em vez de segurar a leitura. |
 | `MULTI_MAX_TOTAL_CHARS` | `250000` | Teto da soma das seções em `read_multiple_pages`. |
 | `DEFAULT_MAX_CHARS` | `8000` | Padrão de `maxChars` das ferramentas. |
-| `HARD_MAX_CHARS` | `25000` | Teto absoluto de `maxChars` por página. |
-| `MAX_PAGES_PER_CALL` | `30` | Teto de páginas por `read_multiple_pages` e por `crawl_site`. |
-| `HOST_CHECK_TTL_MS` | `300000` (5 min) | Validade da validação de host (SSRF) por nome. |
-| `AGENT_CACHE_MAX` | `256` | Teto de Agents HTTP/HTTPS mantidos por IP (keep-alive). |
 | `MAX_INFLIGHT_REQUESTS` | `128` | Quantas requisições são processadas ao mesmo tempo. Calibrado pelo **joelho da curva de capacidade** (~64 no hardware de referência). **Aumentar não aumenta a vazão** — só a fila. |
 | `BROTLI_QUALITY` | `4` | Qualidade do brotli na resposta do `/mcp`. O padrão do Node é **11**, o mais caro e **síncrono** (segura o event loop): medido num corpo de `tools/list`, **17,3 ms** por requisição em q11 contra **0,68 ms** em q4 — 25x menos CPU por 10 bytes a mais na saída. Suba para `11` só se quiser o byte a menos. |
 | `COMPRESSAO_CACHE_ENTRIES` | `64` | Teto do cache de compressão: guarda a versão comprimida de um corpo que se repete (a chave é o sha256 do corpo). `tools/list` e `initialize` são constantes, então a partir da segunda chamada a compressão é servida pronta (**0,12 ms** contra 16,4 ms). `0` desliga. |
@@ -500,6 +494,13 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `MAX_CONNECTIONS` | `0` (sem teto) | Teto de conexões aceitas; `0` deixa o limite para o SO. |
 | `RATE_LIMIT_MAX` | `60` | Requisições por janela, por cliente. O `render.yaml` usa **10000**: quando quem chama é o backend de um site, todos os usuários chegam pelo mesmo IP e 60/min seria um balde único para o site inteiro. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Tamanho da janela do rate limit. |
+
+**Tetos que NÃO são variáveis de ambiente.** Alguns limites são constantes fixas em
+`src/config.mjs` (não dá para mudar por env): `HARD_MAX_CHARS` (`25000`, teto absoluto de
+`maxChars`), `MAX_PAGES_PER_CALL` (`30`), `HOST_CHECK_TTL_MS` (`300000`, validade da
+validação de host), `AGENT_CACHE_MAX` (`256`, Agents keep-alive), `ROBOTS_MAX_BYTES`
+(`524288`), `ROBOTS_MAX_ORIGINS` (`1000`) e `RETRY_AFTER_MAX_MS` (`10000`, teto do
+`Retry-After`). Antes eles apareciam nesta tabela como se fossem ajustáveis — não são.
 
 Uma variável só de teste, usada pela suíte: `TEST_SERVER_PATH`, que aponta os
 testes para outra cópia do `server.js` (serve para provar que os testes falham
