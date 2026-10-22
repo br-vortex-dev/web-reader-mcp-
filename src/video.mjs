@@ -412,9 +412,35 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * As regex de atributo e de meta tag eram compiladas a cada chamada: numa
+ * página com dezenas de <track>/<video>, o mesmo padrão para "src" era
+ * montado de novo dezenas de vezes. O conjunto de nomes é pequeno e fixo,
+ * então memoizar não cresce sem limite e corta a compilação repetida.
+ */
+const memoRegexAtributo = new Map();
+function regexAtributo(nome) {
+  let re = memoRegexAtributo.get(nome);
+  if (!re) {
+    re = new RegExp(`${nome}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i");
+    memoRegexAtributo.set(nome, re);
+  }
+  return re;
+}
+
+const memoRegexMetaTag = new Map();
+function regexMetaTag(chave) {
+  let re = memoRegexMetaTag.get(chave);
+  if (!re) {
+    re = new RegExp(`<meta\\b[^>]*(?:property|name)\\s*=\\s*["']${escapeRegExp(chave)}["'][^>]*>`, "i");
+    memoRegexMetaTag.set(chave, re);
+  }
+  return re;
+}
+
 /** Lê o content de uma meta tag por property/name (qualquer ordem de atributo). */
 function metaTagConteudo(html, chave) {
-  const re = new RegExp(`<meta\\b[^>]*(?:property|name)\\s*=\\s*["']${escapeRegExp(chave)}["'][^>]*>`, "i");
+  const re = regexMetaTag(chave);
   const m = html.match(re);
   if (!m) return "";
   const c = m[0].match(/content\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
@@ -471,7 +497,7 @@ export function extrairTracksDeHtml(html, baseUrl) {
   while ((m = re.exec(html)) !== null) {
     const tag = m[0];
     const attr = (nome) => {
-      const a = tag.match(new RegExp(`${nome}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
+      const a = tag.match(regexAtributo(nome));
       return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
     };
     const src = attr("src");
@@ -502,7 +528,7 @@ export function metadadosPagina(html, baseUrl) {
   const mVideo = html.match(/<video\b[^>]*>/i);
   const attrVideo = (nome) => {
     if (!mVideo) return "";
-    const a = mVideo[0].match(new RegExp(`${nome}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
+    const a = mVideo[0].match(regexAtributo(nome));
     return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
   };
 

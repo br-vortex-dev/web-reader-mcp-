@@ -58,17 +58,23 @@ let servidorHttp = null;
 // byte a byte igual à de antes.
 const COMPRESSAO_MIN_BYTES = 1024;
 
+// As regras são compiladas UMA vez, no carregamento do módulo. Compilar dentro
+// da função custava 6 compilações por resposta — medição de 300 mil chamadas:
+// 913 ms recompilando contra 298 ms aqui (3,06x), com resultado idêntico.
+const REGRAS_CODIFICACAO = ["br", "gzip", "deflate"].map((nome) => [
+  nome,
+  new RegExp(`(^|[,\\s])${nome}\\s*(;|,|$)`),
+  new RegExp(`${nome}\\s*;\\s*q\\s*=\\s*0`),
+]);
+
 /** Escolhe a melhor codificação declarada pelo cliente (br > gzip > deflate). */
 export function escolherCodificacao(acceptEncoding) {
   const aceita = String(acceptEncoding || "").toLowerCase();
   if (!aceita) return null;
   // q=0 desliga a codificação; presença simples já basta (ignoramos pesos >0).
-  const tem = (nome) =>
-    new RegExp(`(^|[,\\s])${nome}\\s*(;|,|$)`).test(aceita) &&
-    !new RegExp(`${nome}\\s*;\\s*q\\s*=\\s*0`).test(aceita);
-  if (tem("br")) return "br";
-  if (tem("gzip")) return "gzip";
-  if (tem("deflate")) return "deflate";
+  for (const [nome, aceito, negado] of REGRAS_CODIFICACAO) {
+    if (aceito.test(aceita) && !negado.test(aceita)) return nome;
+  }
   return null;
 }
 
@@ -106,13 +112,42 @@ export function comprimirCorpo(buffer, codificacao) {
 }
 
 /**
+ * Mesma compressão, mas fora do thread principal: o zlib aceita callback e
+ * resolve o trabalho numa thread do pool. É isto que impede a resposta de
+ * travar o servidor inteiro — no modo síncrono, um corpo de 1 MB deixava o
+ * processo 51 ms parado, sem atender nenhuma outra requisição nesse tempo.
+ */
+export function comprimirCorpoAsync(buffer, codificacao) {
+  if (codificacao === null) return Promise.resolve(buffer);
+  const bruto = (fn) =>
+    new Promise((resolve, reject) => {
+      fn(buffer, (err, saida) => (err ? reject(err) : resolve(saida)));
+    });
+  if (codificacao === "br") {
+    return bruto((b, cb) =>
+      zlib.brotliCompress(b, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY } }, cb)
+    );
+  }
+  if (codificacao === "gzip") return bruto((b, cb) => zlib.gzip(b, cb));
+  if (codificacao === "deflate") return bruto((b, cb) => zlib.deflate(b, cb));
+  return Promise.resolve(buffer);
+}
+
+/**
  * Comprime com cache. Só vale a pena quando o corpo se repete; a checagem do
  * hash custa ~microssegundos em 6 KB, muito abaixo dos milissegundos que a
  * compressão custa. Sem cache (COMPRESSAO_CACHE_ENTRIES = 0), cai direto.
  */
-function comprimirComCache(buffer, codificacao) {
+// Teto de corpo que vale a pena passar pelo cache. O que se repete é a resposta
+// CONSTANTE (tools/list, initialize, resources/list) — toda pequena. O texto de
+// uma página grande nunca se repete, então o sha256 dele (1,6 ms em 6 KB, 21 ms
+// em 1 MB) só serviria para errar o cache e ainda empurrar o LRU.
+const COMPRESSAO_CACHE_MAX_BYTES = 64 * 1024;
+
+async function comprimirComCache(buffer, codificacao) {
   if (codificacao === null) return buffer;
-  if (COMPRESSAO_CACHE_ENTRIES === 0) return comprimirCorpo(buffer, codificacao);
+  const cacheavel = COMPRESSAO_CACHE_ENTRIES > 0 && buffer.length <= COMPRESSAO_CACHE_MAX_BYTES;
+  if (!cacheavel) return comprimirCorpoAsync(buffer, codificacao);
   const chave = createHash("sha256").update(buffer).digest("base64") + ":" + codificacao;
   const guardado = cacheCompressao.get(chave);
   if (guardado) {
@@ -123,7 +158,7 @@ function comprimirComCache(buffer, codificacao) {
     return guardado;
   }
   errosCompressao++;
-  const comprimido = comprimirCorpo(buffer, codificacao);
+  const comprimido = await comprimirCorpoAsync(buffer, codificacao);
   cacheCompressao.set(chave, comprimido);
   if (cacheCompressao.size > COMPRESSAO_CACHE_ENTRIES) {
     cacheCompressao.delete(cacheCompressao.keys().next().value);
@@ -141,7 +176,7 @@ function etagDe(buffer) {
  * Vary para que a resposta comprimida nunca seja servida por engano a um
  * cliente que não a aceita (cache intermediário incluso).
  */
-export function responderJson(req, res, status, payload, extraHeaders = {}) {
+export async function responderJson(req, res, status, payload, extraHeaders = {}) {
   let corpo;
   try {
     corpo = Buffer.from(JSON.stringify(payload), "utf8");
@@ -179,9 +214,14 @@ export function responderJson(req, res, status, payload, extraHeaders = {}) {
     res.writeHead(status, headers);
     return res.end(corpo);
   }
+  const comprimido = await comprimirComCache(corpo, codificacao);
+  // A compressão agora roda no pool de threads, então OUTRA coisa pode ter
+  // mexido no res enquanto ela trabalhava (o watchdog respondendo 503, ou o
+  // cliente desistindo). Escrever aí lançaria ERR_HTTP_HEADERS_SENT.
+  if (res.writableEnded || res.destroyed) return;
   headers["content-encoding"] = codificacao;
   res.writeHead(status, headers);
-  res.end(comprimirComCache(corpo, codificacao));
+  res.end(comprimido);
 }
 
 /** Referência ao handleMessage do roteador (definida por registrarHandleMessage). */
@@ -1056,7 +1096,7 @@ export async function handlerMcp(req, res, ctx) {
       return;
     }
 
-    responderJson(
+    await responderJson(
       req,
       res,
       200,

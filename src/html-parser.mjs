@@ -178,8 +178,29 @@ export function decodeEntities(input) {
   while (i < len) {
     const amp = input.indexOf("&", i);
     if (amp === -1) break;
-    const semi = input.indexOf(";", amp + 1);
-    const corpoLen = semi === -1 ? -1 : semi - amp - 1;
+    // O ";" é procurado numa janela CURTA, e a busca para no primeiro
+    // caractere que não pode compor entidade ("&", "<", ">", espaço,
+    // tabulação, quebra de linha). O caminho antigo usava
+    // `indexOf(";", amp + 1)`, que varria o resto do documento a CADA "&":
+    // num texto cheio de "&" solto e sem ";" (HTML quebrado, bem comum) isso
+    // virava O(n²) — 80 mil "&" custavam 369 ms e 160 mil custavam ~1,4 s.
+    const fimJanela = Math.min(len, amp + 1 + MAX_CORPO_ENTIDADE);
+    let semi = -1;
+    for (let k = amp + 1; k < fimJanela; k++) {
+      const c = input.charCodeAt(k);
+      if (c === 59) {
+        semi = k; // ";"
+        break;
+      }
+      if (c === 38 || c === 60 || c === 62 || c === 32 || c === 10 || c === 9 || c === 13) {
+        break; // & < > espaço \n \t \r: não é corpo de entidade
+      }
+    }
+    if (semi === -1) {
+      i = amp + 1; // não é entidade: segue depois do "&"
+      continue;
+    }
+    const corpoLen = semi - amp - 1;
     if (corpoLen < 1 || corpoLen > MAX_CORPO_ENTIDADE) {
       i = amp + 1; // não é entidade: segue depois do "&"
       continue;

@@ -48,6 +48,24 @@ function tipoDoCorpo(contentType, texto) {
  * ===================================================================== */
 
 /**
+ * O par de regex de uma tag, montado uma vez só. Antes, o fechamento era
+ * compilado dentro do laço — um feed com 50 <item> compilava 50 vezes.
+ * O conjunto de tags de um feed é pequeno e fixo, então o cache é estável.
+ */
+const memoRegexTag = new Map();
+function regexTag(tag) {
+  let par = memoRegexTag.get(tag);
+  if (!par) {
+    par = {
+      abertura: new RegExp(`<${tag}(\\s[^>]*)?>`, "gi"),
+      fechamento: new RegExp(`</${tag}\\s*>`, "gi"),
+    };
+    memoRegexTag.set(tag, par);
+  }
+  return par;
+}
+
+/**
  * Devolve o conteúdo interno de todas as ocorrências de `<tag ...>...</tag>`.
  * Aceita CDATA. Não é um parser XML completo de propósito: feeds são rasos e
  * regulares, e o que importa é não perder texto (o erro caro seria engolir um
@@ -55,11 +73,14 @@ function tipoDoCorpo(contentType, texto) {
  */
 export function conteudoDasTags(xml, tag) {
   const out = [];
-  const abertura = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
+  const { abertura, fechamento } = regexTag(tag);
+  // O par é memoizado e as duas regex são globais, então o lastIndex precisa
+  // ser zerado a cada uso: sem isto, a segunda leitura da mesma tag começaria
+  // no meio do documento anterior.
+  abertura.lastIndex = 0;
   let m;
   while ((m = abertura.exec(xml)) !== null) {
     const inicio = m.index + m[0].length;
-    const fechamento = new RegExp(`</${tag}\\s*>`, "gi");
     fechamento.lastIndex = inicio;
     const fim = fechamento.exec(xml);
     if (!fim) break;
