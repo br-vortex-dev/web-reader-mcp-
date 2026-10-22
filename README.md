@@ -97,11 +97,13 @@ caractere (`48`, `57`).
 npm test
 ```
 
-Roda os arquivos de `tests/` (32 arquivos, 268 testes, ~90 s, sem rede na maioria):
+Roda os arquivos de `tests/` (36 arquivos, 306 testes, ~75 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
 | `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
+| `tests/decode-entidades.test.mjs` | entidades HTML: nomeadas, decimal, hexadecimal, acento do português, `&` solto no texto e o **caso patológico** (muitos `&` sem `;`, cronometrado — trava a regressão do O(n²)) |
+| `tests/aninhamento-profundo.test.mjs` | aninhamento absurdo: texto no fundo de 100.000 `div`s sobrevive, link no fundo tem `href` resolvido e o render não estoura a pilha |
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos) e rate limit (não burlável por `x-forwarded-for`) |
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
 | `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração, **SWR (vencido serve na hora; rajada no vencimento = 1 revalidação)** |
@@ -554,6 +556,19 @@ O que mudou (tudo medido):
 | Página gigante: download + parse do rabo que nunca sai | tudo baixado e convertido | para no teto entregável, com prefixo byte a byte idêntico |
 | Leitura completa de página de 1,34 MB (markdown + links + meta) | 68,4 ms | 39,1 ms (**1,75x**, 43% menos CPU) |
 | `parseAttrs` (atributos de tag) | em toda tag, inclusive nas que ninguém lê | só em `<a>`, `<img>` e tags que contêm `aria-hidden` |
+| `decodeEntities` com `&` sem `;` (**fim do O(n²) escondido**) | 80.000 `&` em **369 ms** (o `indexOf(";")` varria o resto do documento) | janela de busca limitada; 40.000 em **2,4 ms**, curva linear |
+
+A correção do `decodeEntities` fecha o último caminho quadrático do parser: a
+busca do `;` de fechamento não tem teto natural, e a entidade nomeada mais longa
+do HTML não passa de ~32 caracteres — então a janela foi limitada por construção.
+O texto com muito `&` solto (página malformada, e-mail em URL, código de exemplo)
+deixou de custar o documento inteiro por caractere. Provas na suíte:
+`tests/decode-entidades.test.mjs` (nomeadas, decimal, hexadecimal, acento,
+`&` solto e o caso patológico cronometrado) e `tests/aninhamento-profundo.test.mjs`
+(texto e link no fundo de 100.000 `div`s). O catálogo de ferramentas ganhou
+`tests/snapshot/tools-list.json`, comparado em **JSON exato** — ferramenta
+acrescentada ou removida sem atualizar o snapshot quebra o teste em vez de passar
+silencioso (`node scripts/dump-tools-list.mjs` regrava).
 
 A **passada única** (`htmlToMarkdownComLinks`) existe porque `htmlToMarkdown` e
 `extractLinks` liam o HTML inteiro cada um — duas tokenizações completas do mesmo
