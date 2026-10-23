@@ -68,7 +68,10 @@ if (MODO === "individual" || MODO === "tudo") {
 const ALVOS = {
   simples: "https://example.com",
   html: "https://www.iana.org/help/example-domains",
-  pdf: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+  // O alvo antigo (w3.org/.../dummy.pdf) passou a responder 403 para QUALQUER
+  // User-Agent, inclusive o de um navegador real — o site fechou a porta, nao o
+  // nosso codigo. Trocado por um PDF publico estavel (conferido em 21/10/2026).
+  pdf: "https://pdfobject.com/pdf/sample.pdf",
   json: "https://api.github.com/repos/nodejs/node",
   feed: "https://hnrss.org/frontpage",
   sitemap: "https://www.iana.org",
