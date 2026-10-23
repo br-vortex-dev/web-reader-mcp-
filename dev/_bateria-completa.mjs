@@ -8,6 +8,15 @@
 const base = (process.argv[2] || "").replace(/\/+$/, "");
 const token = process.argv[3] || "";
 const MODO = process.env.MODO || "tudo"; // individual | carga | tudo
+// ESCALA reduz a carga de TODOS os patamares, de uma vez: 1 = cheio (padrão),
+// 0.5 = metade da concorrência em cada degrau da escada, 0.25 = um quarto.
+// Existe porque o plano free do Render satura nos degraus altos e não há como
+// "meia velocidade" sem editar a escada à mão. A duração de cada degrau fica igual.
+const ESCALA = (() => {
+  const n = Number(process.env.ESCALA ?? 1);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 4) : 1;
+})();
+const escalar = (conc) => Math.max(1, Math.round(conc * ESCALA));
 if (!base || !token) {
   console.error("uso: node dev/_bateria-completa.mjs <https://sua-url.onrender.com> <token>");
   process.exit(1);
@@ -176,6 +185,17 @@ console.log("gravado: dev/load/bateria-individual.json");
 if (MODO === "carga" || MODO === "tudo") {
 console.log("\n===== CARGA (escada de concorrência) =====\n");
 
+// tools/list não é tools/call: medir a lista pela rota de chamada dava 100% de
+// falha falsa (o servidor recusa ferramenta inexistente). Aqui vai o método certo.
+async function chamarLista(timeoutMs = 20000) {
+  try {
+    const { status, json } = await rpc("tools/list", {}, timeoutMs);
+    return { ok: status === 200 && Array.isArray(json?.result?.tools), status };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 async function carga(nome, conc, segundos, argsFn) {
   const fim = Date.now() + segundos * 1000;
   const lat = [];
@@ -187,7 +207,9 @@ async function carga(nome, conc, segundos, argsFn) {
         const args = argsFn(i);
         enviados++;
         const t = Date.now();
-        const r = await chamar(nome, args, 20000).catch(() => ({ ok: false }));
+        const r = await (nome === "tools/list"
+          ? chamarLista(20000)
+          : chamar(nome, args, 20000)).catch(() => ({ ok: false }));
         lat.push(Date.now() - t);
         r.ok ? ok++ : falha++;
       }
@@ -201,12 +223,13 @@ async function carga(nome, conc, segundos, argsFn) {
 }
 
 const resultadosCarga = [];
-for (const conc of [128, 256, 512, 1024]) {
-  resultadosCarga.push(await carga("read_page", conc, 6, () => ({ url: "https://example.com", maxChars: 500 })));
+if (ESCALA !== 1) console.log(`ESCALA=${ESCALA} -> concorrências reduzidas (ex.: 128 -> ${escalar(128)}, 1024 -> ${escalar(1024)})\n`);
+for (const patamar of [128, 256, 512, 1024]) {
+  resultadosCarga.push(await carga("read_page", escalar(patamar), 6, () => ({ url: "https://example.com", maxChars: 500 })));
   gravar("carga", resultadosCarga);
 }
-for (const conc of [128, 512, 1024]) {
-  resultadosCarga.push(await carga("tools/list", conc, 6, () => ({})));
+for (const patamar of [128, 512, 1024]) {
+  resultadosCarga.push(await carga("tools/list", escalar(patamar), 6, () => ({})));
   gravar("carga", resultadosCarga);
 }
 console.log(`\ncarga gravada: dev/load/bateria-carga.json`);

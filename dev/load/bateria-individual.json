@@ -1,6 +1,6 @@
 {
-  "base": "http://127.0.0.1:8791",
-  "quando": "2026-10-23T17:24:47.609Z",
+  "base": "https://web-reader-mcp-13z0.onrender.com",
+  "quando": "2026-10-23T17:32:08.322Z",
   "catalogo": [
     "read_page",
     "extract_links",
@@ -19,7 +19,7 @@
     {
       "nome": "tools/list",
       "marca": "PASS",
-      "ms": 16,
+      "ms": 696,
       "status": 200,
       "chars": 8881,
       "extra": ""
@@ -27,7 +27,7 @@
     {
       "nome": "read_page",
       "marca": "PASS",
-      "ms": 62,
+      "ms": 530,
       "status": 200,
       "chars": 1030,
       "extra": ""
@@ -35,7 +35,7 @@
     {
       "nome": "read_page (teto 25000)",
       "marca": "PASS",
-      "ms": 12,
+      "ms": 260,
       "status": 200,
       "chars": 1030,
       "extra": ""
@@ -43,7 +43,7 @@
     {
       "nome": "extract_links",
       "marca": "PASS",
-      "ms": 9,
+      "ms": 225,
       "status": 200,
       "chars": 379,
       "extra": ""
@@ -51,7 +51,7 @@
     {
       "nome": "read_multiple_pages (5 urls)",
       "marca": "PASS",
-      "ms": 14,
+      "ms": 570,
       "status": 200,
       "chars": 6713,
       "extra": ""
@@ -59,7 +59,7 @@
     {
       "nome": "discover_urls",
       "marca": "PASS",
-      "ms": 7,
+      "ms": 648,
       "status": 200,
       "chars": 813,
       "extra": ""
@@ -67,7 +67,7 @@
     {
       "nome": "crawl_site",
       "marca": "PASS",
-      "ms": 15,
+      "ms": 222,
       "status": 200,
       "chars": 310,
       "extra": ""
@@ -75,7 +75,7 @@
     {
       "nome": "read_dynamic_page",
       "marca": "PASS",
-      "ms": 19,
+      "ms": 375,
       "status": 200,
       "chars": 2349,
       "extra": ""
@@ -83,15 +83,15 @@
     {
       "nome": "read_video",
       "marca": "PASS",
-      "ms": 82,
+      "ms": 627,
       "status": 200,
-      "chars": 1382,
+      "chars": 545,
       "extra": ""
     },
     {
       "nome": "read_pdf",
       "marca": "PASS",
-      "ms": 14,
+      "ms": 475,
       "status": 200,
       "chars": 2951,
       "extra": ""
@@ -99,7 +99,7 @@
     {
       "nome": "read_feed",
       "marca": "PASS",
-      "ms": 13,
+      "ms": 1638,
       "status": 200,
       "chars": 6774,
       "extra": ""
@@ -107,7 +107,7 @@
     {
       "nome": "read_json",
       "marca": "PASS",
-      "ms": 12,
+      "ms": 614,
       "status": 200,
       "chars": 141,
       "extra": "valor: # JSON: node URL: https://api.github.com/repos/nodejs/node C"
@@ -115,7 +115,7 @@
     {
       "nome": "find_on_page",
       "marca": "PASS",
-      "ms": 13,
+      "ms": 248,
       "status": 200,
       "chars": 772,
       "extra": ""
@@ -123,7 +123,7 @@
     {
       "nome": "diff_page (marca)",
       "marca": "PASS",
-      "ms": 4,
+      "ms": 256,
       "status": 200,
       "chars": 244,
       "extra": ""
@@ -131,7 +131,7 @@
     {
       "nome": "diff_page (compara)",
       "marca": "PASS",
-      "ms": 9,
+      "ms": 245,
       "status": 200,
       "chars": 136,
       "extra": ""
