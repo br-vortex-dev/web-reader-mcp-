@@ -75,14 +75,27 @@ test("dobrar o tamanho nao quadruplica o tempo (crescimento linear)", () => {
     return Number(process.hrtime.bigint() - t0) / 1e6;
   }
   medir(100000); // aquecimento do JIT
-  // Tira a melhor de tres para reduzir o ruido do coletor de lixo.
-  const menor = (n) => Math.min(medir(n), medir(n), medir(n));
-  const a = menor(200000);
-  const b = menor(400000);
+  // MEDIANA, nao o menor valor. A versao anterior tomava o minimo de tres
+  // amostras de ~13 ms e comparava a razao entre dois tamanhos: um unico
+  // pico de coletor na amostra de 200k derrubava a base e a razao saltava
+  // para 5x num codigo comprovadamente linear (medido: ~60 ns/caractere em
+  // 100k, 200k, 400k, 800k e 1,6M). Mediana de sete amostras e tamanhos
+  // maiores medem a FORMA da curva, e nao o ruido da maquina.
+  const mediana = (n, vezes) => {
+    const v = [];
+    for (let i = 0; i < vezes; i++) v.push(medir(n));
+    v.sort((x, y) => x - y);
+    return v[Math.floor(v.length / 2)];
+  };
+  // 400k/800k em vez de 200k/400k: o custo fixo da chamada pesa menos no
+  // resultado, entao a razao reflete o algoritmo.
+  const a = mediana(400000, 7);
+  const b = mediana(800000, 7);
   const razao = b / Math.max(a, 0.01);
   assert.ok(
     razao < 3,
-    `dobrar o tamanho multiplicou o tempo por ${razao.toFixed(2)} (esperado < 3; O(n^2) daria ~4)`
+    `dobrar o tamanho multiplicou o tempo por ${razao.toFixed(2)} ` +
+      `(${a.toFixed(1)} ms -> ${b.toFixed(1)} ms; esperado < 3, O(n^2) daria ~4)`
   );
 });
 

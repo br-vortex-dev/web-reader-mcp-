@@ -97,7 +97,7 @@ caractere (`48`, `57`).
 npm test
 ```
 
-Roda os arquivos de `tests/` (36 arquivos, 306 testes, ~75 s, sem rede na maioria):
+Roda os arquivos de `tests/` (36 arquivos, 308 testes, ~83 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -129,7 +129,7 @@ Roda os arquivos de `tests/` (36 arquivos, 306 testes, ~75 s, sem rede na maiori
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
-| `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão) |
+| `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão); **concorrência**: 12 `tools/list` simultâneos sem trocar o id, 16 pedidos na fila de admissão com só 2 vagas, e o cliente que morre no meio do corpo (a vaga volta e o servidor segue atendendo) |
 | `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
 | `tests/golden.test.mjs` | `htmlToMarkdown` bate com os 20 golden files em `tests/golden/` (saída byte a byte) |
@@ -471,6 +471,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `PORT` | `3000` | Porta do modo HTTP. O Render define sozinha; a presença dela é o que escolhe o modo HTTP (sem `PORT` → stdio). |
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
+| `METRICS_PUBLIC` | ligada | `1`/vazio deixa o `GET /metrics` aberto. `0` **fecha**: o endpoint passa a exigir o mesmo `Bearer` do `/mcp` (veja *Métricas*). |
 | `CACHE_MAX_BYTES` | `134217728` (128 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. O valor anterior (32 MB) enchia no próprio teste de carga e despejava página ainda quente. |
 | `CACHE_MAX_ENTRIES` | `512` | Teto de entradas do cache (o segundo teto, além dos bytes). Ajustável por env: subir diminui o despejo de páginas ainda quentes. |
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
@@ -482,7 +483,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `PRAZO_MINIMO_MULTI_MS` | `15000` (15 s) | Piso desse prazo. O prazo efetivo é `max(timeoutMs, este piso)`, limitado ao teto acima — numa chamada de uma URL só o comportamento é idêntico ao de antes. |
 | `MEMO_CONVERSAO` | ligada | `0` desliga a memoização da conversão (HTML → markdown/meta/links). Existe para depurar o parser; não há por quê desligar em produção. |
 | `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
-| `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale TTL curto (`ROBOTS_NEGATIVE_TTL_MS`, 60 s fixo). |
+| `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale o `ROBOTS_NEGATIVE_TTL_MS` (padrão igual a este, piso de 60 s). |
 | `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
 | `ROBOTS_MAX_CONCURRENCY` | `16` | Quantas buscas de `robots.txt` (uma por origem nova) rodam ao mesmo tempo. |
 | `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
@@ -494,7 +495,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `FETCH_CONCURRENCY` | `32` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
 | `API_MAX_CANDIDATES` | `2` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
 | `API_TOTAL_BUDGET_MS` | `1500` | Orçamento total dessa busca de APIs internas. |
-| `ROBOTS_NEGATIVE_TTL_MS` | `60000` | TTL da falha ao ler o `robots.txt` (fail-open), para não martelar o host. |
+| `ROBOTS_NEGATIVE_TTL_MS` | igual ao `ROBOTS_TTL_MS` (`900000`) | TTL da falha ao ler o `robots.txt` (fail-open), para não martelar o host. Piso de `60000`: valor menor é elevado a 60 s. |
 | `MAX_REDIRECTS` | `5` | Máximo de saltos de redirect seguidos (revalidando o destino de cada um). |
 | `DEFAULT_TIMEOUT_MS` | `8000` | Timeout padrão de cada requisição HTTP. |
 | `DNS_TIMEOUT_MS` | `5000` | Timeout da resolução de DNS na validação de host (0,5 s–30 s). Passado disso, a resolução é abandonada em vez de segurar a leitura. |

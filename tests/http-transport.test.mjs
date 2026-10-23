@@ -333,3 +333,72 @@ test("cliente que morre no meio do corpo nao prende a vaga de admissao", { timeo
     filho.kill();
   }
 });
+
+// CONCORRENCIA (o sintoma relatado em producao): varios tools/list ao mesmo
+// tempo. A resposta e a MESMA constante de ~6,5 KB para todo mundo, entao o
+// risco nao e o tamanho, e sim a resposta se misturar: um pedido receber o
+// corpo do outro (id trocado) ou o cliente receber menos ferramentas. Aqui os
+// 12 pedidos saem juntos e cada um tem de voltar com o SEU id e as 12.
+test("concorrencia: 12 tools/list simultaneos nao trocam id nem truncam", { timeout: 30000 }, async () => {
+  const respostas = await Promise.all(
+    Array.from({ length: 12 }, (_, i) =>
+      fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1000 + i, method: "tools/list" }),
+      }).then(async (res) => ({ status: res.status, json: JSON.parse(await res.text()) }))
+    )
+  );
+  respostas.forEach((r, i) => {
+    assert.equal(r.status, 200, "nenhum tools/list pode falhar por estar concorrendo");
+    assert.equal(r.json.id, 1000 + i, "cada resposta leva o id do seu proprio pedido");
+    assert.equal(r.json.result.tools.length, 12, "a lista vem inteira, sem truncar");
+  });
+});
+
+// CONCORRENCIA com a admissao apertada: 2 vagas e 16 pedidos de uma vez. O que
+// nao cabe na vaga espera na fila e atende depois — tools/list e barato, entao
+// nenhum pode ser recusado com 503 enquanto a fila tem espaco.
+test("concorrencia: fila de admissao atende 16 tools/list com 2 vagas", { timeout: 60000 }, async () => {
+  const p = await freePort();
+  const filho = spawn(process.execPath, [SERVER_PATH, "--http"], {
+    env: {
+      ...process.env,
+      PORT: String(p),
+      HOST: "127.0.0.1",
+      MCP_AUTH_TOKEN: TOKEN,
+      MAX_INFLIGHT_REQUESTS: "2",
+      MAX_WAITING_REQUESTS: "64",
+      MAX_WAIT_MS: "8000",
+      TRUST_PROXY_HOPS: "0",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  filho.stderr.on("data", () => {});
+  const b = `http://127.0.0.1:${p}`;
+  try {
+    let subiu = false;
+    for (let i = 0; i < 100; i++) {
+      try { if ((await fetch(`${b}/health`)).ok) { subiu = true; break; } } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(subiu, "servidor auxiliar nao subiu");
+
+    const respostas = await Promise.all(
+      Array.from({ length: 16 }, (_, i) =>
+        fetch(`${b}/mcp`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 50 + i, method: "tools/list" }),
+        }).then(async (res) => ({ status: res.status, json: JSON.parse(await res.text()) }))
+      )
+    );
+    respostas.forEach((r, i) => {
+      assert.equal(r.status, 200, "quem espera na fila e atendido, nao recusado");
+      assert.equal(r.json.id, 50 + i);
+      assert.equal(r.json.result.tools.length, 12);
+    });
+  } finally {
+    filho.kill();
+  }
+});
