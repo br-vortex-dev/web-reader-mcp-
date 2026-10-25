@@ -454,11 +454,14 @@ const MARCA_FRAMEWORK =
 const RAIZ_VAZIA =
   /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/;
 // Ter <script> nao basta para chamar a pagina de dinamica (quase toda pagina
-// estatica tem um) — por isso isto NAO entra no htmlIndicaDinamico. Serve so
-// como o sinal fraco que autoriza o aviso de "texto curto" no read_page: numa
-// pagina com scripts, texto curto quer dizer "falta aqui"; sem scripts, quer
-// dizer "a pagina e pequena mesmo".
+// estatica tem um, ate o example.com) — por isso isto NAO entra no
+// htmlIndicaDinamico. E o tamanho do documento tambem nao basta sozinho. O que
+// entrega a casca e a desproporcao: um documento de 200 KB que devolve 95
+// caracteres esconde o texto; uma pagina de 600 bytes que devolve 156 e uma
+// pagina pequena de verdade, e o aviso nela seria ruido que manda chamar outra
+// ferramenta a toa (medido em producao, no example.com).
 const TEM_SCRIPT = /<script[\s>]/i;
+const HTML_MINIMO_CASCA = 8192;
 
 /**
  * O HTML carrega sinais de que o conteudo vem de JavaScript?
@@ -688,11 +691,13 @@ export async function toolReadPage(args = {}) {
   // pagina renderizada por JS quase sempre deixa migalhas — o <h1>, o link de
   // login. Medido em producao: 95 caracteres entregues como se fossem a pagina
   // toda, sem nada que dissesse "procura noutro lado". O texto curto so vira
-  // aviso quando o HTML da sinal de JavaScript: uma pagina de 156 caracteres
-  // sem um script e uma pagina pequena, nao uma casca.
+  // aviso com o documento a indicar JavaScript (ver HTML_MINIMO_CASCA): o
+  // contrario troca uma pagina quebada por uma pagina curta.
   const estaticoCurto = markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL;
+  const cascaDeJavaScript =
+    htmlIndicaDinamico(html) || (TEM_SCRIPT.test(html) && html.length > HTML_MINIMO_CASCA);
   let extraLabel =
-    markdown.trim().length === 0 || (estaticoCurto && (htmlIndicaDinamico(html) || TEM_SCRIPT.test(html)))
+    markdown.trim().length === 0 || (estaticoCurto && cascaDeJavaScript)
       ? `Aviso: conteudo estatico muito curto (${markdown.trim().length} caracteres) — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page.`
       : undefined;
   if (payload.cortado && payload.perdeuTexto) {

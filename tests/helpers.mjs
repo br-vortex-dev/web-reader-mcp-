@@ -526,14 +526,33 @@ export async function startFixture({ robots = "regras" } = {}) {
     // link de login), exatamente o que a pagina real que motivou este caso
     // devolvia: 95 caracteres. O aviso antigo so disparava com 0 caracteres,
     // entao isto saia como se fosse a pagina toda.
+    // O enchimento nao e enfeite: uma casca de verdade traz o CSS e o estado
+    // dentro do proprio HTML, e o documento chega a centenas de KB. Sem ele o
+    // fixture nao tinha o tamanho que a regra exige, e o teste passava por um
+    // motivo falso.
     if (path === "/casca") {
+      const estoque = "<style>" + ".grelha > *{display:grid;gap:1rem;}.card{padding:.5rem 1rem;}".repeat(200) + "</style>";
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(
-        '<!DOCTYPE html><html><head><title>Casca</title></head><body>' +
+        '<!DOCTYPE html><html><head><title>Casca</title>' + estoque + "</head><body>" +
           '<div class="topo"><h1><a href="/">Casca de JS</a></h1><p>Login</p></div>' +
           '<div class="grelha"></div>' +
           '<script src="/app.js"></script><script>/* monta as caixas no cliente */</script>' +
           "</body></html>"
+      );
+      return;
+    }
+
+    // /analitico -> pagina CURTA que TEM um script (so um beacon externo, como
+    // o example.com traz). Foi o falso positivo que so apareceu no ar: o texto
+    // entregue e a pagina toda, mas um teste que olha apenas "tem <script>?"
+    // chama-lhe casca e manda o cliente procurar noutro lado a toa.
+    if (path === "/analitico") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html><head><title>Curta com analitico</title></head><body>' +
+          "<h1>Dominio de exemplo</h1><p>Esta pagina e pequena, completa, e carrega um script de medicao.</p>" +
+          '<script src="/s.js"></script></body></html>'
       );
       return;
     }

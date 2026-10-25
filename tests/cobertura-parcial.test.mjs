@@ -101,6 +101,16 @@ test("read_page: pagina curta SEM script nao e chamada de casca de JavaScript", 
   assert.doesNotMatch(r.text, /muito curto/, "pagina pequena de verdade nao e pagina quebrada");
 });
 
+test("read_page: pagina curta COM script de analitico nao e chamada de casca", async () => {
+  // O caso que so apareceu no ar: o example.com entrega 156 caracteres — a
+  // pagina toda — e carrega um beacon externo. "Tem <script>?" sozinho chama
+  // isso de casca e manda o cliente chamar read_dynamic_page a toa.
+  const r = await mcp.call("read_page", { url: `${fixture.url}/analitico` });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Dominio de exemplo/);
+  assert.doesNotMatch(r.text, /muito curto/, "documento pequeno com um script e uma pagina completa");
+});
+
 test("read_page: pagina cheia nao leva nenhum aviso de casca", async () => {
   const r = await mcp.call("read_page", { url: `${fixture.url}/longa` });
   assert.equal(r.isError, false);
