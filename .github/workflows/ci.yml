@@ -1,8 +1,8 @@
 name: ci
 
 # O projeto não tem dependências, por isso não há `npm install` nem lockfile a
-# restaurar: só Node e a suite própria. Cada push corre os 36+ ficheiros de teste
-# (~1 min) e os dois linters da casa (imports e exports órfãos).
+# restaurar: só Node e a suite própria. Cada push corre o lint de imports, os 37
+# ficheiros de teste (~1 min) e o ponta a ponta pelo stdio.
 on:
   push:
     branches: ["**"]
@@ -30,5 +30,18 @@ jobs:
       - name: Suite
         run: npm test
 
+      # O smoke test fala com sites reais, e eles falham: `example.com` respondeu
+      # 503 numa corrida do Node 18 e 200 em tudo o resto (o produto já tenta o
+      # 503 — src/fetch.mjs). Uma janela má do site não é regressão do código,
+      # então há novas tentativas; três falhas seguidas já são sinal de outra coisa.
       - name: Ponta a ponta pelo stdio
-        run: npm run test:e2e
+        run: |
+          for tentativa in 1 2 3; do
+            if npm run test:e2e; then
+              exit 0
+            fi
+            echo "tentativa $tentativa/3 falhou (rede externa?); a tentar de novo..."
+            sleep 30
+          done
+          echo "o smoke test falhou 3 vezes seguidas"
+          exit 1
