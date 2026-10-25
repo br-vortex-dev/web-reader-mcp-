@@ -101,7 +101,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (37 arquivos, 319 testes, ~61 s, sem rede na maioria):
+Roda os arquivos de `tests/` (38 arquivos, 327 testes, ~65 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -134,6 +134,7 @@ Roda os arquivos de `tests/` (37 arquivos, 319 testes, ~61 s, sem rede na maiori
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
+| `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` recusa gravar marca de texto parcial — duas chamadas seguidas na mesma página gigante continuam sem marca — e `read_page` avisa na casca de JavaScript que deixa migalhas, sem avisar na página pequena de verdade |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão); **concorrência**: 12 `tools/list` simultâneos sem trocar o id, 16 pedidos na fila de admissão com só 2 vagas, e o cliente que morre no meio do corpo (a vaga volta e o servidor segue atendendo) |
 | `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
@@ -159,9 +160,18 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ```bash
 npm run test:e2e      # cliente MCP mínimo: lista e exercita as 12 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
+npm run test:stress   # bateria cronometrada de sites pesados, lentos e difíceis no ar
 ```
 
 Roda um cliente MCP mínimo que conecta no servidor, lista as ferramentas e exercita todas elas.
+
+A bateria de peso (`npm run test:stress -- https://SEU-APP.onrender.com <token>`, ou
+`LIVE_TEST_TOKEN`) chama as ferramentas contra sites que só dão trabalho de verdade —
+o documento de 12 MB do WHATWG, o PDF grande da RFC 9110, um download de 200 MB, host
+que demora 20 s a responder, TLS rebentado, robots que proíbe, SPA vazia e as
+codificações de SSRF que escapam a um filtro ingénuo — e cronometra cada chamada. O
+`test:live` confirma o contrato; este procura o que só aparece com carga real. O token
+é passado por argumento ou por variável de ambiente; nada dele vai para arquivo.
 
 ### Medir latência em sites reais
 
@@ -236,7 +246,7 @@ web-reader-mcp/
 ├── dev/               <- material de desenvolvimento (nao e produto)
 │   ├── campo/         <- bateria de campo: driver + saidas brutas de 70 casos
 │   └── load/          <- harness de carga e script k6
-└── scripts/           <- clientes MCP manuais (smoke-test, live-test, benchmarks)
+└── scripts/           <- clientes MCP manuais (smoke-test, live-test, stress-peso, benchmarks)
 ```
 
 O `.gitignore` já cobre `node_modules/`, `.env`, logs e arquivos de editor. Se um
@@ -338,7 +348,7 @@ docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token \
   -e SNAPSHOT_DIR=/data/marcas -v web-reader-marcas:/data/marcas web-reader-mcp
 ```
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.1 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
