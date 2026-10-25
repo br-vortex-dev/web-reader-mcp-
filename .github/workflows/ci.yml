@@ -1,0 +1,34 @@
+name: ci
+
+# O projeto não tem dependências, por isso não há `npm install` nem lockfile a
+# restaurar: só Node e a suite própria. Cada push corre os 36+ ficheiros de teste
+# (~1 min) e os dois linters da casa (imports e exports órfãos).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `engines.node` declara >=18; testamos o piso e o que roda no Render.
+        node: ["18", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Lint de imports (nenhum import para ficheiro que não existe)
+        run: node scripts/check-imports.mjs
+
+      - name: Suite
+        run: npm test
+
+      - name: Ponta a ponta pelo stdio
+        run: npm run test:e2e
