@@ -157,8 +157,8 @@ export class ParametroInvalidoError extends WebReaderError {
 
 export class LimiteExcedidoError extends WebReaderError {
   constructor(recurso, limite, recebido) {
-    // "Máximo" com acento de propósito: a mensagem é lida por uma IA e o
-    // smoke-test casa exatamente /Maximo de <limite>/ nela.
+    // A mensagem é lida por uma IA, e o smoke-test casa "Máximo de 30" (com
+    // acento) nela: scripts/smoke-test.mjs:156. Mudar o texto é mudar o teste.
     super(
       `Limite excedido para ${recurso}: ${recebido} (Máximo de ${limite}). Divida em várias chamadas.`,
       { code: "LIMITE_EXCEDIDO" }

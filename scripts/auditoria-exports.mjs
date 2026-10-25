@@ -1,5 +1,5 @@
 // Auditoria de exports orfaos: quais simbolos de src/ nenhum outro arquivo
-// menciona? Uso: node dev/_auditoria-exports.mjs
+// menciona? Uso: node scripts/auditoria-exports.mjs
 //
 // Nao e prova de codigo morto (um export pode ser API publica do modulo),
 // e sim um mapa de onde olhar. Export usado por namespace (import * as X)

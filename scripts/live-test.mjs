@@ -6,7 +6,7 @@
 //   ROTAS     GET / e /health (200), GET /mcp (405), POST /mcp sem token (401),
 //             token errado (401), JSON invalido (400), corpo > 1 MB (413),
 //             metodo e ferramenta inexistentes (erro limpo, sem 5xx)
-//   FERRAM.   as 7 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
+//   FERRAM.   as 12 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
 //             redirect http->https, fidelidade (tabela GFM, acentos,
 //             indentacao de codigo) e cache (2a leitura mais rapida)
 //

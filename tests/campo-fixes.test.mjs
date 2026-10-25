@@ -1,5 +1,5 @@
 // Regressoes da rodada de campo: cada teste aqui eh um bug REAL encontrado
-// na bateria de 70 casos na web real (RELATORIO-CAMPO.md). Nenhum deles
+// na bateria de 70 casos na web real (docs/RELATORIO-CAMPO.md). Nenhum deles
 // passava antes das correcoes — por isso este arquivo comeca vermelho.
 //
 // Mapa bug -> teste:
