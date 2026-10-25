@@ -522,6 +522,35 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /casca -> casca de JavaScript com MIGALHAS de texto estatico (o titulo e o
+    // link de login), exatamente o que a pagina real que motivou este caso
+    // devolvia: 95 caracteres. O aviso antigo so disparava com 0 caracteres,
+    // entao isto saia como se fosse a pagina toda.
+    if (path === "/casca") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html><head><title>Casca</title></head><body>' +
+          '<div class="topo"><h1><a href="/">Casca de JS</a></h1><p>Login</p></div>' +
+          '<div class="grelha"></div>' +
+          '<script src="/app.js"></script><script>/* monta as caixas no cliente */</script>' +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /pequena -> pagina CURTA mas de texto de verdade, sem um script nenhum.
+    // O contraste que a /casca precisa: tamanho sozinho nao e sinal de casca,
+    // senao toda pagina pequena receberia o aviso de JavaScript.
+    if (path === "/pequena") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html><head><title>Pequena</title></head><body>' +
+          "<h1>Pagina Pequena</h1><p>Esta pagina e pequena e nao tem scripts.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
     // BUG-6: 403 definitivo, com contador — retry aparece como contagem > 1.
     if (path === "/negado") {
       contagem.set("/negado", (contagem.get("/negado") || 0) + 1);

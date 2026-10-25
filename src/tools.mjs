@@ -69,6 +69,7 @@ import {
   FerramentaDesconhecidaError,
   CrawlError,
   RespostaMuitoGrandeError,
+  TextoIncompletoError,
 } from "./errors.mjs";
 
 /* ===================================================================== *
@@ -452,6 +453,12 @@ const MARCA_FRAMEWORK =
   /__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|window\.__data|data-reactroot|data-reactid|ng-app|vue-app/i;
 const RAIZ_VAZIA =
   /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/;
+// Ter <script> nao basta para chamar a pagina de dinamica (quase toda pagina
+// estatica tem um) — por isso isto NAO entra no htmlIndicaDinamico. Serve so
+// como o sinal fraco que autoriza o aviso de "texto curto" no read_page: numa
+// pagina com scripts, texto curto quer dizer "falta aqui"; sem scripts, quer
+// dizer "a pagina e pequena mesmo".
+const TEM_SCRIPT = /<script[\s>]/i;
 
 /**
  * O HTML carrega sinais de que o conteudo vem de JavaScript?
@@ -677,9 +684,16 @@ export async function toolReadPage(args = {}) {
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
+  // O aviso de "casca de JavaScript" disparava so com 0 caracteres, mas uma
+  // pagina renderizada por JS quase sempre deixa migalhas — o <h1>, o link de
+  // login. Medido em producao: 95 caracteres entregues como se fossem a pagina
+  // toda, sem nada que dissesse "procura noutro lado". O texto curto so vira
+  // aviso quando o HTML da sinal de JavaScript: uma pagina de 156 caracteres
+  // sem um script e uma pagina pequena, nao uma casca.
+  const estaticoCurto = markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL;
   let extraLabel =
-    markdown.trim().length === 0
-      ? "Aviso: 0 caracteres de conteudo estatico — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page."
+    markdown.trim().length === 0 || (estaticoCurto && (htmlIndicaDinamico(html) || TEM_SCRIPT.test(html)))
+      ? `Aviso: conteudo estatico muito curto (${markdown.trim().length} caracteres) — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page.`
       : undefined;
   if (payload.cortado && payload.perdeuTexto) {
     extraLabel = `${extraLabel ? extraLabel + " " : ""}Aviso: o download foi interrompido no teto de bytes e a pagina continuava — se o fim dela importa, peca de novo.`;
@@ -739,11 +753,27 @@ export async function toolFindOnPage(args = {}) {
     }
   }
 
+  // Cobertura da busca. Ha dois modos de a ferramenta ver so um pedaço da
+  // pagina: o download cortado no teto de bytes, e — o caso que faltava aqui —
+  // a conversao parada no teto de saida. Na parada antecipada a pagina desce
+  // inteira (dentro do teto de documento), mas so a frente dela vira texto, e a
+  // busca roda sobre esse texto. Sem o aviso, "nenhuma ocorrencia" e
+  // indistinguivel de "nao cheguei ate la" e o cliente conclui que o termo nao
+  // existe na pagina.
+  const avisoCobertura = payload.cortado
+    ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
+      `${payload.bytes} bytes, nao a pagina inteira.`
+    : markdownInterrompida(payload)
+    ? `\nAVISO: a pagina e grande demais para converter inteira — a busca cobriu os primeiros ` +
+      `${conteudo.length} caracteres do texto extraido, nao a pagina toda. O termo pode estar no resto.`
+    : "";
+
   if (total === 0) {
     return (
       `Nenhuma ocorrencia de "${query}" em ${finalUrl}.\n` +
       `A pagina tem ${linhas.length} linha(s) e ${conteudo.length} caracteres. ` +
-      `Confira o termo ou leia a pagina com read_page.`
+      `Confira o termo ou leia a pagina com read_page.` +
+      avisoCobertura
     );
   }
 
@@ -773,12 +803,7 @@ export async function toolFindOnPage(args = {}) {
     `Termo: "${query}"${args.regex ? " (regex)" : ""}\n` +
     `Ocorrencias: ${total} em ${linhas.length} linha(s)` +
     (total > mostradas ? ` — exibindo ${mostradas}` : "") +
-    // Documento gigante: o download foi cortado e a busca cobre só o começo.
-    // Sem este aviso, "nenhuma ocorrência" seria indistinguível de "não achei".
-    (payload.cortado
-      ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
-        `${payload.bytes} bytes, nao a pagina inteira.`
-      : "");
+    avisoCobertura;
   return cabecalho + "\n\n" + blocos.join("\n\n") + (total > usadas ? `\n\n[... ${total - usadas} ocorrencia(s) alem do limite; aumente maxHits ...]` : "");
 }
 
@@ -807,6 +832,15 @@ export async function toolDiffPage(args = {}) {
   }
 
   const conteudo = isConteudoBruto(contentType, html) ? html : markdownMemo(payload);
+
+  // O mesmo motivo do bloqueio acima, por outra causa: com a conversao parada no
+  // teto de saida o download veio inteiro mas o texto nao. Guardar essa marca
+  // deixaria uma pagina de 12 MB "SEM MUDANCA" para tudo o que estivesse alem da
+  // frente convertida — o hash nao conta nada do resto do documento.
+  if (markdownInterrompida(payload)) {
+    throw new TextoIncompletoError(finalUrl, conteudo.length);
+  }
+
   const hashDepois = hashConteudo(conteudo);
 
   const anterior = buscarMarca(chave);
