@@ -54,12 +54,14 @@ import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
 import {
-  snapshots,
+  buscarMarca,
+  guardarMarca,
   chaveSnapshot,
   hashConteudo,
   normalizarParaDiff,
   diffDeLinhas,
   formatarSaidaDiff,
+  TEXTO_DA_MARCA,
 } from "./snapshot.mjs";
 import {
   ParametroInvalidoError,
@@ -807,11 +809,10 @@ export async function toolDiffPage(args = {}) {
   const conteudo = isConteudoBruto(contentType, html) ? html : markdownMemo(payload);
   const hashDepois = hashConteudo(conteudo);
 
-  const marca = snapshots.get(chave);
-  const anterior = marca ? marca.payload : null;
+  const anterior = buscarMarca(chave);
 
   if (!anterior || args.force) {
-    snapshots.set(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, 64 * 1024) }, conteudo.length);
+    void guardarMarca(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, TEXTO_DA_MARCA) }, conteudo.length);
     return formatarSaidaDiff({
       finalUrl,
       primeiraVez: true,
@@ -838,7 +839,7 @@ export async function toolDiffPage(args = {}) {
   const diff = diffDeLinhas(anterior.texto || "", conteudo);
   // A marca avança: o próximo diff mede a partir de agora (é o que a pessoa
   // espera de "o que mudou desde a ultima vez que eu olhei").
-  snapshots.set(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, 64 * 1024) }, conteudo.length);
+  void guardarMarca(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, TEXTO_DA_MARCA) }, conteudo.length);
 
   return formatarSaidaDiff({
     finalUrl,

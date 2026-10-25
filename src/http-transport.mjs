@@ -20,7 +20,7 @@
  *
  * QUEM USA
  *   Usado por: server.mjs (que é o ponto de entrada).
- *   Importa de: config, errors, fetch, tools, video.
+ *   Importa de: config, errors, fetch, tools, video, snapshot.
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
@@ -46,6 +46,7 @@ import {
 import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes, revalidacaoCondicional } from "./fetch.mjs";
 import { conversoesMemo } from "./tools.mjs";
 import { analisesVideo } from "./video.mjs";
+import { estatisticasSnapshot, esperarEscritasDeMarcas } from "./snapshot.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
 // Referência global ao servidor HTTP (para encerramento por erro fatal).
@@ -371,6 +372,7 @@ export function readBody(req, maxBytes) {
  */
 export async function montarTextoHealth(server) {
   const cache = cacheStats();
+  const marcas = estatisticasSnapshot();
   const req_ = admissaoHttp.stats;
   const out = limiteSaida.stats;
   const mem = process.memoryUsage();
@@ -401,6 +403,7 @@ export async function montarTextoHealth(server) {
     ` | condicional: ${revalidacaoCondicional.tentadas} (304 ${revalidacaoCondicional.naoModificadas})`,
     ` | conversoes: ${conversoesMemo.realizadas} (reaproveitadas ${conversoesMemo.caronas})`,
     ` | video: ${analisesVideo.realizadas} (reaproveitadas ${analisesVideo.caronas})`,
+    ` | marcas: ${marcas.entries} (${marcas.persistencia ? "disco" : "memoria"}, escritas ${marcas.gravacoes.escritas}, lidas do disco ${marcas.gravacoes.lidasDoDisco}${marcas.gravacoes.falhas ? `, falhas ${marcas.gravacoes.falhas}` : ""})`,
     ` | sessoes: ${estatisticasSessoes().sessoes} (canais ${estatisticasSessoes().canaisSse})`,
   ].join("");
 }
@@ -1226,9 +1229,13 @@ export function ligarServidor(server, { port, host, rateLimitWindowMs, rateLimit
       limpando.unref();
     }
 
-    server.close(() => {
+    server.close(async () => {
       clearTimeout(prazo);
       clearInterval(limpando);
+      // A última marca do diff_page pode estar na fila de escrita: o SIGTERM do
+      // Render chega exatamente quando o serviço está a ser trocado, que é
+      // quando perder a marca custa (o próximo arranque recomeçaria do zero).
+      await esperarEscritasDeMarcas();
       console.error(`[${SERVER_NAME}] encerrado.`);
       process.exit(0);
     });

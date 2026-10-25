@@ -11,27 +11,224 @@
  *   guardar páginas em memória por horas é justamente o que o cache com TTL
  *   já evita. Sem o texto anterior, respondemos "mudou" com o que dá para
  *   afirmar; com ele (quando o chamador pede), o diff é linha a linha.
+ * - Com SNAPSHOT_DIR, a marca também vai para disco. Sem isso, o restart do
+ *   serviço (ou um segundo worker do WEB_CONCURRENCY) perdia o ponto de
+ *   comparação e a segunda leitura respondia "PRIMEIRA leitura". O nome do
+ *   ficheiro é o hash da chave, nunca a URL, para que nada no caminho venha
+ *   da entrada. Escrita atómica (.tmp + rename) e falha de disco nunca derruba
+ *   a ferramenta: ela degrada para o comportamento só-em-memória.
  * QUEM USA
- *   Usado por: tools.mjs (na ferramenta diff_page).
- *   Importa de: fetch, utils.
+ *   Usado por: tools.mjs (na ferramenta diff_page), http-transport.mjs (/health).
+ *   Importa de: config, fetch, utils.
  */
 
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { CacheLRU } from "./utils.mjs";
 import { chaveCanonica } from "./utils.mjs";
 import { clampTimeoutMs } from "./fetch.mjs";
+import { SNAPSHOT_DIR, SNAPSHOT_TTL_MS, SNAPSHOT_MAX_ENTRIES, SNAPSHOT_MAX_BYTES } from "./config.mjs";
 
 // Marcas por URL. TTL generoso (6 h) porque "o que mudou desde ontem" é um uso
 // legítimo; teto de entradas baixo (500) porque cada marca é pequena mas
 // infinita em cardinalidade — uma varredura grande não pode inflar a memória.
-const TTL_SNAPSHOT_MS = 6 * 60 * 60 * 1000;
-const MAX_SNAPSHOTS = 500;
-
+// Os três números vêm do config (e são os mesmos do disco, para a poda caber).
 export const snapshots = new CacheLRU({
-  ttlMs: TTL_SNAPSHOT_MS,
-  maxEntries: MAX_SNAPSHOTS,
-  maxBytes: 8 * 1024 * 1024, // ~8 MB de hashes + resumos
+  ttlMs: SNAPSHOT_TTL_MS,
+  maxEntries: SNAPSHOT_MAX_ENTRIES,
+  maxBytes: SNAPSHOT_MAX_BYTES, // ~8 MB de hashes + resumos
 });
+
+// Contadores para o /health. `lidasDoDisco` é o que prova que a persistência
+// está a servir o caso real (leitura que não estava na memória desta instância).
+export const gravacoes = { escritas: 0, falhas: 0, lidasDoDisco: 0, descartadas: 0 };
+
+/** Teto do texto normalizado guardado numa marca (o hash é o resto). */
+export const TEXTO_DA_MARCA = 64 * 1024;
+
+let avisosDeDisco = 0;
+let arquivosNoDisco = 0;
+let dirPronto = false;
+let seq = 0;
+let filaDeEscritas = Promise.resolve();
+
+/** Nome do ficheiro da marca: hash da chave, 32 hex. Nunca vem da URL. */
+function nomeDaChave(chave) {
+  return createHash("sha256").update(String(chave), "utf8").digest("hex").slice(0, 32);
+}
+
+function arquivoDaMarca(chave) {
+  if (!SNAPSHOT_DIR) return null;
+  return join(SNAPSHOT_DIR, `${nomeDaChave(chave)}.json`);
+}
+
+function avisar(err, oQue) {
+  gravacoes.falhas++;
+  if (avisosDeDisco++ < 3) {
+    console.error(`[snapshot] falha ao ${oQue}: ${err && err.message ? err.message : err}`);
+  }
+}
+
+/** Lê a marca do disco e devolve o payload (ou null se não há/expirou). */
+function lerDoDisco(chave) {
+  const arquivo = arquivoDaMarca(chave);
+  if (!arquivo) return null;
+  let obj;
+  try {
+    obj = JSON.parse(readFileSync(arquivo, "utf8"));
+  } catch {
+    return null; // sem ficheiro, ou ficheiro corrompido: é como se não houvesse marca
+  }
+  const idade = Date.now() - Number(obj.at || 0);
+  // A chave dentro do ficheiro tem que bater com a chave pedida: sem esta
+  // conferência, um ficheiro trocado furaria a marca de uma URL para outra.
+  if (obj.chave !== chave || typeof obj.hash !== "string" || idade >= SNAPSHOT_TTL_MS) {
+    try {
+      unlinkSync(arquivo);
+      arquivosNoDisco = Math.max(0, arquivosNoDisco - 1);
+      gravacoes.descartadas++;
+    } catch {
+      /* arquivo já se foi */
+    }
+    return null;
+  }
+  return { hash: obj.hash, texto: typeof obj.texto === "string" ? obj.texto : "", bytes: Number(obj.bytes) || 0 };
+}
+
+function escreverAtomico(arquivo, conteudo) {
+  const tmp = `${arquivo}.${process.pid}.${++seq}.tmp`;
+  writeFileSync(tmp, conteudo, "utf8");
+  renameSync(tmp, arquivo);
+}
+
+/**
+ * Grava a marca na memória e, com SNAPSHOT_DIR, em disco. As escritas passam
+ * todas pela mesma fila: dois diffs da mesma URL não escrevem o ficheiro ao
+ * mesmo tempo e a ordem das versões fica a ser a ordem das chamadas.
+ */
+export function guardarMarca(chave, payload, bytes) {
+  snapshots.set(chave, payload, bytes);
+  if (!SNAPSHOT_DIR) return Promise.resolve(false);
+  const arquivo = arquivoDaMarca(chave);
+  const corpo = JSON.stringify({ chave, ...payload, bytes, at: Date.now() });
+  filaDeEscritas = filaDeEscritas.then(() => {
+    try {
+      if (!dirPronto) {
+        mkdirSync(SNAPSHOT_DIR, { recursive: true });
+        dirPronto = true;
+      }
+      escreverAtomico(arquivo, corpo);
+      gravacoes.escritas++;
+      arquivosNoDisco++;
+      if (arquivosNoDisco > SNAPSHOT_MAX_ENTRIES) podar();
+      return true;
+    } catch (err) {
+      avisar(err, "gravar marca");
+      return false;
+    }
+  });
+  return filaDeEscritas;
+}
+
+/** Espera as escritas pendentes. Usado no shutdown para não perder a última marca. */
+export function esperarEscritasDeMarcas() {
+  return filaDeEscritas;
+}
+
+/** Despeja o que expirou e, se ainda não cabe, as mais antigas. */
+function podar() {
+  const agora = Date.now();
+  const marcas = [];
+  for (const nome of readdirSync(SNAPSHOT_DIR)) {
+    if (!nome.endsWith(".json")) continue;
+    const caminho = join(SNAPSHOT_DIR, nome);
+    let at = 0;
+    try {
+      const obj = JSON.parse(readFileSync(caminho, "utf8"));
+      at = Number(obj.at) || statSync(caminho).mtimeMs;
+    } catch {
+      at = statSync(caminho).mtimeMs;
+    }
+    if (agora - at >= SNAPSHOT_TTL_MS) {
+      try {
+        unlinkSync(caminho);
+        gravacoes.descartadas++;
+        continue;
+      } catch {
+        /* segue */
+      }
+    }
+    marcas.push({ caminho, at });
+  }
+  marcas.sort((a, b) => b.at - a.at);
+  for (const m of marcas.slice(SNAPSHOT_MAX_ENTRIES)) {
+    try {
+      unlinkSync(m.caminho);
+      gravacoes.descartadas++;
+    } catch {
+      /* fica para a próxima poda */
+    }
+  }
+  arquivosNoDisco = Math.min(marcas.length, SNAPSHOT_MAX_ENTRIES);
+}
+
+/** Carrega as marcas do disco para a memória. Chamado uma vez no arranque. */
+export function carregarSnapshotsDoDisco() {
+  if (!SNAPSHOT_DIR) return 0;
+  let nomes;
+  try {
+    nomes = readdirSync(SNAPSHOT_DIR).filter((n) => n.endsWith(".json"));
+  } catch {
+    return 0; // diretório ainda não existe: primeira execução, nada a carregar
+  }
+  const marcas = [];
+  for (const nome of nomes) {
+    let obj;
+    try {
+      obj = JSON.parse(readFileSync(join(SNAPSHOT_DIR, nome), "utf8"));
+    } catch {
+      continue;
+    }
+    // O nome tem que bater com o hash da chave declarada dentro: sem esta
+    // conferência, um ficheiro editado à mão furaria uma marca para outra URL.
+    if (typeof obj.chave !== "string" || nome !== `${nomeDaChave(obj.chave)}.json`) continue;
+    const idade = Date.now() - Number(obj.at || 0);
+    if (typeof obj.hash !== "string" || idade >= SNAPSHOT_TTL_MS) continue;
+    marcas.push({
+      chave: obj.chave,
+      payload: { hash: obj.hash, texto: typeof obj.texto === "string" ? obj.texto : "" },
+      bytes: Number(obj.bytes) || 0,
+      at: Number(obj.at),
+    });
+  }
+  // As mais recentes primeiro: se o disco tem mais do que o teto, as velhas
+  // simplesmente não entram (e a poda das que expiraram acontece na escrita).
+  marcas.sort((a, b) => b.at - a.at);
+  let carregadas = 0;
+  for (const m of marcas.slice(0, SNAPSHOT_MAX_ENTRIES)) {
+    snapshots.set(m.chave, m.payload, m.bytes);
+    carregadas++;
+  }
+  arquivosNoDisco = nomes.length;
+  return carregadas;
+}
+
+/**
+ * A marca da URL: memória primeiro, disco depois. O passe no disco é o que faz
+ * um segundo worker (ou um processo recém-reiniciado) ver a marca que o outro
+ * deixou, sem ter que recarregar o diretório inteiro.
+ */export function buscarMarca(chave) {
+  const naMemoria = snapshots.get(chave);
+  if (naMemoria) return naMemoria.payload;
+  const doDisco = lerDoDisco(chave);
+  if (doDisco) {
+    gravacoes.lidasDoDisco++;
+    snapshots.set(chave, { hash: doDisco.hash, texto: doDisco.texto }, doDisco.bytes);
+    return doDisco;
+  }
+  return null;
+}
 
 /** Hash estável do conteúdo convertido. */
 export function hashConteudo(texto) {
@@ -199,9 +396,9 @@ export function chaveSnapshot(url) {
   return chaveCanonica(url);
 }
 
-/** Conveniência para testes e para o /health. */
+/** Estatísticas para testes e para o /health. */
 export function estatisticasSnapshot() {
-  return snapshots.stats();
+  return { ...snapshots.stats(), persistencia: SNAPSHOT_DIR || null, gravacoes: { ...gravacoes } };
 }
 
 export { clampTimeoutMs };

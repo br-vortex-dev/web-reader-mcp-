@@ -19,7 +19,11 @@ COPY package.json ./
 COPY server.js ./
 COPY src ./src
 
-# Cache e memória vivem em processo; nada é gravado em disco.
+# Cache e memória vivem em processo. A única coisa gravada em disco são as
+# marcas do diff_page, e só quando SNAPSHOT_DIR aponta para um diretório
+# escrevível — em Docker, monte um volume nele e elas sobrevivem ao restart do
+# container: `docker run -v marcas:/data/marcas -e SNAPSHOT_DIR=/data/marcas ...`
+RUN mkdir -p /data/marcas && chown -R node:node /data
 USER node
 
 # O Render injeta PORT; localmente o padrão é 3000 (config.mjs).

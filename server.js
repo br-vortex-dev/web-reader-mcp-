@@ -23,12 +23,24 @@
  *   crawl_site(url)              -> lê um site sozinho (BFS pelos links internos)
  */
 
-import { SERVER_NAME, ALLOW_PRIVATE_HOSTS } from "./src/config.mjs";
+import { SERVER_NAME, ALLOW_PRIVATE_HOSTS, SNAPSHOT_DIR } from "./src/config.mjs";
+import { carregarSnapshotsDoDisco } from "./src/snapshot.mjs";
 import { startStdio, startHttp, encerrarPorErro } from "./src/server.mjs";
 
 if (ALLOW_PRIVATE_HOSTS) {
   console.error(
     `[${SERVER_NAME}] AVISO: ALLOW_PRIVATE_HOSTS=1 — o bloqueio de hosts privados/internos está DESLIGADO (apenas uso local).`
+  );
+}
+
+// Marcas do diff_page em disco: recuperadas antes de servir o primeiro pedido.
+if (SNAPSHOT_DIR) {
+  const carregadas = carregarSnapshotsDoDisco();
+  console.error(`[${SERVER_NAME}] marcas do diff_page em ${SNAPSHOT_DIR}: ${carregadas} recuperadas.`);
+} else {
+  console.error(
+    `[${SERVER_NAME}] AVISO: sem SNAPSHOT_DIR — as marcas do diff_page vivem só em memória e ` +
+      `reinício/scale horizontal apagam o ponto de comparação.`
   );
 }
 

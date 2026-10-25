@@ -19,7 +19,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.8.1";
+export const SERVER_VERSION = "1.9.0";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -327,6 +327,22 @@ export const MULTI_MAX_TOTAL_CHARS = Math.max(
 
 // Permite hosts privados (apenas desenvolvimento/testes).
 export const ALLOW_PRIVATE_HOSTS = process.env.ALLOW_PRIVATE_HOSTS === "1";
+
+// Persistência das marcas do diff_page. Vazio = só em memória, e a primeira
+// leitura depois de um reinício volta a ser "PRIMEIRA leitura". Com SNAPSHOT_DIR
+// (ex.: /data/web-reader-mcp) as marcas vão para disco e sobrevivem ao restart e
+// aos workers do WEB_CONCURRENCY. Em host com disco efémero (Render free tier)
+// um redeploy ainda limpa o diretório — isso é do ambiente, não do código.
+export const SNAPSHOT_DIR = String(process.env.SNAPSHOT_DIR || "").trim();
+export const SNAPSHOT_TTL_MS = Math.max(
+  60000,
+  Math.floor(Number(process.env.SNAPSHOT_TTL_MS) || 6 * 60 * 60 * 1000)
+);
+export const SNAPSHOT_MAX_ENTRIES = clampEnv(process.env.SNAPSHOT_MAX_ENTRIES, 500, 1, 100000);
+export const SNAPSHOT_MAX_BYTES = Math.max(
+  65536,
+  Math.floor(Number(process.env.SNAPSHOT_MAX_BYTES) || 8 * 1024 * 1024)
+);
 
 /**
  * Clampa um valor de ambiente entre min e max.

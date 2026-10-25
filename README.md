@@ -25,7 +25,7 @@ sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
 | `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
-| `snapshot.mjs` | `diff_page`: marca por URL (hash do conteúdo + texto normalizado) e diff por linhas (LCS com corte de prefixo/sufixo) do que mudou desde a última leitura. |
+| `snapshot.mjs` | `diff_page`: marca por URL (hash do conteúdo + texto normalizado) e diff por linhas (LCS com corte de prefixo/sufixo) do que mudou desde a última leitura. Com `SNAPSHOT_DIR`, a marca também vive em disco (ficheiro por hash da chave, escrita atómica, leitura atravessa quando a memória não tem) — é o que faz ela sobreviver ao restart e ser vista por outros workers. |
 | `tool-schemas.mjs` | A lista `TOOLS` com os JSON Schemas expostos ao cliente MCP (`tools/list`). |
 | `http-transport.mjs` | O transporte HTTP Streamable: rate limiter, autenticação por token, corpo com teto, **compressão da resposta** (gzip/br conforme `Accept-Encoding`), handlers, `/health` e shutdown limpo. |
 | `server.mjs` | O roteador JSON-RPC (`handleMessage`), o stdio e a montagem do `startHttp` (que delega ao transporte HTTP). |
@@ -97,7 +97,11 @@ caractere (`48`, `57`).
 npm test
 ```
 
-Roda os arquivos de `tests/` (36 arquivos, 308 testes, ~83 s, sem rede na maioria):
+A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.yml`,
+Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
+lint de imports. Não há `npm install`: o CI só precisa do Node.
+
+Roda os arquivos de `tests/` (37 arquivos, 319 testes, ~61 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -129,6 +133,7 @@ Roda os arquivos de `tests/` (36 arquivos, 308 testes, ~83 s, sem rede na maiori
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
+| `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão); **concorrência**: 12 `tools/list` simultâneos sem trocar o id, 16 pedidos na fila de admissão com só 2 vagas, e o cliente que morre no meio do corpo (a vaga volta e o servidor segue atendendo) |
 | `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
@@ -164,6 +169,14 @@ Roda um cliente MCP mínimo que conecta no servidor, lista as ferramentas e exer
 npm run bench     # latência de leitura em 5 sites (3 leituras cada)
 npm run bench:20  # 20 sites em 2 chamadas paralelas de read_multiple_pages
 ```
+
+### Rodada de campo (relatórios)
+
+`docs/RELATORIO-CAMPO.md` é o resultado de 70 casos contra a web pública real, e
+`docs/RELATORIO-CAMPO-FIXES.md` documenta os 8 bugs que ela achou e como cada um
+foi corrigido (um commit por bug, com regressão em `tests/campo-fixes.test.mjs`).
+Ficaram fora do README porque são evidência de uma rodada, não documentação do
+produto — mas são a origem de várias decisões descritas aqui.
 
 ## Como usar no WorkBuddy
 
@@ -217,7 +230,8 @@ web-reader-mcp/
 ├── render.yaml        <- config do Render (precisa estar na raiz do repo)
 ├── .gitignore
 ├── README.md
-├── RELATORIO-CAMPO.md <- relatorio da rodada de campo na web real
+├── LICENSE            <- MIT
+├── docs/              <- relatorios da rodada de campo na web real
 ├── tests/             <- testes automatizados (node:test, sem dependencias)
 ├── dev/               <- material de desenvolvimento (nao e produto)
 │   ├── campo/         <- bateria de campo: driver + saidas brutas de 70 casos
@@ -318,17 +332,23 @@ O `Dockerfile` na raiz sobe a mesma coisa em qualquer lugar: imagem
 ```bash
 docker build -t web-reader-mcp .
 docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token web-reader-mcp
+
+# e, se quiser que as marcas do diff_page sobrevivam ao restart do container:
+docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token \
+  -e SNAPSHOT_DIR=/data/marcas -v web-reader-marcas:/data/marcas web-reader-mcp
 ```
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.8.1 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
    `coalescidas: N (em voo M)` (pedidos que caronaram na junção de buscas),
    `revalidacoes: N (falhas M)` (atualizações em segundo plano),
-   `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas)
-   e `video: N (reaproveitadas M)` (análises de vídeo executadas vs. reaproveitadas —
-   releitura do mesmo vídeo com cache quente não reanalisa).
+   `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas),
+   `video: N (reaproveitadas M)` (análises de vídeo executadas vs. reaproveitadas —
+   releitura do mesmo vídeo com cache quente não reanalisa) e
+   `marcas: N (disco|memoria, escritas E, lidas do disco L[, falhas F])` — as marcas
+   do `diff_page` e onde estão a viver.
 
 ### Conectar o MCP remoto
 
@@ -482,6 +502,10 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção).
 | `MAX_PRAZO_MULTI_MS` | `60000` (60 s) | Teto duro do **prazo final** de `read_multiple_pages` e `crawl_site`. Antes, a resposta só saía quando a ÚLTIMA página terminasse — 29 prontas ficavam presas atrás de uma lenta, e o cliente desistia perdendo tudo. Estourou: devolve o que já leu, avisa quantas faltaram, e o que está em voo segue aquecendo o cache. |
 | `PRAZO_MINIMO_MULTI_MS` | `15000` (15 s) | Piso desse prazo. O prazo efetivo é `max(timeoutMs, este piso)`, limitado ao teto acima — numa chamada de uma URL só o comportamento é idêntico ao de antes. |
 | `MEMO_CONVERSAO` | ligada | `0` desliga a memoização da conversão (HTML → markdown/meta/links). Existe para depurar o parser; não há por quê desligar em produção. |
+| `SNAPSHOT_DIR` | *(vazio = só memória)* | Diretório onde `diff_page` grava as marcas, para sobreviverem ao restart e serem vistas por outros workers. Cada marca é um ficheiro `<hash da chave>.json` com texto normalizado até 64 KB. Vazio = comportamento antigo (marca morre com o processo). |
+| `SNAPSHOT_TTL_MS` | `21600000` (6 h) | Validade de cada marca, em memória **e** em disco — a data da gravação vai no ficheiro, então o TTL não reinicia a cada arranque. Marca vencida é descartada, não comparada. |
+| `SNAPSHOT_MAX_ENTRIES` | `500` | Teto de marcas guardadas (memória e disco). Passou do teto, as mais antigas saem do disco na próxima gravação. |
+| `SNAPSHOT_MAX_BYTES` | `8388608` (8 MB) | Teto em bytes das marcas na memória. |
 | `ROBOTS_RESPECT` | ligado | `0` **desliga** o respeito ao `robots.txt` (veja a seção acima). |
 | `ROBOTS_TTL_MS` | `900000` (15 min) | Validade da leitura do `robots.txt` por origem. Falha em ler vale o `ROBOTS_NEGATIVE_TTL_MS` (padrão igual a este, piso de 60 s). |
 | `ROBOTS_TIMEOUT_MS` | `2500` | Timeout da busca do `robots.txt` (0,5 s–15 s). |
@@ -985,6 +1009,18 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
   comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é
   um hash + o texto normalizado, com TTL — não páginas inteiras em memória.
+- **A marca pode ir para disco** (`SNAPSHOT_DIR`). Só em memória, o ponto de
+  comparação morre com o processo: um segundo worker do `WEB_CONCURRENCY`, ou
+  simplesmente reiniciar o serviço, respondia "PRIMEIRA leitura" a uma página já
+  marcada. Com `SNAPSHOT_DIR=/caminho` cada marca é escrita num ficheiro (nome =
+  hash da chave, nunca a URL; escrita atómica com `.tmp` + `rename`) e lida por
+  qualquer processo quando a memória dele não a tem. O SIGTERM também espera a
+  última escrita antes de sair. Falha de disco não derruba a ferramenta — volta
+  a ser só em memória e o `/health` conta a falha (`marcas: N (disco, ...)`).
+  Onde isto vale de verdade: Docker/VPS com volume montado e cluster na mesma
+  máquina. No Render gratuito não há volume persistente, então o diretório é do
+  contentor: redeploy e cold start depois do spin-down limpam-no (o
+  `keep-alive.yml` só evita o sleep, não reinicia nada).
 
 ## Sessão e SSE (a spec do transporte HTTP)
 
@@ -1034,3 +1070,7 @@ vazia"**. O contrato é:
   quem recebe a conexão.
 - Só o que o site embute no HTML é extraído: JavaScript que monta o conteúdo
   depois do carregamento (client-side puro) não aparece.
+- **Marcas do `diff_page` sem `SNAPSHOT_DIR` vivem só na memória do processo**:
+  restart ou segundo worker recomeçam a contagem ("PRIMEIRA leitura"). Com
+  `SNAPSHOT_DIR` o restart fica coberto; um redeploy para um contentor novo não,
+  porque o disco do Render é efémero.
