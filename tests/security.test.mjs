@@ -114,6 +114,34 @@ test("recusa redirect para protocolo nao suportado", { timeout: 30000 }, async (
   assert.match(r.text, /Redirect inválido: protocolo não suportado/);
 });
 
+/* --------------------- credenciais embutidas na URL --------------------- */
+
+test("recusa user:senha@ na URL e nao repete a senha na resposta", { timeout: 30000 }, async () => {
+  const comCredenciais = fixture.url.replace("http://", "http://usuario:senha-secreta@");
+  const r = await mcpLocal.call("read_page", { url: `${comCredenciais}/pagina`, maxChars: 500 });
+  assert.equal(r.isError, true, "deveria recusar URL com credenciais");
+  assert.match(r.text, /credenciais/i);
+  assert.doesNotMatch(r.text, /senha-secreta/, "a senha nao pode voltar na mensagem de erro");
+});
+
+test("read_multiple_pages ecoa a URL sem as credenciais", { timeout: 60000 }, async () => {
+  const comCredenciais = fixture.url.replace("http://", "http://usuario:senha-secreta@");
+  const r = await mcpLocal.call("read_multiple_pages", {
+    urls: [`${comCredenciais}/pagina`, `${fixture.url}/pagina`],
+    maxChars: 500,
+  });
+  assert.doesNotMatch(r.text, /senha-secreta/, "a senha nao pode voltar no resumo");
+  assert.match(r.text, /Erro ao ler http:\/\/127\.0\.0\.1:\d+\/pagina/, "o eco mantem a URL, sem o userinfo");
+  assert.match(r.text, /Fixture Parser|Titulo/, "a URL valida da lista continua sendo lida");
+});
+
+test("redirect para URL com credenciais e recusado sem vazar a senha", { timeout: 30000 }, async () => {
+  const r = await mcpLocal.call("read_page", { url: `${fixture.url}/redirect-credenciais`, maxChars: 500 });
+  assert.equal(r.isError, true, "deveria recusar o salto com credenciais");
+  assert.match(r.text, /credenciais/i);
+  assert.doesNotMatch(r.text, /senha-do-redirect/, "a senha do Location nao pode voltar na mensagem");
+});
+
 // Este e o unico caso que precisa de um host PUBLICO que redirecione para um IP
 // interno (o alvo precisa ser publico para passar da primeira checagem e so
 // entao esbarrar na revalidacao do salto). Sem internet, o teste e pulado.

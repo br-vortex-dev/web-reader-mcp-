@@ -88,6 +88,25 @@ export function chaveCanonica(url) {
 }
 
 /**
+ * Devolve a URL sem `user:senha@`, para ecoar numa resposta.
+ *
+ * A recusa de credenciais acontece na validação (ver validateHttpUrl); isto é
+ * a rede de baixo: um caminho que ecoe a URL crua não pode transformar a
+ * mensagem de erro no lugar onde a senha aparece.
+ */
+export function urlSemCredenciais(url) {
+  try {
+    const u = new URL(String(url));
+    if (!u.username && !u.password) return String(url);
+    u.username = "";
+    u.password = "";
+    return u.href;
+  } catch {
+    return String(url).replace(/\/\/[^/@]*@/, "//");
+  }
+}
+
+/**
  * Fila FIFO com índice de cabeça (evita shift()/splice() O(n)).
  */
 export function criarFila() {

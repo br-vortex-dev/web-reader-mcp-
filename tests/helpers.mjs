@@ -447,6 +447,14 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // Redirect para uma URL com credenciais embutidas: o salto seguinte seria
+    // baixado SEM elas, e o finalUrl as levaria para a resposta.
+    if (path === "/redirect-credenciais") {
+      res.writeHead(302, { location: `http://usuario:senha-do-redirect@127.0.0.1:${server.address().port}/pagina` });
+      res.end();
+      return;
+    }
+
     // ---- fixtures da rodada de correcoes (bugs da bateria de campo) ----
 
     // BUG-1: robots.txt de verdade (texto puro). Com as quebras coladas,
@@ -538,6 +546,24 @@ export async function startFixture({ robots = "regras" } = {}) {
           '<div class="topo"><h1><a href="/">Casca de JS</a></h1><p>Login</p></div>' +
           '<div class="grelha"></div>' +
           '<script src="/app.js"></script><script>/* monta as caixas no cliente */</script>' +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /casca-pequena -> o quotes.toscrape.com/js real: 5,8 KB de HTML com
+    // jQuery e um script que monta a lista, e 95 caracteres de texto (o h1 e
+    // o link de login). Nao passa do piso de 8 KB, entao e o caso que prova
+    // que a regra e a desproporcao, nao o tamanho absoluto.
+    if (path === "/casca-pequena") {
+      const jquery =
+        "<script>" + "/* jquery-like: cada linha so serve para ocupar bytes como um bundle real */\n".repeat(60) + "</script>";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html><head><title>Quotes to Scrape</title>' + jquery + "</head><body>" +
+          '<div class="container"><h1><a href="/">Quotes to Scrape</a></h1>' +
+          '<p><a href="/login">Login</a></p><div class="quotes"></div></div>' +
+          '<script src="/static/quotes.js"></script>' +
           "</body></html>"
       );
       return;

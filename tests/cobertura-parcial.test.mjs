@@ -94,6 +94,16 @@ test("read_page: casca de JavaScript com migalhas de texto e marcada como casca"
   assert.match(r.text, /Tente read_dynamic_page/);
 });
 
+test("read_page: casca pequena (5 KB, 95 caracteres) tambem e marcada", async () => {
+  // O caso real quotes.toscrape.com/js: HTML de 5,8 KB com jQuery e scripts,
+  // 95 caracteres visiveis. Fica abaixo de qualquer piso de tamanho; quem a
+  // denuncia e a desproporcao entre bytes e texto.
+  const r = await mcp.call("read_page", { url: `${fixture.url}/casca-pequena` });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /conteudo estatico muito curto/);
+  assert.match(r.text, /Tente read_dynamic_page/);
+});
+
 test("read_page: pagina curta SEM script nao e chamada de casca de JavaScript", async () => {
   const r = await mcp.call("read_page", { url: `${fixture.url}/pequena` });
   assert.equal(r.isError, false);

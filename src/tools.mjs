@@ -63,6 +63,7 @@ import {
   formatarSaidaDiff,
   TEXTO_DA_MARCA,
 } from "./snapshot.mjs";
+import { urlSemCredenciais } from "./utils.mjs";
 import {
   ParametroInvalidoError,
   LimiteExcedidoError,
@@ -455,13 +456,17 @@ const RAIZ_VAZIA =
   /<div[^>]+id=["']root["'][^>]*>\s*<\/div>|<div[^>]+id=["']app["'][^>]*>\s*<\/div>/;
 // Ter <script> nao basta para chamar a pagina de dinamica (quase toda pagina
 // estatica tem um, ate o example.com) — por isso isto NAO entra no
-// htmlIndicaDinamico. E o tamanho do documento tambem nao basta sozinho. O que
-// entrega a casca e a desproporcao: um documento de 200 KB que devolve 95
-// caracteres esconde o texto; uma pagina de 600 bytes que devolve 156 e uma
-// pagina pequena de verdade, e o aviso nela seria ruido que manda chamar outra
-// ferramenta a toa (medido em producao, no example.com).
+// htmlIndicaDinamico. Nem o tamanho absoluto basta: o que separa os dois casos
+// reais que ja apareceram e a DESPROPORCAO. O example.com entrega 156
+// caracteres num documento de 620 bytes (a pagina toda); o
+// quotes.toscrape.com/js entrega 95 num documento de 5,8 KB de jQuery e
+// scripts que montam a lista. Um documento que gasta muitos bytes para dizer
+// quase nada e uma casca; um documento minusculo que diz tudo o que tem e uma
+// pagina curta. O piso de bytes evita que um beacon em pagina minuscula entre
+// so pela proporcao.
 const TEM_SCRIPT = /<script[\s>]/i;
-const HTML_MINIMO_CASCA = 8192;
+const CASCA_PISO_BYTES = 4096;
+const CASCA_PROPORCAO = 16;
 
 /**
  * O HTML carrega sinais de que o conteudo vem de JavaScript?
@@ -691,11 +696,13 @@ export async function toolReadPage(args = {}) {
   // pagina renderizada por JS quase sempre deixa migalhas — o <h1>, o link de
   // login. Medido em producao: 95 caracteres entregues como se fossem a pagina
   // toda, sem nada que dissesse "procura noutro lado". O texto curto so vira
-  // aviso com o documento a indicar JavaScript (ver HTML_MINIMO_CASCA): o
+  // aviso com o documento a indicar casca (ver CASCA_PROPORCAO): o
   // contrario troca uma pagina quebada por uma pagina curta.
-  const estaticoCurto = markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL;
+  const textoVisivel = markdown.replace(/\s+/g, " ").trim().length;
+  const estaticoCurto = textoVisivel < TEXTO_MINIMO_UTIL;
   const cascaDeJavaScript =
-    htmlIndicaDinamico(html) || (TEM_SCRIPT.test(html) && html.length > HTML_MINIMO_CASCA);
+    htmlIndicaDinamico(html) ||
+    (TEM_SCRIPT.test(html) && html.length >= CASCA_PISO_BYTES && html.length > CASCA_PROPORCAO * (textoVisivel + 1));
   let extraLabel =
     markdown.trim().length === 0 || (estaticoCurto && cascaDeJavaScript)
       ? `Aviso: conteudo estatico muito curto (${markdown.trim().length} caracteres) — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page.`
@@ -980,7 +987,7 @@ export async function toolReadMultiplePages(args = {}) {
       try {
         lidos[posicao] = { ok: true, text: (await lerPaginaCompleta(url, maxChars, timeoutMs)).conteudo };
       } catch (err) {
-        lidos[posicao] = { ok: false, text: `# Erro ao ler ${url}\n${err.message}` };
+        lidos[posicao] = { ok: false, text: `# Erro ao ler ${urlSemCredenciais(url)}\n${err.message}` };
       }
     }
   };
@@ -1410,7 +1417,7 @@ export async function toolCrawlSite(args = {}) {
         enfileirarLinks(r.links);
       } else {
         falhas.push({ url: r.url, motivo: classifyFetchError(r.erro), mensagem: r.erro.message });
-        conteudos.push(`# Erro ao ler ${r.url}\n${r.erro.message}`);
+        conteudos.push(`# Erro ao ler ${urlSemCredenciais(r.url)}\n${r.erro.message}`);
       }
       acordar();
     }

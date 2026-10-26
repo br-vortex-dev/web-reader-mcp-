@@ -1,6 +1,6 @@
 {
   "name": "web-reader-mcp",
-  "version": "1.9.2",
+  "version": "1.9.3",
   "description": "MCP feito do zero (zero dependencias) para ler paginas web, extrair links e renderizar paginas com JavaScript.",
   "type": "module",
   "main": "server.js",

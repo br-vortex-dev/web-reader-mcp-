@@ -48,6 +48,19 @@ export class ProtocoloNaoSuportadoError extends WebReaderError {
   }
 }
 
+export class CredenciaisNaUrlError extends WebReaderError {
+  // A mensagem NÃO repete a URL: é justamente por ela carregar a senha que a
+  // recusa existe. Só o host vai para a resposta.
+  constructor(host) {
+    super(
+      `A URL traz credenciais (user:senha@${host}). Este servidor não as envia na requisição — aceitá-las ` +
+        `colocaria a senha na chave de cache e na resposta. Retire o user:senha@ do endereço.`,
+      { code: "CREDENCIAIS_NA_URL", host }
+    );
+    this.name = "CredenciaisNaUrlError";
+  }
+}
+
 export class HostBloqueadoError extends WebReaderError {
   constructor(host, endereco) {
     super(`Host bloqueado: endereço privado/interno (${endereco})`, {

@@ -66,6 +66,7 @@ import { extractMeta, hostOf } from "./html-parser.mjs";
 import {
   UrlInvalidaError,
   ProtocoloNaoSuportadoError,
+  CredenciaisNaUrlError,
   RedirectError,
   HttpError,
   ConteudoNaoHtmlError,
@@ -686,6 +687,12 @@ export function validateHttpUrl(url) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new ProtocoloNaoSuportadoError(parsed.protocol, url);
   }
+  // O transporte (net.mjs) monta o pedido com pathname+search e ignora o
+  // userinfo: a "autenticação" nunca acontece. Aceitar a URL só rendia um 401
+  // enigmático e a senha em claro na chave de cache e na resposta.
+  if (parsed.username || parsed.password) {
+    throw new CredenciaisNaUrlError(parsed.host);
+  }
   return parsed;
 }
 
@@ -742,6 +749,11 @@ async function buscarComRedirects(url, headers, signal) {
     }
     if (next.protocol !== "http:" && next.protocol !== "https:") {
       throw new RedirectError(`protocolo não suportado (${next.protocol})`, currentUrl);
+    }
+    // Redirect não é porta de entrada para credenciais: o salto seguinte seria
+    // baixado sem elas, e o finalUrl as levaria para a resposta e o cache.
+    if (next.username || next.password) {
+      throw new CredenciaisNaUrlError(next.host);
     }
     currentUrl = next.href;
   }
