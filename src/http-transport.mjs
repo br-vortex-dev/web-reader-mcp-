@@ -44,7 +44,7 @@ import {
   clampEnv,
 } from "./config.mjs";
 import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, coalescedorDeBuscas, revalidacoes, revalidacaoCondicional } from "./fetch.mjs";
-import { conversoesMemo } from "./tools.mjs";
+import { conversoesMemo } from "./conversao.mjs";
 import { analisesVideo } from "./video.mjs";
 import { estatisticasSnapshot, esperarEscritasDeMarcas } from "./snapshot.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";

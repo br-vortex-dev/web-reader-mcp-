@@ -73,7 +73,6 @@ import {
   RedeError,
   TimeoutError,
   RequisicaoCanceladaError,
-  RespostaMuitoGrandeError,
   WebReaderError,
 } from "./errors.mjs";
 
@@ -852,7 +851,7 @@ export function isConteudoBruto(contentType, html) {
  * Formata um conteúdo cru (texto puro/XML) para retorno.
  */
 export function conteudoBrutoResult(html, finalUrl, maxChars) {
-  const texto = html.replace(/\r\n?/g, "\n");
+  const texto = html.indexOf("\r") === -1 ? html : html.replace(/\r\n?/g, "\n");
   const { text, truncated } = truncate(texto, maxChars);
   return formatReadResult({
     finalUrl,

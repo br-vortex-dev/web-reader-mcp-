@@ -7,7 +7,9 @@
 //  - find_on_page numa pagina de 12 MB: o download vem inteiro (o teto de
 //    documento e 24 MB), mas a CONVERSAO para texto para no teto de saida. A
 //    busca rodou sobre ~60 mil caracteres e devolveu "1 ocorrencia" sem nada
-//    que separasse "o termo e raro" de "nao cheguei ate la".
+//    que separasse "o termo e raro" de "nao cheguei ate la". Hoje: se a frente
+//    coberta tem acertos, o aviso continua; se nao tem NENHUM, a pagina e
+//    convertida inteira e buscada de novo antes de dizer "nenhuma ocorrencia".
 //  - diff_page na mesma pagina: gravava marca sobre esse texto parcial, e uma
 //    mudanca no resto do documento leria "SEM MUDANCA".
 //  - read_page numa casca de JavaScript: devolvia 95 caracteres (so o titulo e
@@ -36,14 +38,24 @@ after(async () => {
 
 /* ------------------------- find_on_page: cobertura ------------------------- */
 
-test("find_on_page: termo que so existe depois do teto de conversao avisa que nao cobriu", async () => {
+test("find_on_page: termo que so existe depois do teto de conversao e encontrado", async () => {
+  // Defeito medido no ar: em nodejs.org/api/all.html (20,7 MB) e no spec do
+  // WHATWG a busca so olhava a frente convertida (~59 mil caracteres) e
+  // respondia "nenhuma ocorrencia" para termos que existiam no fim da pagina.
+  // Sem nenhum acerto na frente, a conversao inteira roda e a busca refaz —
+  // entao o termo do fim TEM de sair, sem aviso de cobertura.
   const r = await mcp.call("find_on_page", { url: `${fixture.url}/gigante`, query: "FIM-GIGANTE" });
   assert.equal(r.isError, false);
-  // O termo esta no HTML, mas o texto convertido para antes dele: "nenhuma
-  // ocorrencia" sem aviso diria ao cliente que a pagina nao fala do assunto.
+  assert.match(r.text, /FIM-GIGANTE/, "o termo do fim da pagina foi encontrado");
+  assert.match(r.text, /Ocorrencias: 1/);
+  assert.doesNotMatch(r.text, /AVISO/, "buscou a pagina inteira: nao ha cobertura parcial a avisar");
+});
+
+test("find_on_page: termo inexistente na pagina toda tambem nao leva aviso falso", async () => {
+  const r = await mcp.call("find_on_page", { url: `${fixture.url}/gigante`, query: "NAO-EXISTE-EM-LUGAR-NENHUM" });
+  assert.equal(r.isError, false);
   assert.match(r.text, /Nenhuma ocorrencia/);
-  assert.match(r.text, /AVISO/, "a busca parcial tem de vir sinalizada");
-  assert.match(r.text, /converter inteira/);
+  assert.doesNotMatch(r.text, /AVISO/, "depois da conversao inteira, 'nao existe' e uma resposta completa");
 });
 
 test("find_on_page: com acertos na frente coberta, o aviso de cobertura sai igual", async () => {

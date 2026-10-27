@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em dezesseis módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -21,7 +21,8 @@ sai. O produto mora em `src/`, em quinze módulos com uma responsabilidade cada:
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
 | `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
-| `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site` — já com a **memoização da conversão**. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
+| `conversao.mjs` | A camada **memoizada** de HTML → markdown e links: um WeakMap chaveado pelo payload guarda meta, texto e lista de links, então a mesma página baixada é convertida uma vez só. Também é onde vivem a parada antecipada da conversão e a marca `Conteudo: N+`. |
+| `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
 | `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
@@ -101,12 +102,13 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (38 arquivos, 332 testes, ~61 s, sem rede na maioria):
+Roda os arquivos de `tests/` (39 arquivos, 338 testes, ~64 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
 | `tests/parser.test.mjs` | o parser HTML → markdown: `<` solto no texto, indentação de blocos de código (Python/YAML), tabelas GFM válidas, entidades acentuadas e numéricas |
 | `tests/decode-entidades.test.mjs` | entidades HTML: nomeadas, decimal, hexadecimal, acento do português, `&` solto no texto e o **caso patológico** (muitos `&` sem `;`, cronometrado — trava a regressão do O(n²)) |
+| `tests/meta-extracao.test.mjs` | `extractMeta`: `<META>`/`<Meta>` valem, `<metadata>` não, tag termina no primeiro `>`, primeiro valor vence, `author` só pelo atributo `name` |
 | `tests/aninhamento-profundo.test.mjs` | aninhamento absurdo: texto no fundo de 100.000 `div`s sobrevive, link no fundo tem `href` resolvido e o render não estoura a pilha |
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos), **credenciais na URL e no `Location` recusadas sem ecoar a senha** e rate limit (não burlável por `x-forwarded-for`) |
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
@@ -348,7 +350,7 @@ docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token \
   -e SNAPSHOT_DIR=/data/marcas -v web-reader-marcas:/data/marcas web-reader-mcp
 ```
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.3 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.4 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -597,8 +599,38 @@ O que mudou (tudo medido):
 | Conversão de página de 1 MB (só os ~58 KB entregáveis) | 1249 ms | 80 ms (15x) |
 | Página gigante: download + parse do rabo que nunca sai | tudo baixado e convertido | para no teto entregável, com prefixo byte a byte idêntico |
 | Leitura completa de página de 1,34 MB (markdown + links + meta) | 68,4 ms | 39,1 ms (**1,75x**, 43% menos CPU) |
+| `read_page` da mesma página de 1,34 MB (meta + markdown, sem links) | 17,7 ms | 11,5 ms (**1,55x**, 35% menos CPU) |
+| `multi/crawl` da mesma página (meta + markdown + links) | 17,5 ms | 14,4 ms (**1,22x**, 18% menos CPU) |
+| `extractMeta` (varredura das tags `<meta>`) | 1,0 ms | 0,65 ms (**1,5x**, 34% menos CPU) |
+| Limpeza final do markdown (espaços, cercas, colchetes vazios) | ~10 varreduras em toda página, mesmo sem nenhum gatilho | cada passo só roda quando o gatilho existe; página de texto gigante 7,8 ms → 3,4 ms (**2,3x**, 57% menos CPU) |
 | `parseAttrs` (atributos de tag) | em toda tag, inclusive nas que ninguém lê | só em `<a>`, `<img>` e tags que contêm `aria-hidden` |
 | `decodeEntities` com `&` sem `;` (**fim do O(n²) escondido**) | 80.000 `&` em **369 ms** (o `indexOf(";")` varria o resto do documento) | janela de busca limitada; 40.000 em **2,4 ms**, curva linear |
+
+A segunda rodada de outubro de 2026 atacou o que sobrou no perfil: o tokenizador
+virou callback com **um único token reutilizado** (o generator pagava pausa,
+retomada e dois objetos por token), os atributos de `<a>`/`<img>` ganharam um
+leitor próprio que só materializa `href`, `src`, `alt` e `aria-hidden` (os quatro
+que algum consumidor lê), cada link é resolvido com **uma** `new URL` (antes eram
+duas: `resolveUrl` + `hostOf`), a coleta de links só acontece quando a ferramenta
+devolve links — `read_page`, `find_on_page` e `diff_page` não devolvem — e
+`extractMeta` trocou a varredura por regex das tags `<meta>` por `indexOf("<")`.
+Prova: `dev/_ab-total.mjs` compara o HEAD anterior com a versão atual no mesmo
+processo, intercalado, e exige markdown, links e meta **byte a byte idênticos**.
+
+A terceira rodada atacou a **limpeza final**, que varria o markdown inteiro uma
+vez por regex mesmo quando não havia nada para limpar. Agora cada passo só roda
+quando o gatilho existe (`\r`, cerca ` ``` `, tab, espaço antes de quebra,
+espaço duplo, tripla quebra, colchete, `?utm_`), a paridade das cercas da parada
+antecipada é contada com `indexOf` em vez de `match` (sem alocar um array com
+uma entrada por cerca) e o texto puro/XML só normaliza CRLF quando há `\r`.
+Página sem esses gatilhos deixa de pagar as varreduras dos passos que não têm
+nada para limpar; a página de texto gigante (um único nó de 1,4 MB) caiu de
+7,8 ms para 3,4 ms de conversão. Prova:
+`dev/_ab-limpeza-iso.mjs` (idêntico byte a byte em quatro cargas, inclusive a
+página real) e `dev/_ab-limpeza-head.mjs` (16 páginas sintéticas contra o HEAD:
+cerca ímpar, colchetes aninhados, NUL literal, utm, CRLF e texto gigante).
+Uma refatoração do tokenizador para não fatiar o corpo da tag foi medida e
+**descartada**: ficou 2–5% mais lenta que o fatiamento simples do V8.
 
 A correção do `decodeEntities` fecha o último caminho quadrático do parser: a
 busca do `;` de fechamento não tem teto natural, e a entidade nomeada mais longa
@@ -1022,6 +1054,11 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   casam**, com número de linha e contexto. Aceita texto literal (inclusive com
   caracteres de regex, sem surpresa) ou expressão regular com `regex: true`.
   Achar um preço numa leitura de 25.000 caracteres deixou de custar os 25.000.
+  Em página gigante a busca começa no texto já convertido (a frente exibível);
+  se ele não tiver **nenhum** acerto, a página é convertida inteira e buscada de
+  novo antes de responder "nenhuma ocorrência" — o termo do fim não vira falso
+  negativo. Se houver acertos na frente, a resposta sai na hora e **avisa** que
+  o resto não foi coberto.
 - **`diff_page(url)`** relê a URL, compara com a marca da leitura anterior e
   devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
   comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é

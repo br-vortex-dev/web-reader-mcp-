@@ -16,7 +16,8 @@
  *
  * QUEM USA
  *   Usado por: server.mjs (stdio) e http-transport.mjs (HTTP).
- *   Importa de: config, errors, feeds, fetch, html-parser, pdf, snapshot, video.
+ *   Importa de: config, conversao, errors, feeds, fetch, html-parser, pdf,
+ *   snapshot, video.
  */
 
 import { appendFileSync } from "node:fs";
@@ -29,8 +30,6 @@ import {
   MULTI_MAX_TOTAL_CHARS,
   FETCH_CONCURRENCY,
   DEFAULT_MAX_CHARS,
-  HARD_MAX_CHARS,
-  MEMO_CONVERSAO,
   MAX_RESPONSE_BYTES,
   MAX_RESPONSE_BYTES_DOCUMENTO,
   tetoDownloadPara,
@@ -49,7 +48,18 @@ import {
   isConteudoBruto,
   conteudoBrutoResult,
 } from "./fetch.mjs";
-import { htmlToMarkdown, htmlToMarkdownComLinks, extractMeta, extractLinks, hostOf } from "./html-parser.mjs";
+import { hostOf } from "./html-parser.mjs";
+import {
+  memoDoPayload,
+  conversoesMemo,
+  metaMemo,
+  markdownMemo,
+  markdownCompleto,
+  linksMemo,
+  markdownELinksMemo,
+  markdownInterrompida,
+  fullLengthDe,
+} from "./conversao.mjs";
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
@@ -72,131 +82,6 @@ import {
   RespostaMuitoGrandeError,
   TextoIncompletoError,
 } from "./errors.mjs";
-
-/* ===================================================================== *
- * Memoização da conversão (por conteúdo baixado)                          *
- * ===================================================================== */
-
-/**
- * Converter HTML é a parte CARA da leitura (tokenize + htmlToMarkdown ≈ 3 ms
- * por página pequena, mais em páginas grandes). O payload do cache é estável
- * entre acertos — o MESMO objeto é devolvido — então memoizamos meta, markdown
- * e links num WeakMap chaveado por ele: o primeiro toque converte, os
- * seguintes só consultam. Conteúdo novo (TTL vencido, revalidação do SWR) =
- * objeto novo = conversão nova — a invalidação é a identidade do objeto.
- * WeakMap ainda garante que nada fica preso: sem referência, some com o payload.
- *
- * `conversoesMemo` é exposto no /health: `realizadas` são conversões de fato
- * executadas; `caronas` são consultas que acharam o resultado pronto.
- */
-const memoConversao = new WeakMap();
-export const conversoesMemo = { realizadas: 0, caronas: 0 };
-
-function memoDoPayload(payload) {
-  if (!MEMO_CONVERSAO) return null;
-  let entrada = memoConversao.get(payload);
-  if (!entrada) {
-    entrada = {};
-    memoConversao.set(payload, entrada);
-  }
-  return entrada;
-}
-
-function metaMemo(payload) {
-  const memo = memoDoPayload(payload);
-  if (!memo) {
-    conversoesMemo.realizadas++;
-    return extractMeta(payload.text);
-  }
-  if (!("meta" in memo)) {
-    memo.meta = extractMeta(payload.text);
-    conversoesMemo.realizadas++;
-  } else {
-    conversoesMemo.caronas++;
-  }
-  return memo.meta;
-}
-
-/**
- * Opções da conversão para exibição. `minCharsEntregaveis = HARD_MAX_CHARS`
- * liga a PARADA ANTECIPADA do parser: nenhuma leitura entrega mais que o teto
- * (clampMaxChars limita a HARD_MAX_CHARS), então páginas gigantes param de ser
- * convertidas assim que os caracteres entregáveis estão garantidos. O prefixo
- * exibido continua byte a byte idêntico ao da conversão completa — o que deixa
- * de ser feito é o parse do rabo que nunca sairia daqui (chega a 97% do custo
- * em páginas de 1 MB). A memoização compartilha UMA conversão entre todos os
- * usos do payload, então as opções são fixas aqui e valem para todos.
- */
-const OPCOES_MARKDOWN_EXIBIVEL = { minCharsEntregaveis: HARD_MAX_CHARS };
-
-// A parada antecipada pode interromper a conversão de páginas gigantes no teto
-// de saída. O texto entregue continua idêntico (prefixo byte a byte), mas o
-// número `Conteudo: N caracteres` não pode subnotificar a página: quando a
-// conversão foi interrompida, ele sai como `N+` (havia mais além do teto).
-const conversaoInterrompidaDe = new WeakMap();
-
-function markdownInterrompida(payload) {
-  return conversaoInterrompidaDe.get(payload) === true;
-}
-
-/**
- * Valor do campo `Conteudo:` — com `+` quando havia MAIS do que o número
- * informado. Dois motivos, a mesma marca: a conversão foi interrompida no teto
- * de saída, ou o download parou no teto de bytes. Nos dois casos o número é o
- * do texto que se tem, e o `+` diz que não é a página inteira.
- */
-function fullLengthDe(payload, markdown) {
-  if (markdownInterrompida(payload) || payload?.cortado) return `${markdown.length}+`;
-  return markdown.length;
-}
-
-function markdownMemo(payload) {
-  const memo = memoDoPayload(payload);
-  if (!memo) {
-    conversoesMemo.realizadas++;
-    const diagnostico = { interrompida: false };
-    const markdown = htmlToMarkdown(payload.text, payload.finalUrl, {
-      ...OPCOES_MARKDOWN_EXIBIVEL,
-      diagnostico,
-    });
-    conversaoInterrompidaDe.set(payload, Boolean(diagnostico.interrompida));
-    return markdown;
-  }
-  if (!("markdown" in memo)) {
-    const diagnostico = { interrompida: false };
-    // Passada ÚNICA: markdown e links saem da mesma tokenização. Antes eram
-    // duas varreduras completas do HTML (52,6 ms + 41,0 ms numa página de
-    // 1,34 MB); a segunda varredura existia só porque cada função lia o
-    // texto por conta própria. Os links ficam no memo, então uma chamada
-    // posterior de extract_links neste mesmo payload não paga nada.
-    const convertido = htmlToMarkdownComLinks(payload.text, payload.finalUrl, {
-      ...OPCOES_MARKDOWN_EXIBIVEL,
-      diagnostico,
-    });
-    memo.markdown = convertido.markdown;
-    memo.links = convertido.links;
-    conversaoInterrompidaDe.set(payload, Boolean(diagnostico.interrompida));
-    conversoesMemo.realizadas++;
-  } else {
-    conversoesMemo.caronas++;
-  }
-  return memo.markdown;
-}
-
-function linksMemo(payload) {
-  const memo = memoDoPayload(payload);
-  if (!memo) {
-    conversoesMemo.realizadas++;
-    return extractLinks(payload.text, payload.finalUrl);
-  }
-  if (!("links" in memo)) {
-    memo.links = extractLinks(payload.text, payload.finalUrl);
-    conversoesMemo.realizadas++;
-  } else {
-    conversoesMemo.caronas++;
-  }
-  return memo.links;
-}
 
 /**
  * O conteúdo embutido (__NEXT_DATA__, JSON-LD, API interna) memoizado por
@@ -713,6 +598,19 @@ export async function toolReadPage(args = {}) {
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown), extraLabel });
 }
 
+function buscarNasLinhas(linhas, matcher) {
+  const casadas = new Set();
+  let total = 0;
+  for (let i = 0; i < linhas.length; i++) {
+    matcher.lastIndex = 0;
+    if (matcher.test(linhas[i])) {
+      total += 1;
+      casadas.add(i);
+    }
+  }
+  return { total, casadas };
+}
+
 /**
  * Busca um termo no conteúdo de uma página e devolve só os trechos que casam,
  * com contexto — em vez de entregar a página inteira para a IA garimpar.
@@ -736,9 +634,9 @@ export async function toolFindOnPage(args = {}) {
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
 
-  const conteudo = isConteudoBruto(contentType, html)
-    ? html.replace(/\r\n?/g, "\n")
-    : markdownMemo(payload);
+  const bruto = isConteudoBruto(contentType, html);
+  let conteudo = bruto ? html.replace(/\r\n?/g, "\n") : markdownMemo(payload);
+  let interrompida = !bruto && markdownInterrompida(payload);
 
   let matcher;
   if (args.regex) {
@@ -754,28 +652,30 @@ export async function toolFindOnPage(args = {}) {
 
   // Trabalha por LINHAS: a linha é a unidade que a IA lê e cita. Cada
   // ocorrência marca a linha dela; o contexto são as linhas em volta.
-  const linhas = conteudo.split("\n");
-  const casadas = new Set();
-  let total = 0;
-  for (let i = 0; i < linhas.length; i++) {
-    matcher.lastIndex = 0;
-    if (matcher.test(linhas[i])) {
-      total += 1;
-      casadas.add(i);
-    }
+  let linhas = conteudo.split("\n");
+  let { total, casadas } = buscarNasLinhas(linhas, matcher);
+
+  // A parada antecipada converte só a frente da página. Se ela não teve
+  // NENHUM acerto, responder "nenhuma ocorrencia" seria mentira quando o termo
+  // está no rabo (medido em nodejs.org/api/all.html e no spec do WHATWG, onde
+  // o termo existia mas a busca só cobria os primeiros ~59 mil caracteres).
+  // Nesse caso — e só nele — a página é convertida inteira uma vez e a busca
+  // roda de novo antes da resposta negativa.
+  if (interrompida && total === 0) {
+    conteudo = markdownCompleto(payload);
+    interrompida = false;
+    linhas = conteudo.split("\n");
+    ({ total, casadas } = buscarNasLinhas(linhas, matcher));
   }
 
-  // Cobertura da busca. Ha dois modos de a ferramenta ver so um pedaço da
-  // pagina: o download cortado no teto de bytes, e — o caso que faltava aqui —
-  // a conversao parada no teto de saida. Na parada antecipada a pagina desce
-  // inteira (dentro do teto de documento), mas so a frente dela vira texto, e a
-  // busca roda sobre esse texto. Sem o aviso, "nenhuma ocorrencia" e
-  // indistinguivel de "nao cheguei ate la" e o cliente conclui que o termo nao
-  // existe na pagina.
+  // Cobertura da busca. Há dois modos de a ferramenta ver só um pedaço da
+  // página: o download cortado no teto de bytes, e a conversão interrompida
+  // que ficou valendo porque HOUVE acertos na frente coberta (aí o rabo não é
+  // convertido e o aviso diz que o termo pode estar no resto).
   const avisoCobertura = payload.cortado
     ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
       `${payload.bytes} bytes, nao a pagina inteira.`
-    : markdownInterrompida(payload)
+    : interrompida
     ? `\nAVISO: a pagina e grande demais para converter inteira — a busca cobriu os primeiros ` +
       `${conteudo.length} caracteres do texto extraido, nao a pagina toda. O termo pode estar no resto.`
     : "";
@@ -1241,13 +1141,17 @@ export async function toolDiscoverUrls(args = {}) {
 /**
  * Filtra os links internos uteis para seguir num crawl: mesmo dominio, nao a
  * propria pagina e fora dos padroes de navegacao (login, tag, paginacao...).
- * Opera sobre a lista MEMOIZADA do payload: a extracao roda uma vez por
- * conteudo baixado, nao uma vez por chamada.
  */
-function linksParaCrawl(payload) {
-  return linksMemo(payload)
+function filtrarLinksParaCrawl(links, payload) {
+  return links
     .filter((l) => l.internal && l.href !== payload.finalUrl && !isNavigationUrl(l.href) && !ehArquivoEstatico(l.href))
     .map((l) => l.href);
+}
+
+// Opera sobre a lista MEMOIZADA do payload: a extração roda uma vez por
+// conteúdo baixado, não uma vez por chamada.
+function linksParaCrawl(payload) {
+  return filtrarLinksParaCrawl(linksMemo(payload), payload);
 }
 
 /**
@@ -1283,11 +1187,11 @@ async function lerPaginaCompleta(url, maxChars, timeoutMs) {
     };
   }
   const meta = metaMemo(payload);
-  const markdown = markdownMemo(payload);
+  const { markdown, links } = markdownELinksMemo(payload);
   const { text, truncated } = truncate(markdown, maxChars);
   return {
     conteudo: formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown) }),
-    links: linksParaCrawl(payload),
+    links: filtrarLinksParaCrawl(links, payload),
   };
 }
 
