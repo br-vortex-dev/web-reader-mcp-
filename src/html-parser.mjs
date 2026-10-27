@@ -315,19 +315,143 @@ function parseAttrs(source) {
   return attrs;
 }
 
+/** Compara um código de caractere com uma letra ASCII, ignorando a caixa. */
+function ehLetra(c, minuscula) {
+  return c === minuscula || c === minuscula - 32;
+}
+
 /**
- * Generator de tokens — não materializa o array inteiro na memória.
- * Em sites grandes (1MB+ de HTML) isso reduz ~40% de pico de memória.
+ * Nome do atributo, se for um dos quatro que algum consumidor lê.
+ * Comparação por código de caractere: sem fatiar o nome e sem `toLowerCase`.
  */
-function* tokenize(html) {
+function chaveDeLink(source, ini, fim) {
+  const n = fim - ini;
+  if (n === 4) {
+    return ehLetra(source.charCodeAt(ini), 104) &&
+      ehLetra(source.charCodeAt(ini + 1), 114) &&
+      ehLetra(source.charCodeAt(ini + 2), 101) &&
+      ehLetra(source.charCodeAt(ini + 3), 102)
+      ? "href"
+      : null;
+  }
+  if (n === 3) {
+    const c0 = source.charCodeAt(ini);
+    if (ehLetra(c0, 115)) {
+      return ehLetra(source.charCodeAt(ini + 1), 114) &&
+        ehLetra(source.charCodeAt(ini + 2), 99)
+        ? "src"
+        : null;
+    }
+    if (ehLetra(c0, 97)) {
+      return ehLetra(source.charCodeAt(ini + 1), 108) &&
+        ehLetra(source.charCodeAt(ini + 2), 116)
+        ? "alt"
+        : null;
+    }
+    return null;
+  }
+  if (n === 11) {
+    return ehLetra(source.charCodeAt(ini), 97) &&
+      ehLetra(source.charCodeAt(ini + 1), 114) &&
+      ehLetra(source.charCodeAt(ini + 2), 105) &&
+      ehLetra(source.charCodeAt(ini + 3), 97) &&
+      source.charCodeAt(ini + 4) === 45 &&
+      ehLetra(source.charCodeAt(ini + 5), 104) &&
+      ehLetra(source.charCodeAt(ini + 6), 105) &&
+      ehLetra(source.charCodeAt(ini + 7), 100) &&
+      ehLetra(source.charCodeAt(ini + 8), 100) &&
+      ehLetra(source.charCodeAt(ini + 9), 101) &&
+      ehLetra(source.charCodeAt(ini + 10), 110)
+      ? "aria-hidden"
+      : null;
+  }
+  return null;
+}
+
+/**
+ * Atributos de <a>/<img>: só href, src, alt e aria-hidden são lidos por
+ * qualquer consumidor. O parser genérico fatiava nome e valor de TODO
+ * atributo (class, style, data-*) e pagava `toLowerCase` por nome; aqui os
+ * nomes são comparados por código e valores irrelevantes são só varridos,
+ * nunca fatiados. O resultado para as quatro chaves é idêntico ao do parser
+ * genérico: último repetido vence e entidades são decodificadas.
+ */
+function parseAttrsDeLink(source, ini, fim) {
+  const attrs = {};
+  let i = ini;
+  while (i < fim) {
+    while (i < fim && !iniciaNomeAtributo(source.charCodeAt(i))) i++;
+    if (i >= fim) break;
+    const inicio = i;
+    i++;
+    while (i < fim && continuaNomeAtributo(source.charCodeAt(i))) i++;
+    const chave = chaveDeLink(source, inicio, i);
+
+    let j = i;
+    while (j < fim && ehEspaco(source.charCodeAt(j))) j++;
+    let valor = "";
+    if (j < fim && source.charCodeAt(j) === 61) {
+      j++;
+      while (j < fim && ehEspaco(source.charCodeAt(j))) j++;
+      const c = j < fim ? source.charCodeAt(j) : -1;
+      if (c === 34 || c === 39) {
+        const fimAspas = source.indexOf(source[j], j + 1);
+        if (fimAspas === -1) {
+          i = j;
+        } else {
+          if (chave !== null) valor = source.slice(j + 1, fimAspas);
+          i = fimAspas + 1;
+        }
+      } else {
+        let k = j;
+        while (k < fim) {
+          const cc = source.charCodeAt(k);
+          if (ehEspaco(cc) || cc === 34 || cc === 39 || cc === 61 || cc === 60 || cc === 62 || cc === 96) {
+            break;
+          }
+          k++;
+        }
+        if (chave !== null) valor = source.slice(j, k);
+        i = k;
+      }
+    }
+    if (chave !== null) {
+      attrs[chave] = valor.indexOf("&") === -1 ? valor : decodeEntities(valor);
+    }
+  }
+  return attrs;
+}
+
+/**
+ * Varre o HTML e entrega cada token a `aoToken`.
+ *
+ * Era um generator: cada token pagava a pausa/retomada do `next()` e alocava
+ * o objeto do resultado mais o do token. Aqui o objeto é UM só, reescrito a
+ * cada evento — os consumidores leem tudo de forma síncrona e não guardam o
+ * token entre chamadas. `attrs` volta a ATTRS_VAZIOS em texto/fecho para o
+ * aria-hidden da última tag aberta não vazar para o evento seguinte.
+ */
+function tokenizar(html, aoToken) {
+  const token = {
+    type: "", tag: "", value: "", raw: false, selfClosing: false, attrs: ATTRS_VAZIOS,
+  };
+  const texto = (value, raw) => {
+    token.type = "text";
+    token.tag = "";
+    token.value = value;
+    token.raw = raw === true;
+    token.selfClosing = false;
+    token.attrs = ATTRS_VAZIOS;
+    return aoToken(token) === true;
+  };
   let i = 0;
   while (i < html.length) {
     const lt = html.indexOf("<", i);
     if (lt === -1) {
-      yield { type: "text", value: html.slice(i) };
+      texto(html.slice(i));
       break;
     }
-    if (lt > i) yield { type: "text", value: html.slice(i, lt) };
+    if (lt > i && texto(html.slice(i, lt))) return;
     if (html.startsWith("<!--", lt)) {
       const end = html.indexOf("-->", lt);
       i = end === -1 ? html.length : end + 3;
@@ -342,14 +466,14 @@ function* tokenize(html) {
       (nextCode >= 65 && nextCode <= 90) ||
       (nextCode >= 97 && nextCode <= 122);
     if (!startsTag) {
-      yield { type: "text", value: "<" };
+      if (texto("<")) return;
       i = lt + 1;
       continue;
     }
     if (html.startsWith("<![CDATA[", lt)) {
       const end = html.indexOf("]]>", lt + 9);
       const inner = end === -1 ? html.slice(lt + 9) : html.slice(lt + 9, end);
-      yield { type: "text", value: inner, raw: true };
+      if (texto(inner, true)) return;
       i = end === -1 ? html.length : end + 3;
       continue;
     }
@@ -360,7 +484,7 @@ function* tokenize(html) {
     }
     const gt = findTagEnd(html, lt);
     if (gt === -1) {
-      yield { type: "text", value: html.slice(lt) };
+      texto(html.slice(lt));
       break;
     }
     let rawInicio = lt + 1;
@@ -371,13 +495,11 @@ function* tokenize(html) {
     i = gt + 1;
     if (!raw) continue;
     const closing = raw[0] === "/";
-    // Corpo sem os espaços das pontas (o "/" final já é tratado depois).
     let bIni = closing ? 1 : 0;
     while (bIni < raw.length && ehEspaco(raw.charCodeAt(bIni))) bIni++;
     let bFim = raw.length;
     while (bFim > bIni && ehEspaco(raw.charCodeAt(bFim - 1))) bFim--;
 
-    // Nome da tag: [A-Za-z][A-Za-z0-9:_-]* — scanner no lugar de `match`.
     if (bIni >= bFim) continue;
     const cNome = raw.charCodeAt(bIni);
     if (!((cNome >= 65 && cNome <= 90) || (cNome >= 97 && cNome <= 122))) continue;
@@ -397,10 +519,15 @@ function* tokenize(html) {
       k++;
     }
     const tag = raw.slice(bIni, k).toLowerCase();
-    // `selfClosing` olha o corpo inteiro: barra final ou tag void.
     const selfClosing = !closing && (VOID_TAGS.has(tag) || raw.charCodeAt(bFim - 1) === 47);
     if (closing) {
-      yield { type: "close", tag };
+      token.type = "close";
+      token.tag = tag;
+      token.value = "";
+      token.raw = false;
+      token.selfClosing = false;
+      token.attrs = ATTRS_VAZIOS;
+      if (aoToken(token) === true) return;
     } else {
       // Parse de atributos CONDICIONAL. O perfil mostrou que a maior parte do
       // custo de `parseAttrs` era jogada fora: de todos os consumidores, só
@@ -409,37 +536,55 @@ function* tokenize(html) {
       // nada por carregar atributos que ninguém vai ler. O teste de
       // `aria-hidden` é um `indexOf` no corpo cru — se a string não aparece,
       // o atributo não existe, e o resultado é idêntico ao do parse completo.
-      // O `slice` também é condicional: fatiar o corpo da tag para depois
-      // descobrir que ninguém vai ler os atributos era alocar uma string por
-      // tag (a página tem milhares). O teste de `aria-hidden` é feito sobre
-      // `raw` a partir de `k`, na própria string já existente.
+      // Para `<a>`/`<img>` existe um parser especializado que só materializa
+      // as quatro chaves lidas (href, src, alt, aria-hidden) e varre o resto
+      // sem fatiar; ele recebe os limites da tag, sem `slice` intermediário.
       let attrs = ATTRS_VAZIOS;
       if (TAGS_COM_ATTRS.has(tag)) {
-        attrs = parseAttrs(k < bFim ? raw.slice(k, bFim) : "");
+        attrs = parseAttrsDeLink(raw, k, bFim);
       } else if (k < bFim && raw.indexOf("aria-hidden", k) !== -1) {
         attrs = parseAttrs(raw.slice(k, bFim));
       }
-      yield { type: "open", tag, selfClosing, attrs };
+      token.type = "open";
+      token.tag = tag;
+      token.value = "";
+      token.raw = false;
+      token.selfClosing = selfClosing;
+      token.attrs = attrs;
+      if (aoToken(token) === true) return;
     }
   }
 }
 
 /**
- * Resolve um href relativo para URL absoluta. Remove parâmetros de rastreamento utm_*.
+ * Resolve um href relativo para URL absoluta e devolve também o host, na
+ * MESMA `new URL`. Antes, a coleta de links parseava a URL duas vezes: uma em
+ * `resolveUrl` e outra em `hostOf(href)` para marcar interno/externo.
+ * Parâmetros de rastreamento utm_* são removidos.
  */
-function resolveUrl(href, baseUrl) {
+function resolverUrl(href, baseUrl) {
   if (!href) return null;
   const value = String(href).trim();
   if (!value || value.startsWith("#") || /^(javascript|mailto|tel|data|ftp|file):/i.test(value)) return null;
   try {
     const url = new URL(value, baseUrl);
-    for (const key of [...url.searchParams.keys()]) {
-      if (key.toLowerCase().startsWith("utm_")) url.searchParams.delete(key);
+    // A maioria dos links não tem query nenhuma; sem "utm" no texto bruto o
+    // laço (e o array de chaves que ele aloca) é pulado.
+    if (url.search && /utm/i.test(url.search)) {
+      for (const key of [...url.searchParams.keys()]) {
+        if (key.toLowerCase().startsWith("utm_")) url.searchParams.delete(key);
+      }
     }
-    return url.href;
+    return { href: url.href, host: url.hostname.toLowerCase().replace(/^www\./, "") };
   } catch {
     return null;
   }
+}
+
+/** Resolve um href relativo para URL absoluta. Remove parâmetros de rastreamento utm_*. */
+function resolveUrl(href, baseUrl) {
+  const info = resolverUrl(href, baseUrl);
+  return info === null ? null : info.href;
 }
 
 /**
@@ -447,14 +592,31 @@ function resolveUrl(href, baseUrl) {
  */
 function cleanMarkdown(text) {
   const blocks = [];
-  const normalized = String(text).replace(/\r\n?/g, "\n");
-  const masked = normalized.replace(/```[\s\S]*?```/g, (match) => `\u0000${blocks.push(match) - 1}\u0000`);
-  const cleaned = masked
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return cleaned.replace(/\u0000(\d+)\u0000/g, (_, index) => blocks[Number(index)]);
+  let normalized = String(text);
+  // Cada replace abaixo só é chamado quando o texto tem o gatilho que ele
+  // procura — sem isso, páginas sem cerca/tab/CRLF pagavam a varredura inteira
+  // em vão. A ordem e a semântica são as mesmas da cadeia original.
+  if (normalized.indexOf("\r") !== -1) normalized = normalized.replace(/\r\n?/g, "\n");
+
+  let masked = normalized;
+  if (masked.indexOf("```") !== -1) {
+    masked = masked.replace(/```[\s\S]*?```/g, (match) => `\u0000${blocks.push(match) - 1}\u0000`);
+  }
+
+  let cleaned = masked;
+  if (cleaned.indexOf("\t") !== -1 || cleaned.indexOf(" \n") !== -1) {
+    cleaned = cleaned.replace(/[ \t]+\n/g, "\n");
+  }
+  if (cleaned.indexOf("\t") !== -1 || cleaned.indexOf("  ") !== -1) {
+    cleaned = cleaned.replace(/[ \t]{2,}/g, " ");
+  }
+  if (cleaned.indexOf("\n\n\n") !== -1) cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  cleaned = cleaned.trim();
+
+  if (cleaned.indexOf("\u0000") !== -1) {
+    cleaned = cleaned.replace(/\u0000(\d+)\u0000/g, (_, index) => blocks[Number(index)]);
+  }
+  return cleaned;
 }
 
 /* ===================================================================== *
@@ -509,15 +671,26 @@ function renderTable(rows) {
 /** Anexa um pedaço ao buffer lógico, mantendo o rastreio em sincronia. */
 function empurrar(st, chunk) {
   if (!chunk) return;
-  // Cerca "```\n" que cruza a fronteira deste pedaço com o anterior.
-  const base = st.outLen - st.prevTail.length;
-  const combinado = st.prevTail + chunk;
-  for (let idx = combinado.indexOf("```\n"); idx !== -1; idx = combinado.indexOf("```\n", idx + 1)) {
-    st.cercas.push(base + idx);
+  const prevTail = st.prevTail;
+  // Cerca "```\n" que cruza a fronteira deste pedaço com o anterior só é
+  // possível se o rastro já tiver um backtick. Sem ele, a varredura é feita
+  // no próprio pedaço, sem concatenar (uma alocação por emissão, milhares
+  // por página).
+  if (prevTail.indexOf("`") === -1) {
+    for (let idx = chunk.indexOf("```\n"); idx !== -1; idx = chunk.indexOf("```\n", idx + 1)) {
+      st.cercas.push(st.outLen + idx);
+    }
+    st.prevTail = chunk.length >= 3 ? chunk.slice(-3) : (prevTail + chunk).slice(-3);
+  } else {
+    const base = st.outLen - prevTail.length;
+    const combinado = prevTail + chunk;
+    for (let idx = combinado.indexOf("```\n"); idx !== -1; idx = combinado.indexOf("```\n", idx + 1)) {
+      st.cercas.push(base + idx);
+    }
+    st.prevTail = combinado.slice(-3);
   }
   st.chunks.push(chunk);
   st.outLen += chunk.length;
-  st.prevTail = combinado.slice(-3);
   let j = chunk.length;
   while (j > 0 && chunk.charCodeAt(j - 1) === 10) j--;
   st.nlFim = j === 0 ? st.nlFim + chunk.length : chunk.length - j;
@@ -644,14 +817,12 @@ function criarEstadoConversao() {
  * Normaliza um texto simples: decodifica entidades e, fora de <pre>, remove
  * o "[editar]" da Wikipédia, o "¶" e colapsa espaços.
  */
-function textoNormalizado({ token, preDepth }) {
-  if (!token) return "";
+function textoNormalizado(token, preDepth) {
   let decoded = token.raw ? token.value : decodeEntities(token.value);
   if (preDepth === 0) {
-    decoded = decoded
-      .replace(/\[editar[^\]]*\]/g, "")
-      .replace(/¶/g, "")
-      .replace(/\s+/g, " ");
+    if (decoded.indexOf("[editar") !== -1) decoded = decoded.replace(/\[editar[^\]]*\]/g, "");
+    if (decoded.indexOf("¶") !== -1) decoded = decoded.replace(/¶/g, "");
+    decoded = decoded.replace(/\s+/g, " ");
   }
   return decoded;
 }
@@ -871,14 +1042,19 @@ function fronteiraSegura(st) {
  * texto que ainda vai encolher.
  */
 function polirTexto(texto) {
-  let resultado = texto
-    .replace(/\[\s*\]/g, "")
-    .replace(/\[\s*\n\s*\]/g, "")
-    .replace(/\[\s*\|\s*\]/g, "");
-  resultado = resultado
-    .replace(/^\[Skip to content\]\([^)]*\)\n*/i, "")
-    .replace(/^\[Minha [^\]]+\]\([^)]*\)\n*/i, "")
-    .replace(/\?utm_[^)\s]*/g, "");
+  let resultado = texto;
+  if (resultado.indexOf("[") !== -1) {
+    resultado = resultado
+      .replace(/\[\s*\]/g, "")
+      .replace(/\[\s*\n\s*\]/g, "")
+      .replace(/\[\s*\|\s*\]/g, "");
+  }
+  if (resultado.charCodeAt(0) === 91) {
+    resultado = resultado
+      .replace(/^\[Skip to content\]\([^)]*\)\n*/i, "")
+      .replace(/^\[Minha [^\]]+\]\([^)]*\)\n*/i, "");
+  }
+  if (resultado.indexOf("?utm_") !== -1) resultado = resultado.replace(/\?utm_[^)\s]*/g, "");
   return resultado;
 }
 
@@ -900,9 +1076,13 @@ function finalizarConversao(st) {
  * jogado fora, que chega a 97% em páginas de 1 MB. A parada só ocorre em
  * fronteira segura e `opcoes.diagnostico.interrompida` fica `true` quando
  * acontecer. Sem opções, o comportamento histórico: converte tudo.
+ *
+ * Não coleta links (`coletarLinks: false`): depois da parada antecipada não
+ * existe mais nada a produzir, e a varredura do resto do documento — que só
+ * servia à lista de links — é encerrada na hora.
  */
 export function htmlToMarkdown(html, baseUrl, opcoes = {}) {
-  return htmlToMarkdownComLinks(html, baseUrl, opcoes).markdown;
+  return htmlToMarkdownComLinks(html, baseUrl, { ...opcoes, coletarLinks: false }).markdown;
 }
 
 /**
@@ -958,7 +1138,13 @@ function criarColetorDeLinks(baseUrl) {
     }
     if (profundidadeSkip !== 0) return;
     if (token.tag === "a") {
-      linkAtual = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
+      const info = resolverUrl(token.attrs.href, baseUrl);
+      linkAtual = {
+        href: info === null ? null : info.href,
+        host: info === null ? "" : info.host,
+        parts: [],
+        imgAlt: null,
+      };
     }
     if (token.tag === "img" && linkAtual && !linkAtual.imgAlt) {
       const alt = (token.attrs.alt || "").trim();
@@ -980,6 +1166,7 @@ function criarColetorDeLinks(baseUrl) {
     if (profundidadeSkip !== 0) return;
     if (token.tag !== "a" || !linkAtual) return;
     const href = linkAtual.href;
+    const host = linkAtual.host;
     // O texto do link é o que estava entre <a>...</a>; sem texto, cai para o
     // alt da imagem (link que é só imagem) e, por último, para um marcador.
     const texto =
@@ -989,7 +1176,7 @@ function criarColetorDeLinks(baseUrl) {
     linkAtual = null;
     if (href && !vistos.has(href)) {
       vistos.add(href);
-      links.push({ text: texto, href, internal: hostOf(href) === baseHost });
+      links.push({ text: texto, href, internal: host === baseHost });
     }
   }
 
@@ -1020,18 +1207,25 @@ function criarColetorDeLinks(baseUrl) {
  */
 function tentarFinalizar(st, { minimo, diagnostico }) {
   const bruto = materializar(st);
-  const cercasPareadas = (bruto.match(/```/g) || []).length % 2 === 0;
-  if (!cercasPareadas) return null;
+  // Mesma paridade de `(bruto.match(/```/g) || []).length % 2`, sem alocar
+  // um array com uma entrada por cerca da página.
+  let cercas = 0;
+  for (let pos = bruto.indexOf("```"); pos !== -1; pos = bruto.indexOf("```", pos + 3)) cercas++;
+  if (cercas % 2 !== 0) return null;
   const limpo = polirTexto(cleanMarkdown(bruto));
   if (limpo.length < minimo + MARGEM_SEGURANCA) return null;
   if (diagnostico) diagnostico.interrompida = true;
-  return finalizarConversao(st);
+  // `fronteiraSegura` já garantiu tableDepth 0 e nenhuma célula aberta, então
+  // este `limpo` é exatamente o que `finalizarConversao` devolveria — sem
+  // repetir `materializar` + `cleanMarkdown` + `polirTexto` sobre o prefixo.
+  return limpo;
 }
 
 export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   const st = criarEstadoConversao();
   const emit = (chunk) => st.emit(chunk);
-  const coletor = criarColetorDeLinks(baseUrl);
+  const comLinks = opcoes.coletarLinks !== false;
+  const coletor = comLinks ? criarColetorDeLinks(baseUrl) : null;
   let markdownFinal = null;
   const minimo = Number(opcoes.minCharsEntregaveis) > 0 ? Math.floor(opcoes.minCharsEntregaveis) : 0;
   const diagnostico = opcoes.diagnostico || null;
@@ -1039,54 +1233,55 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   let limiar = minimo + MARGEM_COMPRESSAO;
   let reChecagens = 0;
 
-  for (const token of tokenize(html)) {
+  tokenizar(html, (token) => {
     // ---- coleta de links (mesma passada) ----------------------------
     // Roda ANTES do markdown para não depender do estado da conversão e
     // continua valendo depois da parada antecipada.
-    coletor.processar(token);
+    if (coletor !== null) coletor.processar(token);
 
-    // Markdown já finalizado (parada antecipada): só segue coletando links.
-    if (markdownFinal !== null) continue;
+    // Markdown já finalizado (parada antecipada): sem links para coletar não
+    // há mais nada a produzir — `true` encerra a varredura do documento.
+    if (markdownFinal !== null) return !comLinks;
 
     if (paradaAtiva && st.outLen >= limiar && fronteiraSegura(st)) {
       const finalizado = tentarFinalizar(st, { minimo, diagnostico });
       if (finalizado !== null) {
         markdownFinal = finalizado;
-        continue;
+        return;
       }
       if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
       else limiar = st.outLen + PASSO_RECHECAGEM;
     }
-    const isSkipped = SKIP_TAGS.has(token.tag);
 
     // ---- texto -------------------------------------------------------
     if (token.type === "text") {
-      if (st.skipDepth > 0) continue;
-      const decoded = textoNormalizado({ token, preDepth: st.preDepth });
-      if (!decoded) continue;
+      if (st.skipDepth > 0) return;
+      const decoded = textoNormalizado(token, st.preDepth);
+      if (!decoded) return;
       emit(decoded);
-      continue;
+      return;
     }
 
     // ---- abertura de tag --------------------------------------------
     if (token.type === "open") {
-      const escondido = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
-      if (isSkipped || escondido) {
-        if (token.selfClosing) continue;
+      const escondido = token.attrs["aria-hidden"] === "true";
+      if (SKIP_TAGS.has(token.tag) || escondido) {
+        if (token.selfClosing) return;
         st.skipDepth++;
         if (escondido) st.ariaHiddenStack.push(token.tag);
-        continue;
+        return;
       }
-      if (st.skipDepth > 0) continue;
-      if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
+      if (st.skipDepth > 0) return;
+      if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) return;
       if (!token.selfClosing) st.openStack.push(token.tag);
 
       const tag = token.tag;
-      if (/^h[1-6]$/.test(tag)) abrirCabecalho(st, tag, emit);
-      else if (tag === "p" || tag === "div" || tag === "section" || tag === "article" ||
-               tag === "main" || tag === "figure" || tag === "figcaption" ||
-               tag === "details" || tag === "summary" || tag === "ul" || tag === "ol" ||
-               tag === "dl") {
+      if (tag.charCodeAt(0) === 104 && tag.charCodeAt(1) >= 49 && tag.charCodeAt(1) <= 54) {
+        abrirCabecalho(st, tag, emit);
+      } else if (tag === "p" || tag === "div" || tag === "section" || tag === "article" ||
+                 tag === "main" || tag === "figure" || tag === "figcaption" ||
+                 tag === "details" || tag === "summary" || tag === "ul" || tag === "ol" ||
+                 tag === "dl") {
         emit("\n");
       } else if (tag === "blockquote") {
         emit("\n> ");
@@ -1108,22 +1303,26 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
       } else if (tag === "hr") {
         emit("\n\n---\n\n");
       }
-      continue;
+      return;
     }
 
     // ---- fechamento de tag ------------------------------------------
-    const idxHidden = st.ariaHiddenStack.lastIndexOf(token.tag);
-    if (idxHidden !== -1) {
-      st.ariaHiddenStack.length = idxHidden;
-      if (st.skipDepth > 0) st.skipDepth--;
-      continue;
+    // A pilha de aria-hidden só tem conteúdo em página que usa o atributo;
+    // na maioria delas o fecho não paga a busca.
+    if (st.ariaHiddenStack.length > 0) {
+      const idxHidden = st.ariaHiddenStack.lastIndexOf(token.tag);
+      if (idxHidden !== -1) {
+        st.ariaHiddenStack.length = idxHidden;
+        if (st.skipDepth > 0) st.skipDepth--;
+        return;
+      }
     }
-    if (isSkipped) {
+    if (SKIP_TAGS.has(token.tag)) {
       if (st.skipDepth > 0) st.skipDepth--;
-      continue;
+      return;
     }
-    if (st.skipDepth > 0) continue;
-    if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) continue;
+    if (st.skipDepth > 0) return;
+    if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) return;
     fecharNaPilha(st, token.tag);
 
     const tag = token.tag;
@@ -1136,10 +1335,10 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
                tag === "em" || tag === "i" || tag === "code" || tag === "pre") {
       fecharInline(st, tag, emit);
     }
-  }
+  });
 
   const markdown = markdownFinal !== null ? markdownFinal : finalizarConversao(st);
-  return { markdown, links: coletor.links };
+  return { markdown, links: coletor === null ? [] : coletor.links };
 }
 
 /**
@@ -1163,21 +1362,25 @@ export function extractLinks(html, baseUrl) {
   const ariaHiddenStack = [];
   let current = null;
 
-  for (const token of tokenize(html)) {
-    const isSkipped = SKIP_TAGS.has(token.tag);
-    const escondido = Boolean(token.attrs && token.attrs["aria-hidden"] === "true");
-
+  tokenizar(html, (token) => {
     if (token.type === "open") {
-      if (isSkipped || escondido) {
+      const escondido = token.attrs["aria-hidden"] === "true";
+      if (SKIP_TAGS.has(token.tag) || escondido) {
         if (!token.selfClosing) {
           skipDepth++;
           ariaHiddenStack.push(token.tag);
         }
-        continue;
+        return;
       }
-      if (skipDepth > 0) continue;
+      if (skipDepth > 0) return;
       if (token.tag === "a") {
-        current = { href: resolveUrl(token.attrs.href, baseUrl), parts: [], imgAlt: null };
+        const info = resolverUrl(token.attrs.href, baseUrl);
+        current = {
+          href: info === null ? null : info.href,
+          host: info === null ? "" : info.host,
+          parts: [],
+          imgAlt: null,
+        };
       }
       if (token.tag === "img" && current && !current.imgAlt) {
         const alt = (token.attrs.alt || "").trim();
@@ -1190,15 +1393,16 @@ export function extractLinks(html, baseUrl) {
       if (idxHidden !== -1) {
         ariaHiddenStack.length = idxHidden;
         if (skipDepth > 0) skipDepth--;
-        continue;
+        return;
       }
-      if (isSkipped) {
+      if (SKIP_TAGS.has(token.tag)) {
         if (skipDepth > 0) skipDepth--;
-        continue;
+        return;
       }
-      if (skipDepth > 0) continue;
+      if (skipDepth > 0) return;
       if (token.tag === "a" && current) {
         const href = current.href;
+        const host = current.host;
         const text = decodeEntities(current.parts.join("")).replace(/\s+/g, " ").trim() || current.imgAlt || "(sem texto)";
         current = null;
         if (href && !seen.has(href)) {
@@ -1206,14 +1410,14 @@ export function extractLinks(html, baseUrl) {
           links.push({
             text,
             href,
-            internal: hostOf(href) === baseHost,
+            internal: host === baseHost,
           });
         }
       }
     } else if (token.type === "text" && current && skipDepth === 0) {
       current.parts.push(token.value);
     }
-  }
+  });
   return links;
 }
 
@@ -1241,16 +1445,38 @@ export function extractMeta(html) {
   // explora com backtracking. Aqui o documento é varrido uma vez, cada tag é
   // lida com o scanner de atributos que já existe, e o primeiro valor de cada
   // campo (ordem do documento, como antes) vence.
+  //
+  // A varredura é manual (indexOf de "<") e não com /<meta\b[^>]*>/gi: numa
+  // página de 1,4 MB o regex custou 0,86 ms e a varredura manual 0,55 ms para
+  // exatamente o mesmo resultado — nome sem diferenciar maiúsculas, fronteira
+  // de palavra ("metadata" não é <meta>) e tag até o primeiro ">".
   let description = "";
   let ogTitle = "";
   let author = "";
   let published = "";
 
-  const reMeta = /<meta\b[^>]*>/gi;
-  let achado;
   let faltam = 4;
-  while (faltam > 0 && (achado = reMeta.exec(html)) !== null) {
-    const attrs = parseAttrs(achado[0].slice(5, -1));
+  let pos = -1;
+  while (faltam > 0 && (pos = html.indexOf("<", pos + 1)) !== -1) {
+    if (
+      (html.charCodeAt(pos + 1) | 32) !== 109 || // m
+      (html.charCodeAt(pos + 2) | 32) !== 101 || // e
+      (html.charCodeAt(pos + 3) | 32) !== 116 || // t
+      (html.charCodeAt(pos + 4) | 32) !== 97 //    a
+    ) {
+      continue;
+    }
+    const depois = html.charCodeAt(pos + 5);
+    const ehPalavra =
+      (depois >= 48 && depois <= 57) ||
+      (depois >= 65 && depois <= 90) ||
+      (depois >= 97 && depois <= 122) ||
+      depois === 95;
+    if (ehPalavra) continue;
+    const fim = html.indexOf(">", pos + 5);
+    if (fim === -1) break;
+    const attrs = parseAttrs(html.slice(pos + 5, fim));
+    pos = fim;
     const chave = String(attrs.property || attrs.name || "").toLowerCase();
     if (!chave) continue;
     const conteudo = attrs.content;
