@@ -16,7 +16,8 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 
 const BASE = process.env.RENDER_URL || "https://web-reader-mcp-13z0.onrender.com";
-const TOKEN = process.env.MCP_AUTH_TOKEN || "tRqOmW3l9kVq8rgOdIvi7hBIW3WV9YJs/LiBx446FYw=";
+const TOKEN = process.env.LIVE_TEST_TOKEN || process.env.MCP_AUTH_TOKEN || "";
+if (!TOKEN) { console.error("defina LIVE_TEST_TOKEN (ou MCP_AUTH_TOKEN) com o token do servidor"); process.exit(1); }
 const ROTULO = (process.argv[2] || "rodada").replace(/[^a-z0-9_-]/gi, "");
 const TOOL_TIMEOUT = 120000;
 const CLIENT_TIMEOUT = 180000;

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // _probe-bateria.mjs — health do deploy + quais variantes de token autenticam.
-const base = "https://web-reader-mcp-13z0.onrender.com";
+const base = process.env.RENDER_URL || "https://web-reader-mcp-13z0.onrender.com";
+const TOKEN = process.env.LIVE_TEST_TOKEN || process.env.MCP_AUTH_TOKEN || "";
+if (!TOKEN) { console.error("defina LIVE_TEST_TOKEN (ou MCP_AUTH_TOKEN) com o token do servidor"); process.exit(1); }
 
 async function tryHealth() {
   const t0 = Date.now();
@@ -33,6 +35,6 @@ async function tryToken(rotulo, tok) {
 
 await tryHealth();
 console.log("");
-await tryToken("A (32)", "tRqOmW3l9kVq8rgOdIvi7hBIW3WV9YJs");
-await tryToken("B (full)", "tRqOmW3l9kVq8rgOdIvi7hBIW3WV9YJs/LiBx446FYw=");
-await tryToken("C (40?)", "LiBx446FYw=");
+await tryToken("A (32)", TOKEN.slice(0, 32));
+await tryToken("B (full)", TOKEN);
+await tryToken("C (sufixo)", TOKEN.slice(-12));

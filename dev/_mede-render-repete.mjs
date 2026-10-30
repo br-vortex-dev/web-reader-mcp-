@@ -12,7 +12,8 @@
 import { writeFileSync } from "node:fs";
 
 const BASE = "https://web-reader-mcp-13z0.onrender.com";
-const TOKEN = "tRqOmW3l9kVq8rgOdIvi7hBIW3WV9YJs/LiBx446FYw=";
+const TOKEN = process.env.LIVE_TEST_TOKEN || process.env.MCP_AUTH_TOKEN || "";
+if (!TOKEN) { console.error("defina LIVE_TEST_TOKEN (ou MCP_AUTH_TOKEN) com o token do servidor"); process.exit(1); }
 const VOLTAS = Number(process.argv[2]) || 3;
 const auth = { "content-type": "application/json", authorization: `Bearer ${TOKEN}` };
 let idSeq = 1;

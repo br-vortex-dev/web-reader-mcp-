@@ -1,6 +1,7 @@
 // Testa as defesas do servidor publicado: auth, entrada invalida, SSRF.
 const U = "https://web-reader-mcp-13z0.onrender.com/mcp";
-const T = "tRqOmW3l9kVq8rgOdIvi7hBIW3WV9YJs/LiBx446FYw=";
+const T = process.env.LIVE_TEST_TOKEN || process.env.MCP_AUTH_TOKEN || "";
+if (!T) { console.error("defina LIVE_TEST_TOKEN (ou MCP_AUTH_TOKEN) com o token do servidor"); process.exit(1); }
 
 const post = (h, b) =>
   fetch(U, { method: "POST", headers: h, body: b, signal: AbortSignal.timeout(40000) })
