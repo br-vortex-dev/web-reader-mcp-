@@ -38,6 +38,7 @@ import {
   ROBOTS_NEGATIVE_TTL_MS,
   ROBOTS_MAX_BYTES,
   ROBOTS_MAX_ORIGINS,
+  ROBOTS_MAX_REGRAS,
   ROBOTS_MAX_CONCURRENCY,
   DNS_TIMEOUT_MS,
 } from "./config.mjs";
@@ -125,24 +126,17 @@ function ipv4DosHextets(hi, lo) {
 }
 
 /**
- * Exibe um IPv6 com IPv4 embutido na forma legível: ::ffff:127.0.0.1 em vez de ::ffff:7f00:1.
- */
-function ipv6ParaExibicao(ip) {
-  const h = hextetsDoIpv6(ip);
-  if (h && h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) {
-    return `::ffff:${ipv4DosHextets(h[6], h[7])}`;
-  }
-  return ip;
-}
-
-/**
  * Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), compatível (::a.b.c.d),
  * traduzido (::ffff:0:a.b.c.d), NAT64 (64:ff9b::) e 6to4 (2002::/16).
  */
 function embeddedIpv4DosHextets(h) {
   if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) return ipv4DosHextets(h[6], h[7]);
   if (h.slice(0, 6).every((n) => n === 0) && (h[6] !== 0 || h[7] !== 0)) return ipv4DosHextets(h[6], h[7]);
-  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0xffff && h[4] === 0 && h[5] === 0) {
+  // IPv4 traduzido, ::ffff:0:a.b.c.d: os quatro primeiros hextets são zero e o
+  // QUINTO é ffff. A checagem antiga olhava o quarto — a faixa inteira
+  // (::ffff:0:0/96) passava como IPv6 público e um host que resolvesse para
+  // ::ffff:0:7f00:1 alcançava 127.0.0.1.
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0xffff && h[5] === 0) {
     return ipv4DosHextets(h[6], h[7]);
   }
   if (h[0] === 0x0064 && h[1] === 0xff9b && h.slice(2, 6).every((n) => n === 0)) {
@@ -253,7 +247,7 @@ export async function assertPublicHost(url) {
 
   const cached = hostCheckCache.get(hostname);
   if (cached && Date.now() - cached.at < HOST_CHECK_TTL_MS) {
-    if (cached.blocked) throw new HostBloqueadoError(hostname, ipv6ParaExibicao(cached.blocked));
+    if (cached.blocked) throw new HostBloqueadoError(hostname);
     return cached.ip || null;
   }
 
@@ -277,7 +271,7 @@ export async function assertPublicHost(url) {
       if (hostCheckCache.size > HOST_CHECK_MAX_ENTRIES) {
         hostCheckCache.delete(hostCheckCache.keys().next().value);
       }
-      throw new HostBloqueadoError(hostname, ipv6ParaExibicao(blocked));
+      throw new HostBloqueadoError(hostname);
     }
   }
   hostCheckCache.set(hostname, { at: Date.now(), blocked: null, ip: addresses[0] });
@@ -337,11 +331,24 @@ function robotsGruposDoTexto(texto) {
 }
 
 /**
- * Extrai as regras aplicáveis ao user-agent "*".
+ * Regras aplicáveis ao nosso user-agent: o grupo específico quando existe,
+ * senão TODOS os grupos "*" (o arquivo pode repetir o bloco; ficar só com o
+ * primeiro fazia o segundo ser ignorado em silêncio).
  */
 function robotsRegrasAplicaveis(grupos) {
-  const grupo = grupos.find((g) => g.agentes.includes("*"));
-  return grupo ? grupo.regras : null;
+  const especifico = grupos.filter((g) =>
+    g.agentes.some((a) => a !== "" && a !== "*" && "web-reader-mcp".startsWith(a))
+  );
+  const alvos = especifico.length > 0 ? especifico : grupos.filter((g) => g.agentes.includes("*"));
+  if (alvos.length === 0) return null;
+  const regras = [];
+  for (const g of alvos) {
+    for (const r of g.regras) {
+      if (regras.length >= ROBOTS_MAX_REGRAS) return regras;
+      regras.push(r);
+    }
+  }
+  return regras;
 }
 
 /**
@@ -358,7 +365,11 @@ function robotsPadraoParaRegex(padrao) {
     else corpoRe += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
   const re = new RegExp("^" + corpoRe + (terminaCifrao ? "$" : ""));
-  if (robotsRegexCache.size > 2000) robotsRegexCache.clear();
+  // Despeja a mais antiga em vez de esvaziar tudo: limpar o cache inteiro
+  // obrigava a recompilar todas as regras ainda em uso a cada estouro.
+  if (robotsRegexCache.size >= 2000) {
+    robotsRegexCache.delete(robotsRegexCache.keys().next().value);
+  }
   robotsRegexCache.set(padrao, re);
   return re;
 }

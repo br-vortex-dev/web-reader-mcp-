@@ -142,7 +142,23 @@ test("initialize com versao desconhecida responde a mais nova suportada", async 
   });
   assert.equal(r.status, 200);
   const json = JSON.parse(r.body);
-  assert.equal(json.result.protocolVersion, "2025-06-18");
+  assert.equal(json.result.protocolVersion, "2025-11-25");
+});
+
+test("initialize aceita a versao 2025-11-25 quando pedida", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 72,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25" },
+    }),
+  });
+  assert.equal(r.status, 200);
+  const json = JSON.parse(r.body);
+  assert.equal(json.result.protocolVersion, "2025-11-25");
 });
 
 test("initialize sem id (notificacao) nao gera resposta", async () => {

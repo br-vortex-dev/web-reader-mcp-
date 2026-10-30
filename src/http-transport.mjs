@@ -1280,6 +1280,19 @@ export function ligarServidor(server, { port, host, rateLimitWindowMs, rateLimit
  * um crash isolado não derruba o serviço.
  */
 export async function startHttp() {
+  // Fail-closed: sem token, o /mcp ficaria aberto a qualquer pessoa na
+  // internet. Recusar o arranque é melhor do que subir um serviço de leitura
+  // de páginas que qualquer um usa às custas do dono. Para desenvolvimento
+  // local, MCP_ALLOW_ANONYMOUS=1 assume o risco explicitamente.
+  if (!process.env.MCP_AUTH_TOKEN && process.env.MCP_ALLOW_ANONYMOUS !== "1") {
+    console.error(
+      `[${SERVER_NAME}] ERRO: MCP_AUTH_TOKEN não definido. O endpoint /mcp exige token; ` +
+        `sem ele o servidor subiria aberto a qualquer pessoa na internet. ` +
+        `Defina MCP_AUTH_TOKEN (recomendado) ou, para uso local consciente, MCP_ALLOW_ANONYMOUS=1.`
+    );
+    process.exit(1);
+  }
+
   // import("node:cluster") devolve o namespace; o objeto cluster em si vem
   // no default (é ele que tem isPrimary/fork/on). Sem o fallback, cl.on
   // estoura "is not a function" no ESM.
@@ -1332,7 +1345,7 @@ export async function startHttp() {
 
   if (!authToken) {
     console.error(
-      `[${SERVER_NAME}] AVISO: MCP_AUTH_TOKEN não definido — o endpoint /mcp está ABERTO para qualquer um.`
+      `[${SERVER_NAME}] AVISO: MCP_AUTH_TOKEN não definido e MCP_ALLOW_ANONYMOUS=1 — o endpoint /mcp está ABERTO para qualquer um.`
     );
   }
 

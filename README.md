@@ -102,7 +102,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (39 arquivos, 338 testes, ~64 s, sem rede na maioria):
+Roda os arquivos de `tests/` (40 arquivos, 368 testes, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -113,7 +113,7 @@ Roda os arquivos de `tests/` (39 arquivos, 338 testes, ~64 s, sem rede na maiori
 | `tests/security.test.mjs` | SSRF (hosts privados, IPv4 mapeado, redirects, limite de saltos), **credenciais na URL e no `Location` recusadas sem ecoar a senha** e rate limit (não burlável por `x-forwarded-for`) |
 | `tests/robots.test.mjs` | robots.txt: Allow/Disallow, regra mais longa, curingas, fail-open em erro de rede |
 | `tests/cache.test.mjs` | cache: teto em bytes, despejo LRU, entrada grande demais, contabilidade correta na expiração, **SWR (vencido serve na hora; rajada no vencimento = 1 revalidação)** |
-| `tests/coalesce.test.mjs` | **junção de buscas em voo**: rajada de N leituras da mesma URL = 1 acesso, série continua do cache, falha compartilhada não derruba o servidor |
+| `tests/coalesce.test.mjs` | **junção de buscas em voo**: rajada de N leituras da mesma URL = 1 acesso, série continua do cache, prazo curto de um chamador não mata a carona do paciente, falha compartilhada não derruba o servidor |
 | `tests/chave-canonica.test.mjs` | **chave de cache canônica**: URL com `utm_*`/`gclid` acerta o cache da URL limpa (1 download), ordem dos parâmetros e fragmento não criam entradas, parâmetros reais (`?page=2`) continuam distintos |
 | `tests/compressao.test.mjs` | **compressão da resposta do `/mcp`**: gzip/br conforme `Accept-Encoding`, corpo descomprimido idêntico ao puro, `vary` presente, sem `Accept-Encoding` = JSON puro, resposta pequena não comprime, ganho de ponta a ponta |
 | `tests/revalidacao.test.mjs` | **revalidação condicional**: `304` reaquece a entrada sem baixar o corpo de novo (contador no `/health`), servidor sem `ETag` volta a baixar (sem regressão) |
@@ -140,6 +140,7 @@ Roda os arquivos de `tests/` (39 arquivos, 338 testes, ~64 s, sem rede na maiori
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão); **concorrência**: 12 `tools/list` simultâneos sem trocar o id, 16 pedidos na fila de admissão com só 2 vagas, e o cliente que morre no meio do corpo (a vaga volta e o servidor segue atendendo) |
 | `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
+| `tests/polimento.test.mjs` | catálogo com `title`/`annotations`, IPv4 traduzido (`::ffff:0:a.b.c.d`) bloqueado sem ecoar o IP, credenciais recusadas sem ecoar a senha, guarda de regex e contagem de ocorrências do `find_on_page`, marca truncada do `diff_page`, `link` alternate do Atom, título com `>` e PDF com `/Encrypt`, além do HTTP sem token que não sobe |
 | `tests/golden.test.mjs` | `htmlToMarkdown` bate com os 20 golden files em `tests/golden/` (saída byte a byte) |
 | `tests/helpers.mjs` | infraestrutura compartilhada: servidor de fixture local e cliente MCP para os testes |
 
@@ -349,8 +350,13 @@ docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token web-reader-mcp
 docker run -p 3000:3000 -e MCP_AUTH_TOKEN=seu-token \
   -e SNAPSHOT_DIR=/data/marcas -v web-reader-marcas:/data/marcas web-reader-mcp
 ```
+
+Sem `MCP_AUTH_TOKEN` o container **não sobe** (fail-closed): o modo HTTP recusa
+arrancar sem autenticação e explica o motivo no log. Para um teste local rápido,
+sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
+
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.5 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.6 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -439,7 +445,8 @@ interno**, que não faz parte da web:
   `192.0.2/24`, `198.51.100/24` e `203.0.113/24` (faixas de documentação/teste),
   `198.18/15` (benchmark), `224/4` (multicast) e acima.
 - IPv6: `::1`, `::`, `fe80::/10`, `fc00::/7`, `ff00::/8`, `2001:db8::/32`
-  (documentação) e `64:ff9b:1::/48` (NAT64 local), além de IPv4 mapeado/NAT64/6to4
+  (documentação) e `64:ff9b:1::/48` (NAT64 local), além de IPv4 mapeado
+  (`::ffff:a.b.c.d`), IPv4 traduzido (`::ffff:0:a.b.c.d`), NAT64/6to4
   (nesses casos o IPv4 embutido é validado, e não o IPv6 inteiro).
 
 Redirects continuam funcionando normalmente (`http→https`, `www`, encurtadores), até
@@ -451,7 +458,9 @@ A validação acontece **antes** de consultar o cache, então uma URL bloqueada 
 servida do cache.
 
 Se o host for bloqueado, a ferramenta devolve um erro curto, por exemplo:
-`Host bloqueado: endereco privado/interno (127.0.0.1)`.
+`Host bloqueado: endereço privado/interno (127.0.0.1)`. O endereço IP resolvido
+**não** entra na mensagem — só o host que o chamador pediu: o IP de dentro é
+topologia interna do servidor e a resposta vai para fora.
 
 **Credenciais na URL são recusadas** (`https://user:senha@host/` → erro
 `CREDENCIAIS_NA_URL`). Não é preciosismo: o transporte monta o pedido com
@@ -501,12 +510,13 @@ Para desligar tudo (desenvolvimento, ou quando o uso é explicitamente autorizad
 
 ### Variáveis de ambiente
 
-Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória em produção). No
+Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). No
 `render.yaml` já vêm configuradas as duas que importam.
 
 | Variável | Padrão | O que faz |
 | --- | --- | --- |
-| `MCP_AUTH_TOKEN` | *(vazio)* | Token do header `Authorization: Bearer <token>`. **Vazio = `/mcp` aberto para qualquer um**, e o servidor avisa isso no boot. No Render o `render.yaml` usa `generateValue: true`, então o valor é gerado e fica só no dashboard. |
+| `MCP_AUTH_TOKEN` | *(vazio)* | Token do header `Authorization: Bearer <token>`. **Vazio = o servidor HTTP recusa arrancar** (fail-closed), a não ser que `MCP_ALLOW_ANONYMOUS=1` esteja definida. No Render o `render.yaml` usa `generateValue: true`, então o valor é gerado e fica só no dashboard. |
+| `MCP_ALLOW_ANONYMOUS` | desligada | `1` permite subir o modo HTTP **sem** `MCP_AUTH_TOKEN` (`/mcp` aberto). É uma escolha explícita para teste local — nunca use em produção. |
 | `PORT` | `3000` | Porta do modo HTTP. O Render define sozinha; a presença dela é o que escolhe o modo HTTP (sem `PORT` → stdio). |
 | `ALLOW_PRIVATE_HOSTS` | desligada | `1` **desliga** o bloqueio de hosts privados/internos (SSRF). Só para desenvolvimento e testes locais. **No Render fica desligada** — não defina em produção. |
 | `TRUST_PROXY_HOPS` | `0` | Quantas entradas do `x-forwarded-for` confiar, contando da **direita**. `render.yaml` usa `1`. Veja *Rate limit* abaixo. |
@@ -1090,6 +1100,15 @@ O servidor agora:
   é reconhecido; quem não manda é atendido como sempre.
 
 O `/health` mostra `sessoes: N (canais M)`.
+
+A negociação de versão do `initialize` aceita `2024-11-05`, `2025-03-26`,
+`2025-06-18` e `2025-11-25`; pedido de versão desconhecida recebe `2025-11-25`
+(a mais nova que o servidor fala). O catálogo de `tools/list` traz, além do
+nome e do schema, um `title` legível e `annotations` (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`, `openWorldHint`) — os clientes usam isso
+para decidir sem executar. Todas as 12 ferramentas são de leitura; `diff_page`
+é a única marcada como **não** idempotente, porque cada chamada move o ponto de
+comparação da seguinte.
 
 ## Como as falhas aparecem na saída
 

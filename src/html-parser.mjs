@@ -642,7 +642,10 @@ function linhaDeTabela(cells, cols, celula) {
 function renderTable(rows) {
   const validas = rows.filter((row) => row.cells.length > 0);
   if (validas.length === 0) return "";
-  const cols = Math.max(...validas.map((row) => row.cells.length));
+  // Laço em vez de Math.max(...): uma tabela com dezenas de milhares de linhas
+  // estourava a pilha de argumentos e derrubava a conversão da página inteira.
+  let cols = 0;
+  for (const row of validas) if (row.cells.length > cols) cols = row.cells.length;
   const celula = (cell) =>
     String(cell ? cell.text : "")
       .replace(/\s+/g, " ")
@@ -798,7 +801,6 @@ function criarEstadoConversao() {
     cercas: [],
     skipDepth: 0,
     preDepth: 0,
-    openStack: [],
     aStack: [],
     ariaHiddenStack: [],
     tableDepth: 0,
@@ -1000,18 +1002,6 @@ function fecharInline(st, tag, emit) {
 /* ===================================================================== *
  * Conversão                                                               *
  * ===================================================================== */
-
-/**
- * Aplica o fecho de uma tag na pilha de tags abertas (ignora o que não casa).
- */
-function fecharNaPilha(st, tag) {
-  for (let k = st.openStack.length - 1; k >= 0; k--) {
-    if (st.openStack[k] === tag) {
-      st.openStack.length = k;
-      break;
-    }
-  }
-}
 
 // Parâmetros da parada antecipada (ver htmlToMarkdown). Números explicados:
 // a limpeza final ENCOLHE o texto, então a primeira verificação só acontece
@@ -1284,7 +1274,6 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
       }
       if (st.skipDepth > 0) return;
       if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) return;
-      if (!token.selfClosing) st.openStack.push(token.tag);
 
       const tag = token.tag;
       if (tag.charCodeAt(0) === 104 && tag.charCodeAt(1) >= 49 && tag.charCodeAt(1) <= 54) {
@@ -1334,7 +1323,6 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
     }
     if (st.skipDepth > 0) return;
     if (st.preDepth > 0 && PRE_SILENCE_TAGS.has(token.tag)) return;
-    fecharNaPilha(st, token.tag);
 
     const tag = token.tag;
     if (TAGS_BLOCOS_FECHO.has(tag)) fecharBloco(st, tag, emit);
@@ -1444,10 +1432,24 @@ const META_TAGS_CHAVES_DATA = new Set([
   "pubdate",
 ]);
 
+/**
+ * Título do documento, com varredura limitada em vez de regex de documento
+ * inteiro: `/<title[^>]*>([\s\S]*?)<\/title>/` sobre uma página sem </title>
+ * varria o resto do documento a cada `<title` — e há páginas com centenas.
+ */
+function extrairTitulo(html) {
+  const abertura = /<title(?=[\s>])[^>]*>/i.exec(html);
+  if (!abertura) return "";
+  const inicio = abertura.index + abertura[0].length;
+  const fecho = /<\/title\s*>/gi;
+  fecho.lastIndex = inicio;
+  const fim = fecho.exec(html);
+  if (!fim) return "";
+  return decodeEntities(html.slice(inicio, fim.index)).replace(/\s+/g, " ").trim();
+}
+
 export function extractMeta(html) {
-  let title = "";
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch) title = decodeEntities(titleMatch[1]).replace(/\s+/g, " ").trim();
+  const title = extrairTitulo(html);
 
   // UMA varredura das tags <meta> em vez de quatro regex de documento inteiro.
   // Antes, cada campo (descrição, og:title, autor, data) varria o HTML do

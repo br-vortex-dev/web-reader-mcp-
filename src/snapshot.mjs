@@ -80,6 +80,9 @@ function lerDoDisco(chave) {
   } catch {
     return null; // sem ficheiro, ou ficheiro corrompido: é como se não houvesse marca
   }
+  // JSON válido pode ser null/número/lista: acessar `.at` num null derrubava a
+  // ferramenta inteira a partir de um ficheiro corrompido no diretório.
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
   const idade = Date.now() - Number(obj.at || 0);
   // A chave dentro do ficheiro tem que bater com a chave pedida: sem esta
   // conferência, um ficheiro trocado furaria a marca de uma URL para outra.
@@ -190,6 +193,7 @@ export function carregarSnapshotsDoDisco() {
     } catch {
       continue;
     }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) continue;
     // O nome tem que bater com o hash da chave declarada dentro: sem esta
     // conferência, um ficheiro editado à mão furaria uma marca para outra URL.
     if (typeof obj.chave !== "string" || nome !== `${nomeDaChave(obj.chave)}.json`) continue;
@@ -249,6 +253,13 @@ export function normalizarParaDiff(texto) {
     .trim();
 }
 
+/** Bytes que a marca realmente ocupa (hash + texto guardado). */
+export function tamanhoDaMarca(payload) {
+  return (
+    Buffer.byteLength(payload.hash || "", "utf8") + Buffer.byteLength(payload.texto || "", "utf8")
+  );
+}
+
 // Teto de células da tabela de LCS (~16 MB de Uint32Array). Acima disso, o
 // diff vira "grande demais" em vez de arriscar derrubar o processo.
 const MAX_CELULAS_LCS = 4_000_000;
@@ -294,12 +305,15 @@ export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
   // antes, ela caía em "grande demais" sem tentar.
   if (totalAntes > maxLinhas || totalDepois > maxLinhas || totalAntes * totalDepois > MAX_CELULAS_LCS) {
     // Página grande demais para LCS: responde o que dá para afirmar com o
-    // hash e os tamanhos, sem inventar diff.
+    // hash e os tamanhos, sem inventar diff. `iguais` é SEMPRE false aqui: o
+    // código só chega neste ponto quando o corte de prefixo/sufixo encontrou
+    // diferença real, e antes a comparação era "mesmo número de linhas", que
+    // fazia uma troca de conteúdo com contagem igual sair como "SEM MUDANCA".
     return {
       grande: true,
       adicionadas: [],
       removidas: [],
-      iguais: linhasAntes.length === linhasDepois.length,
+      iguais: false,
     };
   }
 
@@ -340,7 +354,16 @@ export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
 }
 
 /** Monta a saída em markdown do diff_page. */
-export function formatarSaidaDiff({ finalUrl, primeiraVez, gravado, diff, hashAntes, hashDepois, maxChars }) {
+export function formatarSaidaDiff({
+  finalUrl,
+  primeiraVez,
+  gravado,
+  diff,
+  hashAntes,
+  hashDepois,
+  maxChars,
+  marcaTruncada = false,
+}) {
   const linhas = [];
   linhas.push(`# Diff: ${finalUrl.split("/").pop() || finalUrl}`);
   linhas.push(`URL: ${finalUrl}`);
@@ -367,10 +390,17 @@ export function formatarSaidaDiff({ finalUrl, primeiraVez, gravado, diff, hashAn
     linhas.push(`Hash antes: ${hashAntes}`);
     linhas.push(`Hash agora: ${hashDepois}`);
     linhas.push("");
-    linhas.push(
-      "A pagina e grande demais para diff linha a linha; o hash prova que o conteudo mudou. " +
-        "Use read_page ou find_on_page para ver o trecho que interessa."
-    );
+    if (marcaTruncada) {
+      linhas.push(
+        "A marca guarda apenas os primeiros 64 KB de texto; a mudanca pode estar fora desse trecho. " +
+          "Use read_page ou find_on_page para localiza-la."
+      );
+    } else {
+      linhas.push(
+        "A pagina e grande demais para diff linha a linha; o hash prova que o conteudo mudou. " +
+          "Use read_page ou find_on_page para ver o trecho que interessa."
+      );
+    }
     return linhas.join("\n");
   }
 

@@ -92,7 +92,7 @@ async function main() {
   // --http so e necessario para nao depender do ambiente ter PORT definido.
   const child = spawn(process.execPath, [join(__dirname, "..", "server.js"), "--http"], {
     cwd: join(__dirname, ".."),
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, PORT: String(PORT), MCP_ALLOW_ANONYMOUS: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
 

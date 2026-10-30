@@ -59,22 +59,31 @@ function ehGzip(buf) {
   return buf.length > 1 && buf[0] === 0x1f && buf[1] === 0x8b;
 }
 
+/** Teto de saída de UMA descompressão (bomba de deflate não passa daqui). */
+const MAX_BYTES_INFLADOS = 64 * 1024 * 1024;
+/** Teto de texto acumulado de todos os streams de um PDF. */
+const MAX_TEXTO_PDF = 8 * 1024 * 1024;
+
 /** Tenta inflar um trecho pelo filtro que o cabeçalho indica; null se não der. */
 function inflar(buf) {
   if (!buf || buf.length < 2) return null;
   try {
     // Z_SYNC_FLUSH: muitos PDFs vêm com o stream cortado no fim (o trailer
     // não interessa para extrair texto) e o inflate estrito recusaria.
+    //
+    // `maxOutputLength` é a defesa contra bomba de descompressão: sem ele, um
+    // stream de poucos KB podia inflar para gigabytes e derrubar o processo
+    // por memória antes de qualquer teto de resposta entrar em ação.
     if (ehGzip(buf)) {
-      const out = gunzipSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+      const out = gunzipSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: MAX_BYTES_INFLADOS });
       return out && out.length ? out : null;
     }
     if (ehZlib(buf)) {
-      const out = inflateSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+      const out = inflateSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: MAX_BYTES_INFLADOS });
       return out && out.length ? out : null;
     }
     // Sem cabeçalho reconhecido, pode ser deflate cru. Uma tentativa só.
-    const cru = inflateRawSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+    const cru = inflateRawSync(buf, { finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: MAX_BYTES_INFLADOS });
     return cru && cru.length ? cru : null;
   } catch {
     return null;
@@ -319,6 +328,9 @@ export function extrairTextoPdf(buffer) {
   let contentStreams = 0;
   let texto = "";
   for (const { dado, declaraFlate } of streams) {
+    // Teto de texto: um PDF pode ter milhares de streams de texto; sem este
+    // corte o acumulador cresce sem limite antes de a resposta ser truncada.
+    if (texto.length >= MAX_TEXTO_PDF) break;
     // A decisão que economiza 95% do tempo (medido em dev/_diag-filtros-pdf.mjs:
     // 1.802 ms -> 81 ms de descompressão num PDF de 2 MB): num PDF real, a
     // maioria dos streams NÃO é comprimida, e a versão antiga tentava três
@@ -337,12 +349,45 @@ export function extrairTextoPdf(buffer) {
     texto += textoDoContent(txt);
   }
 
-  const limpo = normalizar(texto);
-  // Conta páginas pela presença de objetos de página — aproximação barata e
-  // suficiente para informar o leitor (não é para navegação).
-  const paginas = (buffer.toString("latin1").match(/\/Type\s*\/Page[^s]/g) || []).length;
+  const limpo = normalizar(texto).slice(0, MAX_TEXTO_PDF);
+  const paginas = contarPaginas(buffer);
 
-  return { text: limpo, paginas, contentStreams, temTexto: limpo.length > 0, naoEhPdf: false };
+  return {
+    text: limpo,
+    paginas,
+    contentStreams,
+    temTexto: limpo.length > 0,
+    naoEhPdf: false,
+    // PDF criptografado não tem os streams legíveis: sem esta marca, a saída
+    // diria "escaneado ou fonte sem ToUnicode" e mandaria o usuário procurar
+    // OCR quando o problema é senha.
+    criptografado: buffer.includes("/Encrypt"),
+  };
+}
+
+/** Conta objetos de página (`/Type /Page`, sem contar `/Pages`) na passada linear. */
+function contarPaginas(buffer) {
+  const alvo = Buffer.from("/Type");
+  let i = 0;
+  let n = 0;
+  while ((i = buffer.indexOf(alvo, i)) !== -1) {
+    let j = i + alvo.length;
+    while (j < buffer.length && (buffer[j] === 0x20 || buffer[j] === 0x0a || buffer[j] === 0x0d || buffer[j] === 0x09)) {
+      j++;
+    }
+    if (buffer[j] === 0x2f && buffer.slice(j + 1, j + 5).toString("latin1") === "Page") {
+      const proximo = buffer[j + 5];
+      // "Pages", "PageLabels" etc. começam com /Page mas não são uma página.
+      const letraOuNumero =
+        proximo !== undefined &&
+        ((proximo >= 0x30 && proximo <= 0x39) ||
+          (proximo >= 0x41 && proximo <= 0x5a) ||
+          (proximo >= 0x61 && proximo <= 0x7a));
+      if (!letraOuNumero) n++;
+    }
+    i = j + 1;
+  }
+  return n;
 }
 
 /** Monta a saída em markdown do read_pdf. */
@@ -395,6 +440,15 @@ export async function toolReadPdf(args = {}) {
     );
   }
   if (!info.temTexto) {
+    if (info.criptografado) {
+      return (
+        `# PDF: ${payload.finalUrl.split("/").pop() || payload.finalUrl}\nURL: ${payload.finalUrl}\n` +
+        (info.paginas ? `Paginas: ${info.paginas}\n` : "") +
+        `Conteudo: 0 caracteres\n\n` +
+        `Este PDF esta protegido por senha (traz /Encrypt): o texto nao pode ser lido ` +
+        `sem a chave. Nao ha como abrir PDF criptografado nesta ferramenta.\n`
+      );
+    }
     return (
       `# PDF: ${payload.finalUrl.split("/").pop() || payload.finalUrl}\nURL: ${payload.finalUrl}\n` +
       (info.paginas ? `Paginas: ${info.paginas}\n` : "") +

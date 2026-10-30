@@ -96,6 +96,28 @@ function primeiraTag(xml, tag) {
   return todas.length > 0 ? todas[0] : "";
 }
 
+/** Remove tags HTML de um texto em uma passada linear. */
+function removerTags(texto) {
+  let saida = "";
+  let i = 0;
+  for (;;) {
+    const abre = texto.indexOf("<", i);
+    if (abre === -1) {
+      saida += texto.slice(i);
+      break;
+    }
+    const fecha = texto.indexOf(">", abre + 1);
+    if (fecha === -1) {
+      // "<" sem fecho é texto comum (ex.: "a < b"), não uma tag.
+      saida += texto.slice(i);
+      break;
+    }
+    saida += texto.slice(i, abre) + " ";
+    i = fecha + 1;
+  }
+  return saida;
+}
+
 /** Remove CDATA e resolve entidades, devolvendo texto limpo de tags. */
 export function limparTextoXml(bruto) {
   if (!bruto) return "";
@@ -103,25 +125,55 @@ export function limparTextoXml(bruto) {
   // <![CDATA[ ... ]]> é o jeito de publicar HTML cru dentro do feed; o
   // conteúdo dele É o texto (não pode ser descartado junto com a embalagem).
   texto = texto.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1");
-  // Links/HTML dentro do resumo: a tag some, o texto fica.
-  texto = texto.replace(/<[^>]+>/g, " ");
+  // Links/HTML dentro do resumo: a tag some, o texto fica. O varredor manual
+  // evita o custo quadrático do velho /<[^>]+>/g num resumo cheio de "<" sem
+  // fecho (cada "<" relia o resto do texto até o fim).
+  texto = removerTags(texto);
   texto = decodeEntities(texto);
   return texto.replace(/\s+/g, " ").trim();
+}
+
+/** Atributos de uma tag já recortada ("a=\"1\" b='2'"), com entidades resolvidas. */
+function atributosDaTag(tagTexto) {
+  const attrs = {};
+  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*["']([^"']*)["']/g;
+  let m;
+  while ((m = re.exec(tagTexto)) !== null) {
+    attrs[m[1].toLowerCase()] = decodeEntities(m[2]);
+  }
+  return attrs;
 }
 
 /**
  * Link de um item/entry.
  * RSS: <link>https://...</link>
  * Atom: <link rel="alternate" href="https://..."/> (vazio por dentro)
+ *
+ * Atom pode trazer VÁRIOS <link> no mesmo item (enclosure, self, alternate) e
+ * os atributos em qualquer ordem. Antes, duas regexes dependiam da ordem
+ * rel→href e caíam no "primeiro link com href" — o enclosure de áudio saía no
+ * lugar do artigo. Agora todos são lidos e o alternate vence.
  */
 export function linkDoBloco(bloco) {
-  const hrefAtom = bloco.match(/<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*\/?>/i);
-  const relAlternate = bloco.match(/<link\b[^>]*\brel\s*=\s*["']alternate["'][^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*\/?>/i);
-  if (relAlternate) return decodeEntities(relAlternate[1]).trim();
+  let alternativo = "";
+  let reserva = "";
+  const re = /<link\b([^>]*)>/gi;
+  let m;
+  while ((m = re.exec(bloco)) !== null) {
+    const attrs = atributosDaTag(m[1]);
+    const href = (attrs.href || "").trim();
+    if (!href) continue;
+    const rel = (attrs.rel || "alternate").toLowerCase();
+    if (rel === "alternate") {
+      if (!alternativo) alternativo = href;
+    } else if (!reserva) {
+      reserva = href;
+    }
+  }
+  if (alternativo) return alternativo;
   const texto = limparTextoXml(primeiraTag(bloco, "link"));
   if (texto) return texto;
-  if (hrefAtom) return decodeEntities(hrefAtom[1]).trim();
-  return "";
+  return reserva;
 }
 
 /** Converte a data publicada em algo legível, sem inventar formato. */
@@ -203,13 +255,19 @@ function analisarJsonFeed(texto) {
     formato: "jsonfeed",
     titulo: String(dados.title || ""),
     descricao: String(dados.description || ""),
-    itens: dados.items.map((it) => ({
-      titulo: String(it.title || ""),
-      link: String(it.url || it.external_url || ""),
-      data: dataLegivel(it.date_published || it.date_modified || ""),
-      autor: String((it.author && it.author.name) || ""),
-      resumo: String(it.summary || it.content_text || "").replace(/\s+/g, " ").trim(),
-    })),
+    itens: dados.items.map((bruto) => {
+      // O JSON Feed promete objetos, mas um campo null/número no meio derrubava
+      // o feed inteiro ("Cannot read properties of null"). Item inválido vira
+      // item vazio: o resto continua legível.
+      const it = bruto && typeof bruto === "object" ? bruto : {};
+      return {
+        titulo: String(it.title || ""),
+        link: String(it.url || it.external_url || ""),
+        data: dataLegivel(it.date_published || it.date_modified || ""),
+        autor: String((it.author && it.author.name) || ""),
+        resumo: String(it.summary || it.content_text || "").replace(/\s+/g, " ").trim(),
+      };
+    }),
   };
 }
 

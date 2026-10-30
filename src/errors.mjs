@@ -31,9 +31,18 @@ export class WebReaderError extends Error {
   }
 }
 
+// A URL pode ter falhado no parse justamente por causa do user:senha@ — e a
+// mensagem vai para a resposta. Tira o trecho de credenciais sem depender do
+// parser (que é quem falhou) e corta o tamanho para não ecoar um texto gigante.
+function semCredenciais(url) {
+  const texto = String(url ?? "");
+  const limpo = texto.replace(/\/\/[^/?#\s]*@/g, "//");
+  return limpo.length > 200 ? limpo.slice(0, 200) + "…" : limpo;
+}
+
 export class UrlInvalidaError extends WebReaderError {
   constructor(url, motivo = "formato inválido") {
-    super(`URL inválida: ${url} (${motivo})`, { code: "URL_INVALIDA", url });
+    super(`URL inválida: ${semCredenciais(url)} (${motivo})`, { code: "URL_INVALIDA", url });
     this.name = "UrlInvalidaError";
   }
 }
@@ -62,8 +71,11 @@ export class CredenciaisNaUrlError extends WebReaderError {
 }
 
 export class HostBloqueadoError extends WebReaderError {
-  constructor(host, endereco) {
-    super(`Host bloqueado: endereço privado/interno (${endereco})`, {
+  // O endereço resolvido NÃO entra na mensagem: ele é topologia interna do
+  // servidor e a resposta vai para quem chamou de fora. O host basta para a
+  // pessoa entender o bloqueio.
+  constructor(host) {
+    super(`Host bloqueado: endereço privado/interno (${host})`, {
       code: "HOST_BLOQUEADO",
       host,
     });

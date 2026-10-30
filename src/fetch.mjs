@@ -219,9 +219,16 @@ cacheCleanup.unref();
 
 /**
  * Calcula o tamanho em bytes de um payload de cache.
+ *
+ * O `buffer` entra na conta: ele é o corpo do PDF (até 24 MB) e ficava de fora,
+ * então uma entrada binária era contabilizada como quase zero e o teto em bytes
+ * do cache nunca a enxergava — algumas leituras de PDF ocupavam a memória
+ * inteira do processo sem o LRU despejar nada.
  */
 const payloadBytes = (payload) =>
-  Buffer.byteLength(payload.text || "", "utf8") + Buffer.byteLength(payload.finalUrl || "", "utf8");
+  Buffer.byteLength(payload.text || "", "utf8") +
+  Buffer.byteLength(payload.finalUrl || "", "utf8") +
+  (payload.buffer ? payload.buffer.length : 0);
 
 /**
  * Extrai a causa real de um erro de rede do Node.
@@ -671,13 +678,16 @@ export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, si
     if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries, juncao });
     return guardado.payload;
   }
-  return coalescedorDeBuscas.executar(juncao, async () => {
+  const busca = coalescedorDeBuscas.executar(juncao, async () => {
     // Quem esperou na junção pode encontrar a entrada que outro acabou de gravar.
     const quente = pageCache.get(cacheKey);
     if (quente && !quente.stale) return quente.payload;
     return await buscarEAquecer(url, {
-      timeoutMs,
-      signal,
+      // O trabalho compartilhado NÃO herda o prazo curto (nem o sinal) de quem
+      // chegou primeiro: um read_page com timeout de 1 s não pode derrubar a
+      // carona de quem pediu 15 s. Cada chamador espera com o próprio relógio
+      // em aguardarBuscaCompartilhada.
+      timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs),
       retries,
       chave: cacheKey,
       maxBytes: apertado,
@@ -688,6 +698,7 @@ export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, si
       permissoDeCorte: teoCorte,
     });
   });
+  return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
 }
 
 /**
@@ -932,7 +943,11 @@ function guardarNoCache({ cacheKey, payload, extrair }) {
     // junto dos validadores) e não tem mais o `buffer`: rodar a extração de
     // novo diria "não é PDF" e envenenava a entrada a cada revalidação.
     const { text, extraido } = semFlag.extraido ? semFlag : extrair(semFlag);
-    const comTexto = { ...semFlag, text, extraido };
+    // O binário bruto não é guardado: depois de extraído, ninguém o lê de novo
+    // (o 304 restaura o texto pronto) e ele é justamente a maior parte dos
+    // bytes de um PDF. Guardá-lo inflava o cache e o contador de memória.
+    const { buffer: _descartado, ...semBuffer } = semFlag;
+    const comTexto = { ...semBuffer, text, extraido };
     const comTextoBytes = payloadBytes(comTexto);
     if (comTextoBytes <= CACHE_MAX_ENTRY_BYTES) {
       pageCache.set(cacheKey, comTexto, comTextoBytes);
@@ -1070,6 +1085,61 @@ function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, junc
 }
 
 /**
+ * Espera a busca compartilhada respeitando o prazo e o cancelamento DESTE
+ * chamador.
+ *
+ * Antes, quem caronava herdava o sinal e o timeout de quem INICIOU a busca: se
+ * o primeiro cliente desistia (ou pedia timeout curto), todos os demais
+ * recebiam o cancelamento junto, mesmo com prazo de sobra e mesmo que o
+ * download estivesse quase pronto. Aqui a busca em voo segue com um prazo
+ * próprio (o maior entre o padrão e o pedido do iniciador) e cada chamador
+ * espera com o SEU relógio: pode desistir antes, nunca é derrubado pela
+ * desistência dos outros.
+ */
+function aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url }) {
+  // Caminho comum (sem sinal, prazo padrão): a busca já termina no mesmo prazo
+  // e não há por que criar timer nem promessa extra a cada leitura.
+  if (!signal && timeoutMs >= DEFAULT_TIMEOUT_MS) return busca;
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    let terminou = false;
+    const encerrar = () => {
+      terminou = true;
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", aoCancelar);
+    };
+    const aoCancelar = () => {
+      if (terminou) return;
+      encerrar();
+      const motivo = signal.reason && signal.reason.message ? signal.reason.message : "cancelado pelo chamador";
+      reject(new RequisicaoCanceladaError(motivo));
+    };
+    if (signal && signal.aborted) {
+      aoCancelar();
+      return;
+    }
+    if (signal) signal.addEventListener("abort", aoCancelar, { once: true });
+    timer = setTimeout(() => {
+      if (terminou) return;
+      encerrar();
+      reject(new TimeoutError(url, timeoutMs));
+    }, timeoutMs);
+    busca.then(
+      (valor) => {
+        if (terminou) return;
+        encerrar();
+        resolve(valor);
+      },
+      (err) => {
+        if (terminou) return;
+        encerrar();
+        reject(err);
+      }
+    );
+  });
+}
+
+/**
  * Fetch com cache LRU + TTL, junção de buscas em voo e (com CACHE_SWR=1)
  * revalidação em segundo plano. Valida segurança (SSRF + robots) ANTES de
  * baixar. Entrada vencida: sem SWR, busca de novo; com SWR, serve a vencida
@@ -1078,8 +1148,8 @@ function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, junc
  * A junção é o que segura a rajada: N pedidos simultâneos da MESMA URL viram
  * 1 download e todos recebem a mesma resposta — sem ela, cada pedido disparava
  * o próprio fetch até o cache esquentar, multiplicando trabalho na hora
- * crítica. O timeout/sinal é o de quem INICIA a busca; quem carona recebe o
- * resultado dela.
+ * crítica. O download em si roda com prazo próprio; cada chamador espera com o
+ * SEU sinal/prazo (ver aguardarBuscaCompartilhada).
  */
 export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   // A chave do cache/da junção é a URL CANÔNICA: duas variações da mesma
@@ -1092,7 +1162,10 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
     if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(juncao, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
+  const busca = coalescedorDeBuscas.executar(juncao, () =>
+    buscarEAquecer(url, { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs), retries, chave })
+  );
+  return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
 }
 
 /**
@@ -1118,12 +1191,11 @@ export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOU
     if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(juncao, async () => {
+  const busca = coalescedorDeBuscas.executar(juncao, async () => {
     const quente = pageCache.get(chave);
     if (quente && !quente.stale) return quente.payload;
     return await buscarEAquecer(url, {
-      timeoutMs,
-      signal,
+      timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs),
       retries,
       chave,
       maxBytes: MAX_RESPONSE_BYTES_DOCUMENTO,
@@ -1132,6 +1204,7 @@ export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOU
       permissoDeCorte: true,
     });
   });
+  return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
 }
 
 /**
@@ -1153,9 +1226,10 @@ export async function fetchPdfCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sign
     if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(juncao, () =>
-    buscarEAquecer(url, { timeoutMs, signal, retries, chave, extrair })
+  const busca = coalescedorDeBuscas.executar(juncao, () =>
+    buscarEAquecer(url, { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs), retries, chave, extrair })
   );
+  return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
 }
 
 /**

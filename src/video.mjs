@@ -239,16 +239,41 @@ export function detectarVideo(url) {
  * blog/notícia com vídeo incorporado. Devolve { tipo, id, hash } ou null.
  */
 export function procurarEmbedDeVideo(html) {
-  const re = /<iframe[^>]+src=["']([^"']+)["']/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const src = decodeEntities(m[1]);
+  for (const tag of varrerTags(html, "iframe")) {
+    const src = valorDoAtributo(tag, "src");
+    if (!src) continue;
     const idYt = youtubeIdDe(src);
     if (idYt) return { tipo: "youtube", id: idYt };
     const v = vimeoDe(src);
     if (v) return { tipo: "vimeo", id: v.id, hash: v.hash };
   }
   return null;
+}
+
+/**
+ * Varre as tags de abertura <nome ...> em uma passada linear.
+ *
+ * Substitui a família `/<tag\b[^>]*>/` usada aqui: num documento com muitas
+ * tags não fechadas, cada `[^>]*` relê o resto do HTML até o fim — O(n²) num
+ * documento que o cliente controla. O indexOf de ">" garante uma varredura só.
+ */
+function varrerTags(html, nome) {
+  const tags = [];
+  const re = new RegExp(`<${nome}\\b`, "gi");
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const fim = html.indexOf(">", m.index + m[0].length);
+    if (fim === -1) break;
+    tags.push(html.slice(m.index, fim + 1));
+    re.lastIndex = fim + 1;
+  }
+  return tags;
+}
+
+/** Valor decodificado de um atributo dentro da tag já recortada. */
+function valorDoAtributo(tag, nome) {
+  const a = tag.match(regexAtributo(nome));
+  return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
 }
 
 /* ===================================================================== *
@@ -408,15 +433,11 @@ export function metadadosVimeo(config) {
  * Metadados de página genérica (og tags + JSON-LD + <video>/<track>)      *
  * ===================================================================== */
 
-function escapeRegExp(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
- * As regex de atributo e de meta tag eram compiladas a cada chamada: numa
- * página com dezenas de <track>/<video>, o mesmo padrão para "src" era
- * montado de novo dezenas de vezes. O conjunto de nomes é pequeno e fixo,
- * então memoizar não cresce sem limite e corta a compilação repetida.
+ * As regex de atributo eram compiladas a cada chamada: numa página com dezenas
+ * de <track>/<video>, o mesmo padrão para "src" era montado de novo dezenas de
+ * vezes. O conjunto de nomes é pequeno e fixo, então memoizar não cresce sem
+ * limite e corta a compilação repetida.
  */
 const memoRegexAtributo = new Map();
 function regexAtributo(nome) {
@@ -428,35 +449,39 @@ function regexAtributo(nome) {
   return re;
 }
 
-const memoRegexMetaTag = new Map();
-function regexMetaTag(chave) {
-  let re = memoRegexMetaTag.get(chave);
-  if (!re) {
-    re = new RegExp(`<meta\\b[^>]*(?:property|name)\\s*=\\s*["']${escapeRegExp(chave)}["'][^>]*>`, "i");
-    memoRegexMetaTag.set(chave, re);
+/** Metas da página em um mapa property/name -> content (uma varredura só). */
+function mapaDeMetas(html) {
+  const mapa = new Map();
+  for (const tag of varrerTags(html, "meta")) {
+    const chave = (valorDoAtributo(tag, "property") || valorDoAtributo(tag, "name")).toLowerCase();
+    if (!chave || mapa.has(chave)) continue;
+    mapa.set(chave, valorDoAtributo(tag, "content"));
   }
-  return re;
-}
-
-/** Lê o content de uma meta tag por property/name (qualquer ordem de atributo). */
-function metaTagConteudo(html, chave) {
-  const re = regexMetaTag(chave);
-  const m = html.match(re);
-  if (!m) return "";
-  const c = m[0].match(/content\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
-  if (!c) return "";
-  return decodeEntities(c[1] ?? c[2] ?? c[3] ?? "").trim();
+  return mapa;
 }
 
 /** Todos os VideoObject de JSON-LD da página (inclusive dentro de @graph). */
 export function extrairVideoObjects(html) {
   const achados = [];
-  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  // Varredura linear: a versão com regex relia o documento inteiro a cada
+  // <script> de JSON-LD sem </script> correspondente (O(n²) num HTML hostil).
+  const reScript = /<script\b/gi;
+  const reFecho = /<\/script\s*>/gi;
   let m;
-  while ((m = re.exec(html)) !== null) {
+  while ((m = reScript.exec(html)) !== null) {
+    const fimTag = html.indexOf(">", m.index + m[0].length);
+    if (fimTag === -1) break;
+    const tag = html.slice(m.index, fimTag + 1);
+    reScript.lastIndex = fimTag + 1;
+    if (!/type\s*=\s*["']application\/ld\+json["']/i.test(tag)) continue;
+    reFecho.lastIndex = reScript.lastIndex;
+    const fecho = reFecho.exec(html);
+    if (!fecho) break;
+    const corpo = html.slice(reScript.lastIndex, fecho.index);
+    reScript.lastIndex = fecho.index + fecho[0].length;
     let dados;
     try {
-      dados = JSON.parse(m[1].trim());
+      dados = JSON.parse(corpo.trim());
     } catch {
       continue;
     }
@@ -492,14 +517,8 @@ export function segundosDeDuracao(texto) {
 /** Collecta <track> de legendas (src absoluto, kind de texto). */
 export function extrairTracksDeHtml(html, baseUrl) {
   const tracks = [];
-  const re = /<track\b[^>]*>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const tag = m[0];
-    const attr = (nome) => {
-      const a = tag.match(regexAtributo(nome));
-      return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
-    };
+  for (const tag of varrerTags(html, "track")) {
+    const attr = (nome) => valorDoAtributo(tag, nome);
     const src = attr("src");
     if (!src) continue;
     const kind = (attr("kind") || "subtitles").toLowerCase();
@@ -525,12 +544,10 @@ export function metadadosPagina(html, baseUrl) {
   const jsonLd = extrairVideoObjects(html);
   const vo = jsonLd[0] || {};
   const tracksHtml = extrairTracksDeHtml(html, baseUrl);
-  const mVideo = html.match(/<video\b[^>]*>/i);
-  const attrVideo = (nome) => {
-    if (!mVideo) return "";
-    const a = mVideo[0].match(regexAtributo(nome));
-    return a ? decodeEntities(a[1] ?? a[2] ?? a[3] ?? "").trim() : "";
-  };
+  const mVideo = varrerTags(html, "video")[0] || "";
+  const metas = mapaDeMetas(html);
+  const meta = (chave) => metas.get(chave) || "";
+  const attrVideo = (nome) => (mVideo ? valorDoAtributo(mVideo, nome) : "");
 
   const autorJsonLd =
     (vo.author && (vo.author.name || vo.author)) ||
@@ -538,19 +555,18 @@ export function metadadosPagina(html, baseUrl) {
     "";
 
   return {
-    titulo: metaTagConteudo(html, "og:title") || metaTagConteudo(html, "twitter:title") || String(vo.name || ""),
-    descricao:
-      metaTagConteudo(html, "og:description") || metaTagConteudo(html, "twitter:description") || String(vo.description || ""),
-    site: metaTagConteudo(html, "og:site_name"),
+    titulo: meta("og:title") || meta("twitter:title") || String(vo.name || ""),
+    descricao: meta("og:description") || meta("twitter:description") || String(vo.description || ""),
+    site: meta("og:site_name"),
     canal: String(autorJsonLd || ""),
-    publicado: String(vo.uploadDate || "").slice(0, 10) || metaTagConteudo(html, "article:published_time").slice(0, 10),
+    publicado: String(vo.uploadDate || "").slice(0, 10) || meta("article:published_time").slice(0, 10),
     duracaoSeg:
-      segundosDeDuracao(metaTagConteudo(html, "video:duration")) ||
-      segundosDeDuracao(metaTagConteudo(html, "og:video:duration")) ||
+      segundosDeDuracao(meta("video:duration")) ||
+      segundosDeDuracao(meta("og:video:duration")) ||
       segundosDeDuracao(vo.duration),
     capa:
-      metaTagConteudo(html, "og:image") ||
-      metaTagConteudo(html, "twitter:image") ||
+      meta("og:image") ||
+      meta("twitter:image") ||
       String(vo.thumbnailUrl || "") ||
       attrVideo("poster"),
     tracks: tracksHtml,
@@ -558,9 +574,9 @@ export function metadadosPagina(html, baseUrl) {
       mVideo ||
         tracksHtml.length > 0 ||
         jsonLd.length > 0 ||
-        /^video/i.test(metaTagConteudo(html, "og:type")) ||
-        metaTagConteudo(html, "og:video") ||
-        metaTagConteudo(html, "twitter:player")
+        /^video/i.test(meta("og:type")) ||
+        meta("og:video") ||
+        meta("twitter:player")
     ),
   };
 }
@@ -583,12 +599,31 @@ export function segundosDeTempo(ts) {
   return Math.floor(s);
 }
 
+/** Remove marcação de uma legenda em uma passada (sem regex de `[^>]*`). */
+function removerTagsDeLegenda(texto) {
+  let saida = "";
+  let i = 0;
+  for (;;) {
+    const abre = texto.indexOf("<", i);
+    if (abre === -1) {
+      saida += texto.slice(i);
+      break;
+    }
+    const fecha = texto.indexOf(">", abre + 1);
+    if (fecha === -1) {
+      saida += texto.slice(i);
+      break;
+    }
+    saida += texto.slice(i, abre) + " ";
+    i = fecha + 1;
+  }
+  return saida;
+}
+
 /** Limpa marcação das legendas: <i>, <c.cor>, <v Nome>, {\an8}, entidades. */
 function limparTextoDeLegenda(s) {
   return decodeEntities(
-    String(s || "")
-      .replace(/<[^>]*>/g, " ")
-      .replace(/\{\\[^}]*\}/g, " ")
+    removerTagsDeLegenda(String(s || "")).replace(/\{\\[^}]*\}/g, " ")
   )
     .replace(/\s+/g, " ")
     .trim();
@@ -651,12 +686,14 @@ export function converterJson3(corpo) {
   } catch {
     return { blocos: [], cues: 0, caracteres: 0 };
   }
-  const eventos = Array.isArray(dados.events) ? dados.events : [];
+  // `dados` pode ser null/lista/número (JSON válido que não é o objeto
+  // esperado) — acessar `.events` num null derrubava a ferramenta inteira.
+  const eventos = dados && Array.isArray(dados.events) ? dados.events : [];
   const cues = [];
   for (const ev of eventos) {
-    if (!ev || !ev.segs) continue;
+    if (!ev || !Array.isArray(ev.segs)) continue;
     const t = Math.max(0, Math.floor((Number(ev.tStartMs) || 0) / 1000));
-    const texto = ev.segs.map((s) => s.utf8 || "").join("");
+    const texto = ev.segs.map((s) => (s && s.utf8) || "").join("");
     if (!texto) continue;
     if (texto.includes("\n")) {
       const partes = texto.split(/\n+/).filter(Boolean);

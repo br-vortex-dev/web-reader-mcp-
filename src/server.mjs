@@ -62,7 +62,7 @@ async function handleMessage(msg, send) {
           // Versão pedida desconhecida: responde a MAIS NOVA que sabemos
           // falar (a spec manda escolher uma suportada; a mais nova é a que
           // o cliente mais provavelmente entende).
-          protocolVersion: PROTOCOL_VERSIONS.has(requested) ? requested : "2025-06-18",
+          protocolVersion: PROTOCOL_VERSIONS.has(requested) ? requested : "2025-11-25",
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions:

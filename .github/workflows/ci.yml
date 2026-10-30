@@ -1,7 +1,7 @@
 name: ci
 
 # O projeto não tem dependências, por isso não há `npm install` nem lockfile a
-# restaurar: só Node e a suite própria. Cada push corre o lint de imports, os 39
+# restaurar: só Node e a suite própria. Cada push corre o lint de imports, os 40
 # ficheiros de teste (~1 min) e o ponta a ponta pelo stdio.
 on:
   push:

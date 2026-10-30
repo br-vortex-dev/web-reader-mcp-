@@ -19,7 +19,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.9.5";
+export const SERVER_VERSION = "1.9.6";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -38,6 +38,7 @@ export const PROTOCOL_VERSIONS = new Set([
   "2024-11-05",
   "2025-03-26",
   "2025-06-18",
+  "2025-11-25",
 ]);
 
 // Timeout padrão de cada requisição HTTP (configurável por DEFAULT_TIMEOUT_MS).
@@ -315,6 +316,11 @@ export const ROBOTS_TIMEOUT_MS = Math.max(500, Math.min(15000, Math.floor(Number
 export const ROBOTS_NEGATIVE_TTL_MS = Math.max(60000, Math.floor(Number(process.env.ROBOTS_NEGATIVE_TTL_MS) || ROBOTS_TTL_MS));
 export const ROBOTS_MAX_BYTES = 512 * 1024;
 export const ROBOTS_MAX_ORIGINS = 1000;
+// Teto de regras guardadas por origem. Todo acesso a uma URL varre a lista; um
+// robots.txt grande e hostil com milhares de Disallow faria cada leitura pagar
+// a varredura inteira. Acima do teto, as regras seguintes são ignoradas (falha
+// para o lado permitido, como o fail-open do resto do arquivo).
+export const ROBOTS_MAX_REGRAS = 2000;
 // Teto de concorrencia das buscas de robots.txt (uma por origem). Sem ele,
 // uma rajada em muitas origens novas dispararia N buscas ao mesmo tempo.
 export const ROBOTS_MAX_CONCURRENCY = clampEnv(process.env.ROBOTS_MAX_CONCURRENCY, 16, 1, 256);

@@ -67,6 +67,33 @@ test("pedidos em série (não simultâneos) continuam servidos do cache", { time
   }
 });
 
+test("prazo curto de um chamador não mata a carona do chamador paciente", { timeout: 60000 }, async () => {
+  const mcp = await startMcp({ ALLOW_PRIVATE_HOSTS: "1" });
+  try {
+    // A MESMA URL demorada (1,2 s) pedida por dois chamadores: o timeoutMs é
+    // limitado ao mínimo de 1000 ms, então um pede "1 s" e o outro 15 s.
+    // Antes, quem chegava primeiro iniciava o trabalho com o PRÓPRIO prazo e o
+    // segundo herdava o estouro alheio.
+    const url = `${fixture.url}/page/prazos?kb=2&ms=1200`;
+    const medir = async (promessa) => {
+      const t = Date.now();
+      const r = await promessa;
+      return { r, dt: Date.now() - t };
+    };
+    const [curto, longo] = await Promise.all([
+      medir(mcp.call("read_page", { url, maxChars: 300, timeoutMs: 1000 })),
+      medir(mcp.call("read_page", { url, maxChars: 300, timeoutMs: 15000 })),
+    ]);
+    assert.equal(curto.r.isError, true, `o prazo de 1 s deveria estourar: ${curto.r.text}`);
+    assert.ok(curto.dt < 1600, `deveria desistir perto de 1 s (levou ${curto.dt} ms)`);
+    assert.equal(longo.r.isError, false, `o paciente deveria receber a página: ${longo.r.text}`);
+    assert.ok(longo.dt >= 1000, `o paciente deveria esperar a página (levou ${longo.dt} ms)`);
+    assert.match(longo.r.text, /REQ-prazos-1/);
+  } finally {
+    mcp.close();
+  }
+});
+
 test("falha compartilhada não vira rejeição solta nem derruba o servidor", { timeout: 90000 }, async () => {
   const mcp = await startMcp({ ALLOW_PRIVATE_HOSTS: "1" });
   try {

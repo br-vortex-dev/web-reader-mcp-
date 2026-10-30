@@ -20,7 +20,6 @@
  *   snapshot, video.
  */
 
-import { appendFileSync } from "node:fs";
 import {
   MAX_PAGES_PER_CALL,
   MAX_PRAZO_MULTI_MS,
@@ -71,6 +70,7 @@ import {
   normalizarParaDiff,
   diffDeLinhas,
   formatarSaidaDiff,
+  tamanhoDaMarca,
   TEXTO_DA_MARCA,
 } from "./snapshot.mjs";
 import { urlSemCredenciais, chaveCanonica } from "./utils.mjs";
@@ -187,8 +187,16 @@ function extractPrimitives(jsCode) {
 
 /**
  * Converte um objeto JSON extraído em markdown legível.
+ *
+ * `estado.chars` é o orçamento compartilhado da conversão: um __NEXT_DATA__ ou
+ * uma resposta de API grande montava a string inteira em memória antes de
+ * qualquer truncate (o read_page só corta no fim). Ao estourar o teto, a
+ * conversão para e a saída diz que parou.
  */
-function jsonToMarkdown(data, depth = 0, seen = new Set()) {
+const LIMITE_MD_JSON = 200_000;
+
+function jsonToMarkdown(data, depth = 0, seen = new Set(), estado = { chars: 0 }) {
+  if (estado.chars >= LIMITE_MD_JSON) return "(limite de dados embutidos atingido)";
   if (data === null || data === undefined) return "";
   if (typeof data === "string") return data;
   if (typeof data === "number" || typeof data === "boolean") return String(data);
@@ -198,12 +206,22 @@ function jsonToMarkdown(data, depth = 0, seen = new Set()) {
     seen.add(data);
     try {
       if (Array.isArray(data)) {
-        return data.map((item) => `- ${jsonToMarkdown(item, depth + 1, seen)}`).join("\n");
+        const itens = [];
+        for (const item of data) {
+          if (estado.chars >= LIMITE_MD_JSON) break;
+          const md = jsonToMarkdown(item, depth + 1, seen, estado);
+          if (!md) continue;
+          const linha = `- ${md}`;
+          estado.chars += linha.length;
+          itens.push(linha);
+        }
+        return itens.join("\n");
       }
       const lines = [];
       for (const [key, value] of Object.entries(data)) {
+        if (estado.chars >= LIMITE_MD_JSON) break;
         if (value === null || value === undefined) continue;
-        const formatted = jsonToMarkdown(value, depth + 1, seen);
+        const formatted = jsonToMarkdown(value, depth + 1, seen, estado);
         if (!formatted) continue;
         if (typeof value === "object" && !Array.isArray(value)) {
           lines.push(`${"  ".repeat(depth)}- **${key}**:`);
@@ -568,12 +586,10 @@ export async function toolReadPage(args = {}) {
   }
   const meta = metaMemo(payload);
   let markdown = markdownMemo(payload);
-  let interrompida = markdownInterrompida(payload);
   if (markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown)) {
     const dynamicMarkdown = await embeddedMemo(payload, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
       markdown = dynamicMarkdown;
-      interrompida = false;
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
@@ -598,17 +614,31 @@ export async function toolReadPage(args = {}) {
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown), extraLabel });
 }
 
-function buscarNasLinhas(linhas, matcher) {
+function buscarNasLinhas(linhas, matcher, maxContagem = 10000) {
   const casadas = new Set();
   let total = 0;
+  let saturada = false;
   for (let i = 0; i < linhas.length; i++) {
     matcher.lastIndex = 0;
-    if (matcher.test(linhas[i])) {
-      total += 1;
-      casadas.add(i);
+    let achou = false;
+    let m;
+    // exec em vez de test: o número de OCORRÊNCIAS deixa de ser o número de
+    // linhas que casaram (uma linha com três "R$" contava como uma).
+    while ((m = matcher.exec(linhas[i])) !== null) {
+      achou = true;
+      total++;
+      // Regex de comprimento zero ("^", "x*") não avança sozinha: sem isto o
+      // laço não termina.
+      if (m[0] === "") matcher.lastIndex++;
+      if (total >= maxContagem) {
+        saturada = true;
+        break;
+      }
     }
+    if (achou) casadas.add(i);
+    if (saturada) break;
   }
-  return { total, casadas };
+  return { total, casadas, saturada };
 }
 
 /**
@@ -646,6 +676,18 @@ export async function toolFindOnPage(args = {}) {
 
   let matcher;
   if (args.regex) {
+    // Regex do chamador roda sobre linhas da página: um padrão patológico
+    // ("(a+)+$") trava o processo num texto longo — e o processo é o servidor
+    // inteiro. Recusa os aninhamentos clássicos e impõe teto de tamanho.
+    if (query.length > 500) {
+      throw new ParametroInvalidoError("query", "regex com mais de 500 caracteres");
+    }
+    if (/(\([^()]*[*+][^()]*\)\s*[*+])|(\[[^\]]*[*+][^\]]*\]\s*[*+])/.test(query)) {
+      throw new ParametroInvalidoError(
+        "query",
+        "regex com quantificador dentro de grupo quantificado (risco de travamento); simplifique o padrão"
+      );
+    }
     try {
       matcher = new RegExp(query, args.matchCase ? "g" : "gi");
     } catch (err) {
@@ -659,7 +701,7 @@ export async function toolFindOnPage(args = {}) {
   // Trabalha por LINHAS: a linha é a unidade que a IA lê e cita. Cada
   // ocorrência marca a linha dela; o contexto são as linhas em volta.
   let linhas = conteudo.split("\n");
-  let { total, casadas } = buscarNasLinhas(linhas, matcher);
+  let { total, casadas, saturada } = buscarNasLinhas(linhas, matcher);
 
   // A parada antecipada converte só a frente da página. Se ela não teve
   // NENHUM acerto, responder "nenhuma ocorrencia" seria mentira quando o termo
@@ -671,7 +713,7 @@ export async function toolFindOnPage(args = {}) {
     conteudo = markdownCompleto(payload);
     interrompida = false;
     linhas = conteudo.split("\n");
-    ({ total, casadas } = buscarNasLinhas(linhas, matcher));
+    ({ total, casadas, saturada } = buscarNasLinhas(linhas, matcher));
   }
 
   // Cobertura da busca. Há dois modos de a ferramenta ver só um pedaço da
@@ -695,34 +737,54 @@ export async function toolFindOnPage(args = {}) {
     );
   }
 
-  // Constrói os blocos com contexto, sem repetir linha e com teto de blocos.
-  const indices = [...casadas].sort((a, b) => a - b);
-  const blocos = [];
-  let usadas = 0;
-  const jaMostrada = new Set();
+  // Constrói os blocos com contexto. O mapa guarda TODAS as linhas que devem
+  // aparecer (acerto = true, contexto = false): antes, uma linha que era
+  // contexto de um acerto anterior sumia do bloco do acerto seguinte — e o
+  // marcador ">" do acerto ficava escondido. Linhas fora do mapa viram uma
+  // quebra "..." entre blocos.
+  const indices = [...casadas].sort((a, b) => a - b).slice(0, maxHits);
+  const marcadas = new Map();
   for (const idx of indices) {
-    if (blocos.length >= maxHits) break;
     const ini = Math.max(0, idx - contexto);
     const fim = Math.min(linhas.length - 1, idx + contexto);
-    const trecho = [];
     for (let j = ini; j <= fim; j++) {
-      if (jaMostrada.has(j)) continue;
-      jaMostrada.add(j);
-      const marcador = j === idx ? ">" : " ";
-      trecho.push(`${marcador} ${String(j + 1).padStart(4)}| ${linhas[j]}`);
+      if (j === idx) marcadas.set(j, true);
+      else if (!marcadas.has(j)) marcadas.set(j, false);
     }
-    blocos.push(trecho.join("\n"));
-    usadas += 1;
   }
+  const ordenadas = [...marcadas.keys()].sort((a, b) => a - b);
+  const blocos = [];
+  let atual = [];
+  let anterior = null;
+  for (const j of ordenadas) {
+    if (anterior !== null && j !== anterior + 1) {
+      blocos.push(atual.join("\n"));
+      atual = [];
+    }
+    atual.push(`${marcadas.get(j) ? ">" : " "} ${String(j + 1).padStart(4)}| ${linhas[j]}`);
+    anterior = j;
+  }
+  if (atual.length > 0) blocos.push(atual.join("\n"));
+  const usadas = indices.length;
+  // `maxHits` limita LINHAS com acerto, não ocorrências: uma linha com seis
+  // "R$" já é exibida inteira com as seis. Contar `total - usadas` aqui dizia
+  // "5 ocorrências além do limite" quando as cinco estavam na linha mostrada.
+  const linhasOcultas = casadas.size - usadas;
 
-  const mostradas = Math.min(total, maxHits);
   const cabecalho =
     `# Busca em: ${finalUrl}\n` +
     `Termo: "${query}"${args.regex ? " (regex)" : ""}\n` +
-    `Ocorrencias: ${total} em ${linhas.length} linha(s)` +
-    (total > mostradas ? ` — exibindo ${mostradas}` : "") +
+    `Ocorrencias: ${total}${saturada ? "+" : ""} em ${linhas.length} linha(s)` +
+    (linhasOcultas > 0 ? ` — exibindo ${usadas} linha(s) com acerto` : "") +
     avisoCobertura;
-  return cabecalho + "\n\n" + blocos.join("\n\n") + (total > usadas ? `\n\n[... ${total - usadas} ocorrencia(s) alem do limite; aumente maxHits ...]` : "");
+  return (
+    cabecalho +
+    "\n\n" +
+    blocos.join("\n\n...\n\n") +
+    (linhasOcultas > 0
+      ? `\n\n[... ${linhasOcultas} linha(s) com ocorrencias alem do limite; aumente maxHits ...]`
+      : "")
+  );
 }
 
 /**
@@ -759,12 +821,23 @@ export async function toolDiffPage(args = {}) {
     throw new TextoIncompletoError(finalUrl, conteudo.length);
   }
 
-  const hashDepois = hashConteudo(conteudo);
+  // O hash é do texto NORMALIZADO, o mesmo que o diff compara: uma diferença
+  // só de espaços no fim da linha não é "o conteúdo mudou" — antes o hash cru
+  // acusava mudança e o diff linha a linha vinha vazio.
+  const textoNormalizado = normalizarParaDiff(conteudo);
+  const hashDepois = hashConteudo(textoNormalizado);
+
+  // A marca guarda só os primeiros 64 KB do texto. Comparar o documento
+  // inteiro contra essa janela marcaria todo o resto como "adicionado" a cada
+  // mudança; por isso a comparação usa a MESMA janela dos dois lados.
+  const janelaAtual = textoNormalizado.slice(0, TEXTO_DA_MARCA);
+  const marcaTruncada = textoNormalizado.length > TEXTO_DA_MARCA;
+  const novaMarca = { hash: hashDepois, texto: janelaAtual };
 
   const anterior = buscarMarca(chave);
 
   if (!anterior || args.force) {
-    void guardarMarca(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, TEXTO_DA_MARCA) }, conteudo.length);
+    void guardarMarca(chave, novaMarca, tamanhoDaMarca(novaMarca));
     return formatarSaidaDiff({
       finalUrl,
       primeiraVez: true,
@@ -788,19 +861,24 @@ export async function toolDiffPage(args = {}) {
     });
   }
 
-  const diff = diffDeLinhas(anterior.texto || "", conteudo);
+  const diff = diffDeLinhas(anterior.texto || "", janelaAtual);
+  // Hash diferente com janela idêntica: a mudança está além dos 64 KB
+  // guardados. Sem este desvio a saída diria "SEM MUDANCA" com dois hashes
+  // diferentes — o pior desfecho possível para quem usa o diff_page.
+  const mudancaForaDaJanela = diff.iguais;
   // A marca avança: o próximo diff mede a partir de agora (é o que a pessoa
   // espera de "o que mudou desde a ultima vez que eu olhei").
-  void guardarMarca(chave, { hash: hashDepois, texto: normalizarParaDiff(conteudo).slice(0, TEXTO_DA_MARCA) }, conteudo.length);
+  void guardarMarca(chave, novaMarca, tamanhoDaMarca(novaMarca));
 
   return formatarSaidaDiff({
     finalUrl,
     primeiraVez: false,
     gravado: true,
-    diff,
+    diff: mudancaForaDaJanela ? { grande: true } : diff,
     hashAntes: anterior.hash,
     hashDepois,
     maxChars,
+    marcaTruncada,
   });
 }
 
@@ -886,7 +964,6 @@ export async function toolReadMultiplePages(args = {}) {
       // já em curso continuam (e terminam sozinhas), mas não seguram a
       // resposta — o Promise.race abaixo devolve o que houver.
       if (Date.now() >= prazoFinal) {
-        estourouPrazo = true;
         return;
       }
       const url = unicas[posicao];
@@ -937,10 +1014,11 @@ export async function toolReadMultiplePages(args = {}) {
     // Fila barrada pelo prazo: a URL nem chegou a ser pedida. É diferente de
     // erro — nada falhou, o orçamento de tempo acabou. A mensagem diz isso e
     // aponta a saída, senão o cliente lê como se a página estivesse quebrada.
+    // (Não prometemos cache quente: esta URL não foi baixada por ninguém.)
     if (!leitura) {
       naoLidas++;
       secoes.push(
-        `(não lida: o prazo de ${prazoMs} ms da chamada terminou antes — peça esta URL em outra chamada, o cache está quente)`
+        `(não lida: o prazo de ${prazoMs} ms da chamada terminou antes — peça esta URL em outra chamada)`
       );
       return;
     }
@@ -1101,20 +1179,30 @@ export async function toolDiscoverUrls(args = {}) {
   // com <loc>, na ordem de prioridade. Site sem sitemap punha 4 idas de 404
   // em série (o iana.org levava 1.454 ms); em paralelo o custo é o de UMA
   // ida. O limitador por host do fetch.mjs segura a concorrência.
-  const respostas = await Promise.allSettled(
-    candidatos.map(async (candidato) => {
-      // Sitemap é documento, não página: um sitemap de 40.000 URLs passa fácil
-      // do teto duro de 5 MB. O teto de documento evita perder as URLs do fim.
-      const { text, contentType } = await fetchTextDocumentoCached(candidato, { timeoutMs });
-      if (!/xml/.test(contentType) && !text.includes("<loc>")) return [];
-      return locsDoSitemap(text);
-    }),
-  );
+  //
+  // As promessas são esperadas NA ORDEM, uma a uma, e a busca para no primeiro
+  // resultado. Antes era allSettled: mesmo com o sitemap.xml já pronto, a
+  // resposta esperava os outros três terminarem (um candidato lento segurava
+  // tudo). Os que não foram esperados continuam em segundo plano e aquecem o
+  // cache — por isso o catch: rejeição sem dono derrubaria o processo.
+  const buscas = candidatos.map(async (candidato) => {
+    // Sitemap é documento, não página: um sitemap de 40.000 URLs passa fácil
+    // do teto duro de 5 MB. O teto de documento evita perder as URLs do fim.
+    const { text, contentType } = await fetchTextDocumentoCached(candidato, { timeoutMs });
+    if (!/xml/.test(contentType) && !text.includes("<loc>")) return [];
+    return locsDoSitemap(text);
+  });
+  buscas.forEach((b) => b.catch(() => {}));
   let sitemapUrls = [];
-  for (const resposta of respostas) {
-    const locs = resposta.status === "fulfilled" ? resposta.value : [];
+  for (const busca of buscas) {
+    let locs = [];
+    try {
+      locs = await busca;
+    } catch {
+      locs = [];
+    }
     if (locs.length > 0) {
-      sitemapUrls.push(...locs);
+      sitemapUrls = locs;
       break;
     }
   }

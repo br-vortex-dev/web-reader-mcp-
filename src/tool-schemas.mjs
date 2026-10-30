@@ -22,6 +22,13 @@
 export const TOOLS = [
   {
     name: "read_page",
+    title: "Ler página web",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê uma página web (GET) e devolve o conteúdo extraído em markdown: título, meta descrição e texto principal. " +
       "Use para ler artigos, documentações, blogs, páginas de produto, etc.",
@@ -40,6 +47,13 @@ export const TOOLS = [
   },
   {
     name: "extract_links",
+    title: "Extrair links",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Acessa uma página e lista seus links (texto + URL absoluta), sem duplicatas. " +
       "Use para descobrir para onde uma página aponta e escolher a próxima página a ler.",
@@ -55,6 +69,13 @@ export const TOOLS = [
   },
   {
     name: "read_multiple_pages",
+    title: "Ler várias páginas",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê várias páginas por chamada (máx 30 URLs, em lotes paralelos) e devolve o conteúdo de cada uma, " +
       "com o status de sucesso/falha por URL.",
@@ -77,6 +98,13 @@ export const TOOLS = [
   },
   {
     name: "discover_urls",
+    title: "Descobrir URLs do site",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Descobre as URLs de um site: lê o sitemap.xml (e variantes, incluindo sitemap indexes) " +
       "e lista as páginas encontradas. Se não houver sitemap, devolve os links internos da home. " +
@@ -93,6 +121,13 @@ export const TOOLS = [
   },
   {
     name: "crawl_site",
+    title: "Varrer site",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê um site sozinho: começa na URL, extrai os links internos e vai seguindo pelos não visitados " +
       "(BFS, lotes paralelos), devolvendo o conteúdo de cada página. " +
@@ -111,6 +146,13 @@ export const TOOLS = [
   },
   {
     name: "read_dynamic_page",
+    title: "Ler página dinâmica",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê páginas que dependem de JavaScript para renderizar (React, Vue, Angular, Next.js, etc.) " +
       "sem precisar de Playwright. Detecta se a página é dinâmica e extrai dados embutidos no HTML " +
@@ -131,6 +173,13 @@ export const TOOLS = [
   },
   {
     name: "read_video",
+    title: "Ler vídeo",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê um vídeo de plataformas conhecidas (YouTube, Vimeo) ou de qualquer página com vídeo embutido: " +
       "devolve os metadados publicados (título, canal, duração, visualizações, descrição, capa) e a " +
@@ -160,6 +209,13 @@ export const TOOLS = [
   },
   {
     name: "read_pdf",
+    title: "Ler PDF",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê um PDF público e devolve o TEXTO extraído (sem OCR): artigos, editais, relatórios, contratos. " +
       "Reconstrói espaços e quebras a partir dos operadores de texto do PDF. " +
@@ -180,6 +236,13 @@ export const TOOLS = [
   },
   {
     name: "read_feed",
+    title: "Ler feed RSS/Atom",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê um feed RSS 2.0, RDF, Atom ou JSON Feed e devolve os itens em markdown: título, link, " +
       "data, autor e resumo de cada um. Use para acompanhar blog, notícia, changelog ou releases " +
@@ -200,6 +263,13 @@ export const TOOLS = [
   },
   {
     name: "read_json",
+    title: "Ler JSON público",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Lê uma resposta JSON pública (API, endpoint .json) e devolve o JSON formatado, com a forma " +
       "declarada (objeto/array e chaves). Aceita 'path' (ex.: 'data.items') para entregar só o ramo " +
@@ -223,6 +293,13 @@ export const TOOLS = [
   },
   {
     name: "find_on_page",
+    title: "Buscar na página",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Busca um termo numa página e devolve só os trechos que casam, com as linhas em volta — " +
       "em vez de entregar a página inteira. Use para achar um preço, uma tabela, um nome ou uma " +
@@ -235,7 +312,7 @@ export const TOOLS = [
         query: { type: "string", description: "Termo a buscar (texto literal, ou regex com regex:true)" },
         regex: { type: "boolean", description: "Trata query como expressão regular (padrão false)" },
         matchCase: { type: "boolean", description: "Diferencia maiúsculas de minúsculas (padrão false)" },
-        maxHits: { type: "number", description: "Máximo de ocorrências a exibir (padrão 20, max 100)" },
+        maxHits: { type: "number", description: "Máximo de linhas com acerto a exibir (padrão 20, max 100)" },
         contexto: { type: "number", description: "Linhas de contexto em volta de cada acerto (padrão 1, max 5)" },
         timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
       },
@@ -244,6 +321,13 @@ export const TOOLS = [
   },
   {
     name: "diff_page",
+    title: "Comparar página com a leitura anterior",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description:
       "Compara a página com a leitura anterior e devolve SÓ o que mudou (linhas adicionadas e " +
       "removidas). A primeira chamada de uma URL grava o ponto de comparação; as seguintes medem " +
