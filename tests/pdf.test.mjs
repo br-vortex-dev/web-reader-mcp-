@@ -60,3 +60,29 @@ test("releitura da mesma URL reaproveita a extracao (cache)", async () => {
   const r2 = await mcp.call("read_pdf", { url, maxChars: 8000 });
   assert.equal(r1.text, r2.text);
 });
+
+// O read_pdf e o read_page usavam a MESMA chave de cache. O read_pdf sobre uma
+// pagina HTML guardava "nao e PDF" (texto vazio) na entrada que o read_page
+// depois servia como pagina em branco.
+test("read_pdf em pagina HTML nao envenena o cache do read_page", async () => {
+  const url = `${fixture.url}/pagina`;
+  const pdf = await mcp.call("read_pdf", { url, maxChars: 8000 });
+  assert.equal(pdf.isError, false, pdf.text);
+  assert.match(pdf.text, /nao reconhecido/i);
+
+  const pagina = await mcp.call("read_page", { url, maxChars: 8000 });
+  assert.equal(pagina.isError, false, pagina.text);
+  assert.match(pagina.text, /CASO 1/);
+  assert.match(pagina.text, /Fixture Parser/);
+});
+
+// A outra direcao do mesmo defeito: o read_page sobre um PDF guardava o
+// binario decodificado como texto na entrada que o read_pdf depois tentava
+// extrair (sem os bytes crus, a extracao dizia que nao era PDF).
+test("read_page em PDF nao envenena a extracao do read_pdf", async () => {
+  const url = `${fixture.url}/pdf/simples.pdf`;
+  await mcp.call("read_page", { url, maxChars: 2000 });
+  const pdf = await mcp.call("read_pdf", { url, maxChars: 8000 });
+  assert.equal(pdf.isError, false, pdf.text);
+  assert.match(pdf.text, /Relatorio de teste do leitor de PDF/);
+});

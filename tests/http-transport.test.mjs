@@ -129,6 +129,125 @@ test("initialize reusa a sessao enviada pelo cliente", async () => {
   assert.ok(sid && sid !== "abc", "sessao inexistente nao deve ser ecoada");
 });
 
+test("initialize com versao desconhecida responde a mais nova suportada", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 71,
+      method: "initialize",
+      params: { protocolVersion: "1999-01-01" },
+    }),
+  });
+  assert.equal(r.status, 200);
+  const json = JSON.parse(r.body);
+  assert.equal(json.result.protocolVersion, "2025-06-18");
+});
+
+test("initialize sem id (notificacao) nao gera resposta", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "initialize", params: {} }),
+  });
+  assert.equal(r.status, 202);
+  assert.equal(r.body, "");
+});
+
+test("mensagem JSON que nao e objeto devolve -32600 com id null", async () => {
+  const r = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: "42",
+  });
+  assert.equal(r.status, 200);
+  const json = JSON.parse(r.body);
+  assert.equal(json.id, null);
+  assert.equal(json.error.code, -32600);
+});
+
+// Sem teto, UMA sessao valida abria conexoes SSE sem limite ate esgotar os
+// descritores do processo (e os POSTs param junto).
+test("SSE: no maximo 4 canais por sessao (5o recebe 429)", { timeout: 30000 }, async () => {
+  const init = await bruto("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 72,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    }),
+  });
+  const sid = init.headers.get("mcp-session-id");
+  assert.ok(sid, "initialize deveria emitir sessao");
+
+  const abrirCanal = () =>
+    new Promise((resolve) => {
+      const sock = net.connect(port, "127.0.0.1", () => {
+        sock.write(
+          `GET /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n` +
+            `Authorization: Bearer ${TOKEN}\r\nMcp-Session-Id: ${sid}\r\n` +
+            `Accept: text/event-stream\r\n\r\n`
+        );
+      });
+      let buf = "";
+      let encerrado = false;
+      const concluir = () => {
+        if (encerrado) return true;
+        const status = Number((buf.match(/^HTTP\/1\.[01] (\d+)/) || [])[1]);
+        if (!status) return false;
+        // 200 e um stream aberto: resolve nos cabecalhos.
+        encerrado = true;
+        clearTimeout(timer);
+        resolve({ sock, status, buf });
+        return true;
+      };
+      sock.on("data", (d) => {
+        buf += d.toString();
+        concluir();
+      });
+      sock.on("error", () => {
+        if (!encerrado) {
+          encerrado = true;
+          resolve({ sock, status: 0, buf });
+        }
+      });
+      const timer = setTimeout(() => {
+        if (!concluir()) {
+          encerrado = true;
+          sock.destroy();
+          resolve({ sock, status: 0, buf });
+        }
+      }, 5000);
+    });
+
+  const canais = [];
+  try {
+    for (let i = 0; i < 4; i++) {
+      const canal = await abrirCanal();
+      assert.equal(canal.status, 200, `canal ${i + 1} deveria abrir: ${canal.buf.slice(0, 120)}`);
+      canais.push(canal.sock);
+    }
+    // O 5o canal recebe 429 e a resposta FECHA, entao fetch resolve normalmente;
+    // se o teto nao existisse, este fetch ficaria pendurado no stream aberto.
+    const quinto = await fetch(`${base}/mcp`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "mcp-session-id": sid,
+        accept: "text/event-stream",
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(quinto.status, 429, "5o canal deveria ser recusado");
+    assert.match(await quinto.text(), /Limite de 4 canais SSE/);
+  } finally {
+    for (const sock of canais) sock.destroy();
+  }
+});
+
 test("401: sem token, /mcp devolve 401 com www-authenticate Bearer", async () => {
   const r = await bruto("/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(r.status, 401);

@@ -4,6 +4,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startFixture, startMcp, sleep } from "./helpers.mjs";
+import { assertPublicHost } from "../src/security.mjs";
 
 const RATE_LIMIT_MAX = 60;
 
@@ -23,6 +24,11 @@ const URLS_PRIVADAS = [
   ["http://[fd00::1]/", "fc00::/7 (ULA)"],
   ["http://[fe80::1]/", "fe80::/10 (link-local)"],
   ["http://[::ffff:127.0.0.1]/", "IPv4 mapeado em IPv6"],
+  ["http://[::ffff:7f00:1]/", "IPv4 mapeado em IPv6 (hex)"],
+  ["http://[0:0:0:0:0:ffff:7f00:1]/", "IPv4 mapeado em IPv6 (forma expandida)"],
+  ["http://[64:ff9b::7f00:1]/", "NAT64 para loopback"],
+  ["http://[2002:7f00:1::]/", "6to4 para loopback"],
+  ["http://[2001::1]/", "Teredo"],
 ];
 
 let fixture;
@@ -53,6 +59,13 @@ test("bloqueia hosts privados/internos (ALLOW_PRIVATE_HOSTS desligado)", { timeo
       `mensagem inesperada para ${rotulo}: ${r.text}`
     );
   }
+});
+
+// Controle positivo do classificador de IPv6: endereço público não é bloqueado
+// (sem esta prova, "bloquear tudo" também passaria nos casos negativos).
+test("IPv6 publico nao e bloqueado", async () => {
+  const ip = await assertPublicHost("http://[2606:4700:4700::1111]/");
+  assert.equal(ip, "2606:4700:4700::1111");
 });
 
 test("a guarda vale para todos os caminhos de saida, nao so read_page", { timeout: 60000 }, async () => {

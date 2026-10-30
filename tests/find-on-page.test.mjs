@@ -58,6 +58,15 @@ test("termo ausente avisa em vez de devolver vazio", async () => {
   assert.match(r.text, /Nenhuma ocorrencia/);
 });
 
+test("contexto 0 devolve so a linha do acerto", async () => {
+  const r = await mcp.call("find_on_page", { url: `${fixture.url}/`, query: "CASO 9", contexto: 0 });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Ocorrencias: 1/);
+  // A linha do acerto vem marcada com ">"; nenhuma linha de contexto (" ") pode aparecer.
+  assert.match(r.text, /^> *\d+\| .*CASO 9/m);
+  assert.doesNotMatch(r.text, /^ +\d+\|/m);
+});
+
 test("maxHits limita os blocos e sinaliza o que ficou de fora", async () => {
   const r = await mcp.call("find_on_page", { url: `${fixture.url}/`, query: "CASO", maxHits: 2 });
   assert.equal(r.isError, false);

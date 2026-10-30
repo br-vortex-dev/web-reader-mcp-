@@ -48,6 +48,24 @@ test("preserva a indentacao de codigo YAML", () => {
   assert.equal(yaml, "servico:\n  nome: api\n  portas:\n    - 80\n    - 443\n");
 });
 
+test("dentro de <pre>, strong/em/links nao viram markdown", async () => {
+  const r = await mcp.call("read_page", { url: `${fixture.url}/pre-inline`, maxChars: 5000 });
+  assert.equal(r.isError, false, r.text);
+  const bloco = blocosDeCodigo(r.text).find((b) => b.includes("const total"));
+  assert.ok(bloco, `bloco de codigo nao encontrado: ${r.text}`);
+  assert.match(bloco, /const total = 1 \+ 2;/);
+  assert.match(bloco, /Veja o alvo aqui\./);
+  assert.doesNotMatch(bloco, /\*\*|\[o alvo\]|<strong>|<em>/);
+});
+
+test("extract_links ignora blob: e about: (nao sao http/https)", async () => {
+  const r = await mcp.call("extract_links", { url: `${fixture.url}/links-esquisitos` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /\/alvo/);
+  assert.doesNotMatch(r.text, /blob:/);
+  assert.doesNotMatch(r.text, /about:/);
+});
+
 test("gera tabela markdown valida com cabecalho th", () => {
   const encontradas = tabelas(markdown);
   assert.ok(encontradas.length >= 2, `esperava pelo menos 2 tabelas, achei ${encontradas.length}`);

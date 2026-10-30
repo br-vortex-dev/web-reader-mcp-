@@ -249,6 +249,10 @@ export function normalizarParaDiff(texto) {
     .trim();
 }
 
+// Teto de células da tabela de LCS (~16 MB de Uint32Array). Acima disso, o
+// diff vira "grande demais" em vez de arriscar derrubar o processo.
+const MAX_CELULAS_LCS = 4_000_000;
+
 /**
  * Diff por LINHAS (algoritmo de LCS por bloco). Não é o diff mínimo do git:
  * é a lista de linhas acrescentadas/removidas, que é o que se lê.
@@ -259,17 +263,6 @@ export function normalizarParaDiff(texto) {
 export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
   const linhasAntes = normalizarParaDiff(antes).split("\n");
   const linhasDepois = normalizarParaDiff(depois).split("\n");
-
-  if (linhasAntes.length > maxLinhas || linhasDepois.length > maxLinhas) {
-    // Página grande demais para LCS: responde o que dá para afirmar com o
-    // hash e os tamanhos, sem inventar diff.
-    return {
-      grande: true,
-      adicionadas: [],
-      removidas: [],
-      iguais: linhasAntes.length === linhasDepois.length,
-    };
-  }
 
   // Corte do prefixo e do sufixo comuns: o miolo é o que interessa.
   // `inicio` é a primeira linha em que os dois lados diferem; `fimAntes` e
@@ -292,12 +285,28 @@ export function diffDeLinhas(antes, depois, { maxLinhas = 4000 } = {}) {
     return { grande: false, adicionadas: [], removidas: [], iguais: true };
   }
 
+  const totalAntes = meioAntes.length;
+  const totalDepois = meioDepois.length;
+  // O teto por LINHAS não segura o custo do LCS sozinho: 4.000×4.000 células
+  // são ~64 MB de Uint32Array. O produto é o orçamento real (~16 MB aqui).
+  // A decisão vem DEPOIS do corte de prefixo/sufixo: uma página de 50 mil
+  // linhas que mudou um parágrafo tem miolo de duas linhas e merece o diff —
+  // antes, ela caía em "grande demais" sem tentar.
+  if (totalAntes > maxLinhas || totalDepois > maxLinhas || totalAntes * totalDepois > MAX_CELULAS_LCS) {
+    // Página grande demais para LCS: responde o que dá para afirmar com o
+    // hash e os tamanhos, sem inventar diff.
+    return {
+      grande: true,
+      adicionadas: [],
+      removidas: [],
+      iguais: linhasAntes.length === linhasDepois.length,
+    };
+  }
+
   // LCS no miolo (que já é pequeno na prática).
   // `tabela[i][j]` guarda o tamanho do maior subsequência comum entre
   // meioAntes[i..] e meioDepois[j..]. É preenchida do fim para o começo
   // porque cada célula depende das de baixo e da direita.
-  const totalAntes = meioAntes.length;
-  const totalDepois = meioDepois.length;
   const tabela = Array.from({ length: totalAntes + 1 }, () => new Uint32Array(totalDepois + 1));
   for (let i = totalAntes - 1; i >= 0; i--) {
     for (let j = totalDepois - 1; j >= 0; j--) {

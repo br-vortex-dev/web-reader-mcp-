@@ -568,6 +568,10 @@ function resolverUrl(href, baseUrl) {
   if (!value || value.startsWith("#") || /^(javascript|mailto|tel|data|ftp|file):/i.test(value)) return null;
   try {
     const url = new URL(value, baseUrl);
+    // Só http/https viram link. A lista da frente cobre os esquemas comuns;
+    // esta checagem pega o resto (blob:, about:, chrome-extension:...) que o
+    // `new URL` aceita mas não é endereço de página para ler.
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     // A maioria dos links não tem query nenhuma; sem "utm" no texto bruto o
     // laço (e o array de chaves que ele aloca) é pulado.
     if (url.search && /utm/i.test(url.search)) {
@@ -882,11 +886,18 @@ function abrirTabela(st, tag, emit) {
 function abrirLinkOuImagem(st, token, baseUrl, emit) {
   const tag = token.tag;
   if (tag === "a") {
+    if (st.preDepth > 0) {
+      // Dentro de <pre> o conteúdo é código literal: um marcador de link
+      // corromperia o bloco. O null mantém a pilha em par com o </a>.
+      st.aStack.push(null);
+      return;
+    }
     const href = resolveUrl(token.attrs.href, baseUrl);
     st.aStack.push(href);
     if (href) emit("[");
     return;
   }
+  if (st.preDepth > 0) return; // imagem dentro de código não vira marcador
   const src = resolveUrl(token.attrs.src, baseUrl);
   const alt = (token.attrs.alt || "").trim();
   if (src) {
@@ -978,11 +989,11 @@ function fecharInline(st, tag, emit) {
     return;
   }
   if (tag === "strong" || tag === "b") {
-    emit("**");
+    if (st.preDepth === 0) emit("**");
     return;
   }
   if (tag === "em" || tag === "i") {
-    emit("*");
+    if (st.preDepth === 0) emit("*");
   }
 }
 
@@ -1293,9 +1304,9 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
       } else if (tag === "a" || tag === "img") {
         abrirLinkOuImagem(st, token, baseUrl, emit);
       } else if (tag === "strong" || tag === "b") {
-        emit("**");
+        if (st.preDepth === 0) emit("**");
       } else if (tag === "em" || tag === "i") {
-        emit("*");
+        if (st.preDepth === 0) emit("*");
       } else if (tag === "pre" || tag === "code") {
         abrirCodigo(st, tag, emit);
       } else if (tag === "br") {

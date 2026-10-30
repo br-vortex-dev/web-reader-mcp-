@@ -35,7 +35,13 @@ import { callTool } from "./tools.mjs";
  */
 async function handleMessage(msg, send) {
   if (!msg || typeof msg !== "object" || typeof msg.method !== "string") {
-    if (msg && msg.id !== undefined) {
+    // Não-objeto é requisição inválida: a spec manda responder com id null.
+    // Objeto sem `id` pode ser uma notificação (que não leva resposta).
+    if (!msg || typeof msg !== "object") {
+      send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+      return;
+    }
+    if (msg.id !== undefined) {
       send({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "Invalid Request" } });
     }
     return;
@@ -48,9 +54,15 @@ async function handleMessage(msg, send) {
   try {
     switch (method) {
       case "initialize": {
+        // Sem `id` é notificação: a spec não prevê resposta para ela, e
+        // responder sem id seria uma mensagem JSON-RPC inválida no stdio.
+        if (!isRequest) return;
         const requested = params && params.protocolVersion;
         reply({
-          protocolVersion: PROTOCOL_VERSIONS.has(requested) ? requested : "2024-11-05",
+          // Versão pedida desconhecida: responde a MAIS NOVA que sabemos
+          // falar (a spec manda escolher uma suportada; a mais nova é a que
+          // o cliente mais provavelmente entende).
+          protocolVersion: PROTOCOL_VERSIONS.has(requested) ? requested : "2025-06-18",
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions:

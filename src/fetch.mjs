@@ -182,20 +182,34 @@ export const revalidacoes = { tentadas: 0, falhas: 0 };
 // volta a valer. O mapa é limitado: sem teto, cada URL nova ficaria guardada
 // para sempre (mesmo depois de sair do cache).
 const VALIDADORES_MAX = 512;
+// Teto de MEMÓRIA dos validadores: cada entrada guarda uma cópia do payload
+// para restaurar num 304. 512 entradas de até 5 MB chegariam a 2,5 GB — o
+// processo morreria bem antes de o limite de ENTRADAS valer. Acima do teto de
+// bytes, as mais antigas saem até caber.
+const VALIDADORES_MAX_BYTES = 32 * 1024 * 1024;
+let validadoresBytes = 0;
 export const validadoresHttp = new Map();
 // Contadores de revalidação condicional (aparecem no /health).
 export const revalidacaoCondicional = { tentadas: 0, naoModificadas: 0 };
 
-/** Guarda (ou limpa) os validadores de uma URL, mantendo o mapa dentro do teto. */
+/** Guarda (ou limpa) os validadores de uma URL, mantendo o mapa dentro dos tetos. */
 function guardarValidadores(url, etag, lastModified, payload) {
-  if (!etag && !lastModified) {
+  const anterior = validadoresHttp.get(url);
+  if (anterior) {
+    validadoresBytes -= anterior.bytes;
     validadoresHttp.delete(url);
-    return;
   }
-  if (validadoresHttp.has(url)) validadoresHttp.delete(url);
-  validadoresHttp.set(url, { etag, lastModified, payload });
-  while (validadoresHttp.size > VALIDADORES_MAX) {
-    validadoresHttp.delete(validadoresHttp.keys().next().value);
+  if (!etag && !lastModified) return;
+  const bytes = payload ? payloadBytes(payload) : 0;
+  validadoresHttp.set(url, { etag, lastModified, payload, bytes });
+  validadoresBytes += bytes;
+  while (
+    validadoresHttp.size > VALIDADORES_MAX ||
+    (validadoresBytes > VALIDADORES_MAX_BYTES && validadoresHttp.size > 1)
+  ) {
+    const [chaveAntiga, entradaAntiga] = validadoresHttp.entries().next().value;
+    validadoresHttp.delete(chaveAntiga);
+    validadoresBytes -= entradaAntiga.bytes;
   }
 }
 
@@ -435,6 +449,25 @@ function fraseDeStatus(statusMessage) {
   return (statusMessage || "").replace(/\b([A-Z]{2,})\b/, (m) => m.charAt(0) + m.slice(1).toLowerCase()).trim();
 }
 
+// Status em que vale tentar de novo: o servidor está sobrecarregado ou o
+// gateway à frente dele falhou de passagem. 502/504 entram aqui junto com
+// 429/500/503 porque são o mesmo tipo de falha transitória — antes, um proxy
+// que devolvia 502 uma vez derrubava a leitura que uma segunda tentativa
+// resolveria.
+const STATUS_RETRIAVEL = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Sufixo da junção em voo. O cache é compartilhado pela URL, mas a MESMA URL
+ * pode estar sendo baixada com regras diferentes (com teto de corte, com o
+ * documento inteiro, como PDF). Quem carona na junção recebe o payload de
+ * quem chegou primeiro — então cada sabor tem a sua junção: ninguém recebe um
+ * documento cortado só porque pediu o inteiro, nem binário onde esperava
+ * texto.
+ */
+function chaveDaJuncao(cacheKey, sabor) {
+  return `${cacheKey}|${sabor}`;
+}
+
 export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null, permitirCorte = false } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
@@ -507,8 +540,7 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
       // uma reatribuicao aqui se perde, fazendo o throw final lancar o erro
       // original (ex.: um 500 retriavel) em vez da falha real (ex.: EAI_AGAIN).
       lastError = classificarErro(errBruto, url, timeoutMs);
-      const retriable =
-        lastError && (lastError.status === 429 || lastError.status === 503 || lastError.status === 500);
+      const retriable = lastError && STATUS_RETRIAVEL.has(lastError.status);
       if (!retriable || attempt === maxTentativas) throw lastError;
       const respeitaRetryAfter =
         (lastError.status === 429 || lastError.status === 503) && lastError.retryAfterMs != null;
@@ -609,11 +641,6 @@ function corteInutil(chave) {
 
 export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
   const cacheKey = chaveCanonica(url);
-  const guardado = pageCache.get(cacheKey);
-  if (guardado) {
-    if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries });
-    return guardado.payload;
-  }
   let apertado = Math.min(maxBytes || largoBytes, largoBytes);
   // `forcarLargo` é o chamador dizendo "o documento inteiro importa desta vez":
   // acontece quando o corte custou texto que o cliente ia receber. Na prática,
@@ -635,7 +662,16 @@ export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, si
   if (restoPequeno) apertado = largoBytes;
 
   const teoCorte = apertado < largoBytes;
-  return coalescedorDeBuscas.executar(cacheKey, async () => {
+  // O teto apertado entra na chave da junção: quem pediu 480 KB não pode
+  // caronar num download de 24 MB e receber um payload fora do seu contrato
+  // (nem o contrário, recebendo um documento cortado).
+  const juncao = chaveDaJuncao(cacheKey, `m${apertado}`);
+  const guardado = pageCache.get(cacheKey);
+  if (guardado) {
+    if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries, juncao });
+    return guardado.payload;
+  }
+  return coalescedorDeBuscas.executar(juncao, async () => {
     // Quem esperou na junção pode encontrar a entrada que outro acabou de gravar.
     const quente = pageCache.get(cacheKey);
     if (quente && !quente.stale) return quente.payload;
@@ -892,7 +928,10 @@ function guardarNoCache({ cacheKey, payload, extrair }) {
   const { naoModificado, ...semFlag } = payload;
 
   if (extrair) {
-    const { text, extraido } = extrair(semFlag);
+    // Num 304 o payload restaurado JÁ está extraído (é ele que fica guardado
+    // junto dos validadores) e não tem mais o `buffer`: rodar a extração de
+    // novo diria "não é PDF" e envenenava a entrada a cada revalidação.
+    const { text, extraido } = semFlag.extraido ? semFlag : extrair(semFlag);
     const comTexto = { ...semFlag, text, extraido };
     const comTextoBytes = payloadBytes(comTexto);
     if (comTextoBytes <= CACHE_MAX_ENTRY_BYTES) {
@@ -1016,11 +1055,11 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
  * não pedidos que a pediram (a rajada toda colapsa em uma). Erros são
  * engolidos: falhou, a entrada vencida segue valendo até sair da janela.
  */
-function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries } = {}) {
+function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao = chave } = {}) {
   coalescedorDeBuscas
-    .executar(chave, () => {
+    .executar(juncao, () => {
       revalidacoes.tentadas++;
-      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true, chave }).catch((err) => {
+      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true, chave, extrair }).catch((err) => {
         revalidacoes.falhas++;
         throw err;
       });
@@ -1047,12 +1086,13 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
   // página (com/sem utm_*, parâmetros em ordem diferente) compartilham uma
   // entrada — um download só. A URL original segue no payload (finalUrl).
   const chave = chaveCanonica(url);
+  const juncao = chaveDaJuncao(chave, "t");
   const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(chave, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
+  return coalescedorDeBuscas.executar(juncao, () => buscarEAquecer(url, { timeoutMs, signal, retries, chave }));
 }
 
 /**
@@ -1072,12 +1112,13 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
  */
 export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries } = {}) {
   const chave = chaveCanonica(url);
+  const juncao = chaveDaJuncao(chave, "d");
   const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(chave, async () => {
+  return coalescedorDeBuscas.executar(juncao, async () => {
     const quente = pageCache.get(chave);
     if (quente && !quente.stale) return quente.payload;
     return await buscarEAquecer(url, {
@@ -1100,13 +1141,19 @@ export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOU
  * de PDF passa a função de extração) — assim uma releitura não reparseia.
  */
 export async function fetchPdfCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, extrair } = {}) {
-  const chave = chaveCanonica(url);
+  // Cache PRÓPRIO do PDF (`#pdf`). Compartilhar a chave com as leituras de
+  // texto envenenava os dois lados: o read_page sobre um PDF guardava o
+  // binário decodificado como se fosse página, e o read_pdf sobre HTML
+  // guardava texto vazio (não é PDF) na entrada que o read_page depois servia
+  // como uma página em branco.
+  const chave = chaveCanonica(url) + "#pdf";
+  const juncao = chaveDaJuncao(chave, "p");
   const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries });
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao });
     return hit.payload;
   }
-  return coalescedorDeBuscas.executar(chave, () =>
+  return coalescedorDeBuscas.executar(juncao, () =>
     buscarEAquecer(url, { timeoutMs, signal, retries, chave, extrair })
   );
 }

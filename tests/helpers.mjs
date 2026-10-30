@@ -205,6 +205,24 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /erro-502-uma-vez -> 502 na primeira requisicao e 200 depois. Prova que
+    // 502/504 entram no retry (antes so 429/500/503 eram repetidos).
+    if (path === "/erro-502-uma-vez") {
+      const n = (contagem.get(path) || 0) + 1;
+      contagem.set(path, n);
+      if (n === 1) {
+        res.writeHead(502, { "content-type": "text/html; charset=utf-8" });
+        res.end("<html><body>502</body></html>");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Depois do 502</title></head><body>" +
+          "<h1>Depois do 502</h1><p>texto de enchimento para passar da marca de 300 caracteres deste caso.</p></body></html>"
+      );
+      return;
+    }
+
     // /lento?ms=N -> pagina que demora N ms (para testar limites de concorrencia)
     if (path.startsWith("/lento")) {
       const u = new URL(path, "http://local");
@@ -247,6 +265,20 @@ export async function startFixture({ robots = "regras" } = {}) {
     if (path === "/crawl/naohtml") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end('{"isto":"nao e html"}');
+      return;
+    }
+    // /crawl/so-erros -> 10 links que falham. O maxPages tem de limitar
+    // TENTATIVAS, nao so leituras bem-sucedidas: com links todos quebrados,
+    // contar apenas sucessos deixava o crawl baixar os 10.
+    if (path === "/crawl/so-erros") {
+      const links = Array.from({ length: 10 }, (_, i) => `<a href="/crawl/quebrado-${i}">quebrado ${i}</a>`).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><head><title>So erros</title></head><body><h1>So erros</h1>${links}</body></html>`);
+      return;
+    }
+    if (path.startsWith("/crawl/quebrado-")) {
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end("<html><body>404</body></html>");
       return;
     }
 
@@ -482,6 +514,21 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /sitemap.xml -> sitemap com `&amp;` (que precisa ser decodificado) e uma
+    // URL repetida (que nao pode inflar a contagem nem consumir o limit).
+    if (path === "/sitemap.xml") {
+      res.writeHead(200, { "content-type": "application/xml; charset=utf-8" });
+      res.end(
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+          "  <url><loc>https://exemplo.org/busca?a=1&amp;b=2</loc></url>\n" +
+          "  <url><loc>https://exemplo.org/duplicada</loc></url>\n" +
+          "  <url><loc>https://exemplo.org/duplicada</loc></url>\n" +
+          "</urlset>\n"
+      );
+      return;
+    }
+
     // BUG-1: markdown cru servido como texto puro.
     if (path === "/md-fixture") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -648,6 +695,33 @@ export async function startFixture({ robots = "regras" } = {}) {
           "<h1>Manual do produto</h1>" +
           "<p>Primeiro paragrafo depois do logo decorativo, com texto bastante.</p>" +
           "<p>Segundo paragrafo, ainda mais texto para passar da marca de 300.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /pre-inline -> marcação inline DENTRO de <pre>. strong/em viravam **
+    // dentro do bloco de código, e <a> virava sintaxe de link markdown.
+    if (path === "/pre-inline") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Pre inline</title></head><body>" +
+          "<pre><code>const total = <strong>1</strong> + <em>2</em>;\n" +
+          'Veja <a href="/alvo">o alvo</a> aqui.\n</code></pre>' +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /links-esquisitos -> links que nao sao http(s). Eles nao abrem nada e
+    // nao podem aparecer na lista (blob:, about:).
+    if (path === "/links-esquisitos") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Links esquisitos</title></head><body>" +
+          '<p><a href="blob:https://exemplo.org/123">blob</a></p>' +
+          '<p><a href="about:blank">about</a></p>' +
+          '<p><a href="/alvo">alvo normal</a></p>' +
           "</body></html>"
       );
       return;

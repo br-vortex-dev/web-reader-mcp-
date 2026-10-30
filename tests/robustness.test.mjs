@@ -117,6 +117,13 @@ test("poe teto no Retry-After para nao ficar preso", { timeout: 90000 }, async (
   assert.ok(segundos >= 9, `deveria esperar o teto de 10s, esperou ${segundos.toFixed(1)}s`);
 });
 
+test("502 e transitorio: tenta de novo e entrega a pagina", { timeout: 60000 }, async () => {
+  const r = await mcp.call("read_page", { url: `${fixture.url}/erro-502-uma-vez`, maxChars: 500 });
+  assert.equal(r.isError, false, `502 deveria entrar no retry: ${r.text}`);
+  assert.match(r.text, /Depois do 502/);
+  assert.equal(fixture.contagemDe("/erro-502-uma-vez"), 2, "deveria haver exatamente uma nova tentativa");
+});
+
 /* --------------------- request-line malformada -> 400 ------------------ */
 // "GET http://[invalid HTTP/1.1" fazia new URL lancar dentro do handler
 // async: rejeicao nao tratada, conexao morta sem resposta, processo vivo

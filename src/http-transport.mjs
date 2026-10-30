@@ -778,6 +778,9 @@ export async function processarCorpo(parsed) {
  */
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_SESSOES = 1000;
+// Canais SSE abertos por sessão. A spec não pede mais de um; 4 absorve
+// reconexão de proxy sem deixar um único cliente abrir conexões sem teto.
+const MAX_CANAIS_SSE_POR_SESSAO = 4;
 const sessoes = new Map(); // id -> { criadaEm, ultimoUso, sse: Set<res> }
 
 function limparSessoes() {
@@ -892,6 +895,28 @@ export function handlerSse(req, res, ctx) {
     return;
   }
 
+  const sessao = sessoes.get(sessionId);
+  if (sessao.sse.size >= MAX_CANAIS_SSE_POR_SESSAO) {
+    // Sem este teto, UMA sessão válida abria conexões SSE sem limite e o
+    // processo ficava sem descritores de arquivo (os POSTs param junto).
+    res.writeHead(429, {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "retry-after": "5",
+    });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32000,
+          message: `Limite de ${MAX_CANAIS_SSE_POR_SESSAO} canais SSE por sessao; feche os anteriores.`,
+        },
+      })
+    );
+    return;
+  }
+
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache, no-transform",
@@ -901,7 +926,6 @@ export function handlerSse(req, res, ctx) {
   });
   res.write("event: endpoint\ndata: /mcp\n\n");
 
-  const sessao = sessoes.get(sessionId);
   sessao.sse.add(res);
 
   const ping = setInterval(() => {

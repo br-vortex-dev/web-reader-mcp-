@@ -77,6 +77,8 @@ test("pagina HTML nao vira feed vazio: recusa e aponta o feed anunciado", async 
 test("limit corta a lista de itens", async () => {
   const r = await mcp.call("read_feed", { url: `${fixture.url}/feed/rss.xml`, limit: 1 });
   assert.equal(r.isError, false);
+  // O cabecalho declara o total do feed E quantos foram exibidos.
+  assert.match(r.text, /Itens: 2 \(exibindo 1\)/);
   assert.match(r.text, /Primeiro post/);
   assert.doesNotMatch(r.text, /Segundo post/);
 });

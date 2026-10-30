@@ -108,3 +108,25 @@ test("diffDeLinhas: textos iguais devolvem iguais=true", () => {
   const d = diffDeLinhas("A\nB", "A\nB");
   assert.equal(d.iguais, true);
 });
+
+// Antes o teto era aplicado ao tamanho TOTAL: uma pagina de 5.000 linhas com
+// UMA linha alterada era recusada sem nem tentar, mesmo com o miolo de 1x1.
+test("diffDeLinhas: pagina enorme com uma linha alterada ainda rende diff real", () => {
+  const linhas = Array.from({ length: 5000 }, (_, i) => `linha ${i}`);
+  const depois = [...linhas.slice(0, 2500), "mudou", ...linhas.slice(2501)];
+  const d = diffDeLinhas(linhas.join("\n"), depois.join("\n"));
+  assert.equal(d.grande, false);
+  assert.deepEqual(d.adicionadas, ["mudou"]);
+  assert.deepEqual(d.removidas, ["linha 2500"]);
+});
+
+// O guarda agora e o PRODUTO do miolo: 3000x3000 = 9M celulas (~36 MB) e
+// grande demais. Antes esse caso entrava no LCS e alocava a tabela inteira.
+test("diffDeLinhas: miolo grande demais responde grande sem alocar LCS", () => {
+  const antes = Array.from({ length: 3000 }, (_, i) => `a${i}`).join("\n");
+  const depois = Array.from({ length: 3000 }, (_, i) => `b${i}`).join("\n");
+  const d = diffDeLinhas(antes, depois);
+  assert.equal(d.grande, true);
+  assert.deepEqual(d.adicionadas, []);
+  assert.deepEqual(d.removidas, []);
+});

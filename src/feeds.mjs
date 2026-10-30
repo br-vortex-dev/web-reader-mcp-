@@ -220,12 +220,15 @@ function analisarJsonFeed(texto) {
 const RESUMO_MAX_CHARS = 300;
 
 /** Monta a saída em markdown do read_feed. */
-export function formatarSaidaFeed({ finalUrl, feed, maxChars, truncado, total }) {
+export function formatarSaidaFeed({ finalUrl, feed, totalFeed = feed.itens.length }) {
   const linhas = [];
   linhas.push(`# ${feed.titulo || "(feed sem título)"}`);
   linhas.push(`URL: ${finalUrl}`);
   linhas.push(`Formato: ${rotuloFormato(feed.formato)}`);
-  linhas.push(`Itens: ${feed.itens.length}` + (truncado ? ` (exibidos ${total})` : ""));
+  // `Itens:` é o tamanho do FEED, não o da página exibida: com limit=1 num
+  // feed de 20 itens, "Itens: 1" fazia a IA acreditar que o feed só tinha um.
+  const exibindo = feed.itens.length;
+  linhas.push(`Itens: ${totalFeed}` + (exibindo < totalFeed ? ` (exibindo ${exibindo})` : ""));
   if (feed.descricao) linhas.push(`Descricao: ${feed.descricao.slice(0, RESUMO_MAX_CHARS)}`);
   linhas.push("");
 
@@ -295,9 +298,7 @@ export async function toolReadFeed(args = {}) {
   const completo = formatarSaidaFeed({
     finalUrl: payload.finalUrl,
     feed: { ...feed, itens: selecionados },
-    maxChars: 0,
-    truncado: false,
-    total: selecionados.length,
+    totalFeed: feed.itens.length,
   });
   const { text } = truncate(completo, maxChars);
   return text;

@@ -79,63 +79,106 @@ function isBlockedIpv4(ip) {
 }
 
 /**
- * Converte dois hextets (16 bits cada) para IPv4 legível.
+ * Expande um IPv6 para os 8 hextets numéricos, independente da notação.
+ *
+ * A checagem antiga casava padrões de TEXTO (`::ffff:h:l`, `2002:h:l`), então
+ * a mesma faixa escrita de forma expandida (`0:0:0:0:0:ffff:7f00:1`) passava
+ * batido. O URL do WHATWG comprime a forma expandida, mas a resolução de DNS
+ * pode devolver qualquer notação — e uma defesa de SSRF não pode depender de
+ * quem escreveu o endereço. Devolve null para algo que não é IPv6.
  */
-function hextetsToIpv4(hi, lo) {
-  const h = parseInt(hi, 16);
-  const l = parseInt(lo, 16);
-  if (!Number.isInteger(h) || !Number.isInteger(l)) return null;
-  return `${h >> 8}.${h & 0xff}.${l >> 8}.${l & 0xff}`;
+function hextetsDoIpv6(ip) {
+  let texto = String(ip).toLowerCase().split("%")[0];
+  let v4 = null;
+  const dotted = texto.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted) {
+    const p = dotted[1].split(".").map(Number);
+    if (p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    v4 = [(p[0] << 8) | p[1], (p[2] << 8) | p[3]];
+    texto = texto.slice(0, dotted.index);
+    // Se o prefixo termina em "::" (ex.: 64:ff9b::1.2.3.4), a compressão já
+    // inclui os zeros e o "::" NÃO é o separador do IPv4; cortar um ":" aqui
+    // deixaria a notação inválida. Só o caso "hextet:" pede o corte.
+    if (!texto.endsWith("::")) texto = texto.replace(/:$/, "");
+  }
+  const partes = texto.split("::");
+  if (partes.length > 2) return null;
+  const analisar = (s) => (s === "" ? [] : s.split(":"));
+  const esq = analisar(partes[0]);
+  const dir = partes.length === 2 ? analisar(partes[1]) : [];
+  const total = esq.length + dir.length + (v4 ? 2 : 0);
+  if (partes.length === 1) {
+    if (total !== 8) return null;
+  } else if (total >= 8) {
+    return null; // "::" tem de representar ao menos um grupo
+  }
+  const brutos = [...esq, ...new Array(8 - total).fill("0"), ...dir, ...(v4 || []).map(String)];
+  if (brutos.length !== 8) return null;
+  const nums = brutos.map((h) => (/^[0-9a-f]{1,4}$/.test(h) ? parseInt(h, 16) : NaN));
+  if (nums.some((n) => !Number.isInteger(n))) return null;
+  return nums;
+}
+
+/** Dois hextets (16 bits cada) para IPv4 legível. */
+function ipv4DosHextets(hi, lo) {
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
 /**
  * Exibe um IPv6 com IPv4 embutido na forma legível: ::ffff:127.0.0.1 em vez de ::ffff:7f00:1.
  */
 function ipv6ParaExibicao(ip) {
-  const m = ip.toLowerCase().match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (m) {
-    const v4 = hextetsToIpv4(m[1], m[2]);
-    if (v4) return `::ffff:${v4}`;
+  const h = hextetsDoIpv6(ip);
+  if (h && h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) {
+    return `::ffff:${ipv4DosHextets(h[6], h[7])}`;
   }
   return ip;
 }
 
 /**
- * Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), NAT64 (64:ff9b::) e 6to4 (2002::/16).
+ * Extrai o IPv4 embutido num IPv6: mapeado (::ffff:), compatível (::a.b.c.d),
+ * traduzido (::ffff:0:a.b.c.d), NAT64 (64:ff9b::) e 6to4 (2002::/16).
  */
-function embeddedIpv4(ip) {
-  const lower = ip.toLowerCase();
-  const dotted = lower.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (dotted) return dotted[1];
-  let m = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (m) return hextetsToIpv4(m[1], m[2]);
-  m = lower.match(/^64:ff9b::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (m) return hextetsToIpv4(m[1], m[2]);
-  m = lower.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
-  if (m) return hextetsToIpv4(m[1], m[2]);
+function embeddedIpv4DosHextets(h) {
+  if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) return ipv4DosHextets(h[6], h[7]);
+  if (h.slice(0, 6).every((n) => n === 0) && (h[6] !== 0 || h[7] !== 0)) return ipv4DosHextets(h[6], h[7]);
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0xffff && h[4] === 0 && h[5] === 0) {
+    return ipv4DosHextets(h[6], h[7]);
+  }
+  if (h[0] === 0x0064 && h[1] === 0xff9b && h.slice(2, 6).every((n) => n === 0)) {
+    return ipv4DosHextets(h[6], h[7]);
+  }
+  if (h[0] === 0x2002) return ipv4DosHextets(h[1], h[2]);
   return null;
 }
 
 /**
- * Verifica se um IPv6 é interno (:: e ::1, fe80::/10, fc00::/7, ff00::/8),
- * incluindo os IPv4 embutidos (mapeado, NAT64 e 6to4).
+ * Verifica se um IPv6 é interno (:: e ::1, fe80::/10, fec0::/10, fc00::/7,
+ * ff00::/8), incluindo os IPv4 embutidos (mapeado, compatível, NAT64, 6to4 e
+ * o Teredo). Endereço ilegível bloqueia: na dúvida, não sai.
  */
 function isBlockedIpv6(ip) {
-  const lower = ip.toLowerCase().split("%")[0];
-  if (lower === "::" || lower === "::1") return true;
-  const embedded = embeddedIpv4(lower);
+  const h = hextetsDoIpv6(ip);
+  if (!h) return true;
+  // :: e ::1 (e qualquer ::x com x <= 1, que é reservado)
+  if (h.slice(0, 7).every((n) => n === 0) && h[7] <= 1) return true;
+  const embedded = embeddedIpv4DosHextets(h);
   if (embedded) return isBlockedIpv4(embedded);
   // Faixas especiais que nunca são destino de leitura legítima: NAT64 local
   // (64:ff9b:1::/48) e os prefixos de documentação (2001:db8::/32).
-  if (/^64:ff9b:1:/.test(lower)) return true;
-  if (/^2001:db8:/.test(lower) || lower.startsWith("2001:db8::")) return true;
-  if (/^fe[89ab]/.test(lower)) return true;
-  const first = lower.split(":")[0];
-  if (first.length >= 2) {
-    const b0 = parseInt(first.padStart(4, "0").slice(0, 2), 16);
-    if ((b0 & 0xfe) === 0xfc) return true;
-    if (b0 === 0xff) return true;
+  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0x0001) return true;
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
+  // Teredo (2001::/32): o pacote termina num relay que fala IPv4 — se o
+  // servidor embutido (h2/h3) ou o cliente ofuscado (h6/h7) for privado, o
+  // destino efetivo pode ser interno.
+  if (h[0] === 0x2001 && h[1] === 0x0000) {
+    const servidor = ipv4DosHextets(h[2], h[3]);
+    const cliente = ipv4DosHextets(h[6] ^ 0xffff, h[7] ^ 0xffff);
+    if (isBlockedIpv4(servidor) || isBlockedIpv4(cliente)) return true;
   }
+  if ((h[0] & 0xffc0) === 0xfe80 || (h[0] & 0xffc0) === 0xfec0) return true; // link-local / site-local
+  if ((h[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
+  if ((h[0] & 0xff00) === 0xff00) return true; // multicast
   return false;
 }
 

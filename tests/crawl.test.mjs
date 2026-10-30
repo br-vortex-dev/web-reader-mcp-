@@ -99,6 +99,36 @@ test("crawl sem falhas nao fala em resultado parcial", { timeout: 60000 }, async
   assert.doesNotMatch(r.text, /RESULTADO PARCIAL/);
 });
 
+// O teto de paginas contava so as leituras BEM-SUCEDIDAS. Num site com muitos
+// links quebrados, 10 links 404 com maxPages=4 baixavam os 10 — o teto nao
+// limitava nada. Agora ele conta tentativas.
+test("maxPages limita tentativas mesmo quando todas falham", { timeout: 60000 }, async () => {
+  const r = await mcpLocal.call("crawl_site", {
+    url: `${fixture.url}/crawl/so-erros`,
+    maxPages: 4,
+    maxChars: 300,
+    timeoutMs: 5000,
+  });
+  assert.equal(r.isError, false, r.text);
+  const cabecalho = r.text.split("\n\n")[0];
+  // A pagina inicial le; sobram 3 tentativas para links, todas 404.
+  assert.match(cabecalho, /1 pagina\(s\) lida\(s\)/, cabecalho);
+  assert.match(cabecalho, /3 pagina\(s\) falharam/, cabecalho);
+  assert.equal((r.text.match(/# Erro ao ler /g) || []).length, 3, r.text);
+});
+
+/* ----------------------- discover_urls: sitemap ------------------------- */
+
+test("discover_urls decodifica &amp; e nao duplica <loc> repetido", { timeout: 60000 }, async () => {
+  const r = await mcpLocal.call("discover_urls", { url: `${fixture.url}/`, limit: 10, timeoutMs: 5000 });
+  assert.equal(r.isError, false, r.text);
+  // 3 <loc>, sendo 1 repetido: o resultado tem 2 URLs.
+  assert.match(r.text, /Encontradas 2 URLs/);
+  assert.match(r.text, /https:\/\/exemplo\.org\/busca\?a=1&b=2/);
+  assert.doesNotMatch(r.text, /&amp;/);
+  assert.equal((r.text.match(/https:\/\/exemplo\.org\/duplicada/g) || []).length, 1, r.text);
+});
+
 /* --------------------- filtro de navegacao por segmento ---------------- */
 // Os padroes de navegacao casavam contra a URL INTEIRA: /\/about/i filtrava
 // /blog/about-cookies e a pagina de blog desaparecia do crawl.

@@ -48,7 +48,7 @@ import {
   isConteudoBruto,
   conteudoBrutoResult,
 } from "./fetch.mjs";
-import { hostOf } from "./html-parser.mjs";
+import { hostOf, decodeEntities } from "./html-parser.mjs";
 import {
   memoDoPayload,
   conversoesMemo,
@@ -73,7 +73,7 @@ import {
   formatarSaidaDiff,
   TEXTO_DA_MARCA,
 } from "./snapshot.mjs";
-import { urlSemCredenciais } from "./utils.mjs";
+import { urlSemCredenciais, chaveCanonica } from "./utils.mjs";
 import {
   ParametroInvalidoError,
   LimiteExcedidoError,
@@ -628,7 +628,13 @@ export async function toolFindOnPage(args = {}) {
   if (!query) throw new ParametroInvalidoError("query", "informe o termo a buscar");
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const maxHits = Math.max(1, Math.min(100, Number(args.maxHits) || 20));
-  const contexto = Math.max(0, Math.min(5, Number(args.contexto) || 1));
+  // `Number(args.contexto) || 1` transformava o 0 (pedido válido: só a linha
+  // do acerto, sem vizinhas) em 1. Zero é um valor legítimo; só ausência ou
+  // lixo viram o padrão.
+  const pedidoDeContexto = Number(args.contexto);
+  const contexto = Number.isFinite(pedidoDeContexto)
+    ? Math.max(0, Math.min(5, Math.floor(pedidoDeContexto)))
+    : 1;
 
   const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
@@ -1062,6 +1068,24 @@ export async function toolReadDynamicPage(args = {}) {
 /**
  * Descobre as URLs de um site (sitemap.xml ou links internos).
  */
+/**
+ * URLs de um sitemap: cada `<loc>` é DECODIFICADO (o XML escreve `&amp;` nos
+ * parâmetros; sem decodificar, a URL entregue não abria) e repetições são
+ * descartadas — o mesmo endereço costuma aparecer em vários sitemaps filhos,
+ * e repetido inflava a contagem e consumia o `limit`.
+ */
+function locsDoSitemap(texto) {
+  const vistos = new Set();
+  const urls = [];
+  for (const m of texto.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
+    const url = decodeEntities(m[1].trim());
+    if (!url || vistos.has(url)) continue;
+    vistos.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
 export async function toolDiscoverUrls(args = {}) {
   const parsed = validateHttpUrl(args.url);
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
@@ -1083,7 +1107,7 @@ export async function toolDiscoverUrls(args = {}) {
       // do teto duro de 5 MB. O teto de documento evita perder as URLs do fim.
       const { text, contentType } = await fetchTextDocumentoCached(candidato, { timeoutMs });
       if (!/xml/.test(contentType) && !text.includes("<loc>")) return [];
-      return [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
+      return locsDoSitemap(text);
     }),
   );
   let sitemapUrls = [];
@@ -1101,11 +1125,11 @@ export async function toolDiscoverUrls(args = {}) {
     const respostasFilhos = await Promise.allSettled(
       filhos.slice(0, 5).map(async (filho) => {
         const { text } = await fetchTextDocumentoCached(filho, { timeoutMs });
-        return [...text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1].trim());
+        return locsDoSitemap(text);
       }),
     );
     const expandidas = respostasFilhos.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
-    if (expandidas.length > 0) sitemapUrls = expandidas;
+    if (expandidas.length > 0) sitemapUrls = [...new Set(expandidas)];
   }
 
   const limite = Math.max(1, Math.min(300, Number(args.limit) || 100));
@@ -1233,11 +1257,16 @@ export async function toolCrawlSite(args = {}) {
   const timeoutMs = clampTimeoutMs(args.timeoutMs);
   const baseHost = hostOf(start.href);
 
-  const visited = new Set([start.href]);
+  const visited = new Set([chaveCanonica(start.href)]);
   const queue = [];
   const conteudos = [];
   const falhas = [];
   let lidas = 0;
+  // maxPages limita TENTATIVAS de leitura, não só sucessos. Contando apenas
+  // sucessos, um site cheio de links quebrados disparava conexões sem teto:
+  // maxPages=10 num site com 200 links mortos fazia 200 downloads para
+  // devolver 10 páginas. A raiz já é a tentativa 1.
+  let tentativas = 1;
 
   // PRAZO FINAL do crawl, pelo mesmo motivo do read_multiple_pages: a resposta
   // só saía quando o último trabalhador terminasse. Num site com páginas
@@ -1258,8 +1287,13 @@ export async function toolCrawlSite(args = {}) {
   /** Enfileira os links ainda não visitados de uma leitura. */
   const enfileirarLinks = (links) => {
     for (const href of links) {
-      if (visited.has(href)) continue;
-      visited.add(href);
+      // A visita é marcada pela URL CANÔNICA: duas variações da mesma página
+      // (utm_*, parâmetros em ordem diferente) são a mesma página. Sem isso,
+      // um site que assina os links com rastreio relia o mesmo conteúdo até
+      // esgotar maxPages.
+      const chave = chaveCanonica(href);
+      if (visited.has(chave)) continue;
+      visited.add(chave);
       queue.push(href);
     }
   };
@@ -1298,7 +1332,7 @@ export async function toolCrawlSite(args = {}) {
 
   const trabalhador = async () => {
     for (;;) {
-      if (lidas + ativos >= maxPages) return;
+      if (tentativas >= maxPages) return;
       // Prazo estourado: ninguém puxa trabalho novo. Quem está lendo termina
       // sozinho, mas a resposta não espera — o Promise.race abaixo decide.
       if (Date.now() >= prazoFinal) {
@@ -1311,6 +1345,7 @@ export async function toolCrawlSite(args = {}) {
         continue;
       }
       const url = queue.shift();
+      tentativas++;
       ativos++;
       const r = await lerUmaDoCrawl(url, maxChars, timeoutMs);
       ativos--;
