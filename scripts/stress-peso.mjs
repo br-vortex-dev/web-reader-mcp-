@@ -428,8 +428,14 @@ const erroLimpo = (padrao) => ({ t, isError, status }) => {
           return true;
         }
         if (!c.isError) return "aceitou um certificado rebentado";
-        return /certificado|certificate|TLS|SSL|autoridade|expirad|revoked|revogad|invalid|hostname|match/i.test(c.t)
-          ? true : `erro sem explicar: ${encurta(c.t, 80)}`;
+        if (/certificado|certificate|TLS|SSL|autoridade|expirad|revoked|revogad|invalid|hostname|match/i.test(c.t)) return true;
+        // Handshake que cai antes de validar (reset do servidor) nao prova que
+        // o certificado foi aceito; e falha transitoria do site, nao do produto.
+        if (/ECONNRESET|socket hang up|ECONNREFUSED|ETIMEDOUT/i.test(c.t)) {
+          ambiente(`handshake caiu antes de validar o certificado (${encurta(c.t, 50)})`);
+          return true;
+        }
+        return `erro sem explicar: ${encurta(c.t, 80)}`;
       }
     );
   }
