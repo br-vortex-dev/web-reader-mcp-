@@ -400,10 +400,15 @@ const TEXTO_MINIMO_ESTATICO = 500;
 
 /**
  * Detecta se uma página provavelmente precisa de JavaScript.
+ * `visivel` permite reaproveitar a contagem de texto já calculada pelo
+ * chamador — a mesma varredura era feita duas vezes por leitura.
  */
-function isDynamicPage(html, markdown) {
-  const visibleText = markdown.replace(/\s+/g, " ").trim();
-  return htmlIndicaDinamico(html) || visibleText.length < TEXTO_MINIMO_ESTATICO;
+function isDynamicPage(html, markdown, visivel = comprimentoVisivel(markdown)) {
+  return htmlIndicaDinamico(html) || visivel < TEXTO_MINIMO_ESTATICO;
+}
+
+function comprimentoVisivel(markdown) {
+  return markdown.replace(/\s+/g, " ").trim().length;
 }
 
 /**
@@ -585,10 +590,12 @@ export async function toolReadPage(args = {}) {
   }
   const meta = metaMemo(payload);
   let markdown = markdownMemo(payload);
-  if (markdown.replace(/\s+/g, " ").trim().length < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown)) {
+  let textoVisivel = comprimentoVisivel(markdown);
+  if (textoVisivel < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown, textoVisivel)) {
     const dynamicMarkdown = await embeddedMemo(payload, timeoutMs);
     if (dynamicMarkdown && dynamicMarkdown.length > markdown.length) {
       markdown = dynamicMarkdown;
+      textoVisivel = comprimentoVisivel(markdown);
     }
   }
   const { text, truncated } = truncate(markdown, maxChars);
@@ -598,11 +605,14 @@ export async function toolReadPage(args = {}) {
   // toda, sem nada que dissesse "procura noutro lado". O texto curto so vira
   // aviso com o documento a indicar casca (ver CASCA_PROPORCAO): o
   // contrario troca uma pagina quebada por uma pagina curta.
-  const textoVisivel = markdown.replace(/\s+/g, " ").trim().length;
   const estaticoCurto = textoVisivel < TEXTO_MINIMO_UTIL;
+  // As duas marcas de casca varrem o documento INTEIRO (megabytes nas paginas
+  // grandes) e o resultado so e usado quando o texto e curto — numa pagina
+  // cheia de conteudo ele era jogado fora depois da varredura completa.
   const cascaDeJavaScript =
-    htmlIndicaDinamico(html) ||
-    (TEM_SCRIPT.test(html) && html.length >= CASCA_PISO_BYTES && html.length > CASCA_PROPORCAO * (textoVisivel + 1));
+    estaticoCurto &&
+    (htmlIndicaDinamico(html) ||
+      (TEM_SCRIPT.test(html) && html.length >= CASCA_PISO_BYTES && html.length > CASCA_PROPORCAO * (textoVisivel + 1)));
   let extraLabel =
     markdown.trim().length === 0 || (estaticoCurto && cascaDeJavaScript)
       ? `Aviso: conteudo estatico muito curto (${markdown.trim().length} caracteres) — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page.`

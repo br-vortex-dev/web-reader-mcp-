@@ -355,7 +355,10 @@ function decoderPara(charset) {
 async function decodeBuffer(buffer, contentType) {
   const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
   const charset = charsetMatch ? charsetMatch[1].toLowerCase().replace(/["']/g, "") : "";
-  const bytes = new Uint8Array(buffer);
+  // Buffer JÁ É Uint8Array: `new Uint8Array(buffer)` copiava o corpo inteiro
+  // (até 1 MB por download) só para trocar o tipo. subarray e TextDecoder
+  // aceitam o Buffer direto.
+  const bytes = buffer;
   if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
     return decoderUtf8.decode(bytes.subarray(3));
   }

@@ -1015,6 +1015,9 @@ const MARGEM_COMPRESSAO = 35000;
 const MARGEM_SEGURANCA = 2000;
 const PASSO_RECHECAGEM = 16384;
 const MAX_RECHECAGENS = 6;
+// Um texto grande demais para chegar num token só (parágrafo de 1,4 MB) é
+// emitido em fatias deste tamanho para a parada antecipada poder agir no meio.
+const FATIA_TEXTO_GRANDE = 16384;
 
 /**
  * A conversão pode parar neste ponto sem cortar nada entregável?
@@ -1213,6 +1216,18 @@ function tentarFinalizar(st, { minimo, diagnostico }) {
   let cercas = 0;
   for (let pos = bruto.indexOf("```"); pos !== -1; pos = bruto.indexOf("```", pos + 3)) cercas++;
   if (cercas % 2 !== 0) return null;
+  // A limpeza só REMOVE caracteres (brancos, cercas mascaradas, marcadores
+  // vazios). Se nem removendo todo branco o texto chega ao mínimo exigido, a
+  // limpeza inteira é trabalho garantidamente descartado — e numa página
+  // pouco densa ela rodava de novo a cada rechecagem. O laço de charCode
+  // custa uma fração dos replaces e responde a mesma pergunta quando a
+  // resposta é "não".
+  let brancos = 0;
+  for (let i = 0; i < bruto.length; i++) {
+    const c = bruto.charCodeAt(i);
+    if (c === 32 || c === 10 || c === 9 || c === 13) brancos++;
+  }
+  if (bruto.length - brancos < minimo + MARGEM_SEGURANCA) return null;
   const limpo = polirTexto(cleanMarkdown(bruto));
   if (limpo.length < minimo + MARGEM_SEGURANCA) return null;
   if (diagnostico) diagnostico.interrompida = true;
@@ -1234,6 +1249,23 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   let limiar = minimo + MARGEM_COMPRESSAO;
   let reChecagens = 0;
 
+  // A checagem de parada vive em função própria porque também roda ENTRE as
+  // fatias de um texto gigante: um parágrafo de 1,4 MB chega num token só, e
+  // sem fatiar a conversão seguia até o fim para entregar 25 mil caracteres.
+  // Devolve true quando o markdown foi finalizado.
+  const tentarParar = () => {
+    if (markdownFinal !== null) return true;
+    if (!paradaAtiva || st.outLen < limiar || !fronteiraSegura(st)) return false;
+    const finalizado = tentarFinalizar(st, { minimo, diagnostico });
+    if (finalizado !== null) {
+      markdownFinal = finalizado;
+      return true;
+    }
+    if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
+    else limiar = st.outLen + PASSO_RECHECAGEM;
+    return false;
+  };
+
   tokenizar(html, (token) => {
     // ---- coleta de links (mesma passada) ----------------------------
     // Roda ANTES do markdown para não depender do estado da conversão e
@@ -1244,21 +1276,24 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
     // há mais nada a produzir — `true` encerra a varredura do documento.
     if (markdownFinal !== null) return !comLinks;
 
-    if (paradaAtiva && st.outLen >= limiar && fronteiraSegura(st)) {
-      const finalizado = tentarFinalizar(st, { minimo, diagnostico });
-      if (finalizado !== null) {
-        markdownFinal = finalizado;
-        return;
-      }
-      if (++reChecagens >= MAX_RECHECAGENS) paradaAtiva = false;
-      else limiar = st.outLen + PASSO_RECHECAGEM;
-    }
+    if (tentarParar()) return !comLinks;
 
     // ---- texto -------------------------------------------------------
     if (token.type === "text") {
       if (st.skipDepth > 0) return;
       const decoded = textoNormalizado(token, st.preDepth);
       if (!decoded) return;
+      // Texto grande num token só: emite em fatias para a parada poder agir
+      // no meio. Fora de <pre> a normalização já aconteceu no token inteiro,
+      // então as fatias são pedaços exatos do que a conversão completa
+      // emitiria na mesma ordem — o prefixo entregue não muda.
+      if (paradaAtiva && !st.preDepth && decoded.length > FATIA_TEXTO_GRANDE) {
+        for (let pos = 0; pos < decoded.length; pos += FATIA_TEXTO_GRANDE) {
+          emit(decoded.slice(pos, pos + FATIA_TEXTO_GRANDE));
+          if (tentarParar()) return !comLinks;
+        }
+        return;
+      }
       emit(decoded);
       return;
     }

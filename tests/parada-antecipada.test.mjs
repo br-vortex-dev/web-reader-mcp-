@@ -91,6 +91,35 @@ test("pagina gigante: o texto exibido e identico ao da conversao completa", { ti
   assert.match(r.text, /conteudo truncado em \d+ caracteres/);
 });
 
+test("texto gigante num token so: a parada age no meio do paragrafo", () => {
+  // Um paragrafo de 1,4 MB chega ao tokenizador como UM token de texto. Antes,
+  // a parada so era checada entre tokens e a conversao ia ate o fim para
+  // entregar 25 mil caracteres. O prefixo continua identico ao da conversao
+  // completa — a fatia e um pedaco exato da mesma emissao.
+  const recheio = "texto corrido de enchimento ".repeat(60000);
+  const html =
+    "<!DOCTYPE html><html><head><title>Um token</title></head><body>" +
+    `<h1>INICIO-TOKEN</h1><p>${recheio}</p><h1>FIM-TOKEN</h1></body></html>`;
+  const diag = { interrompida: false };
+  const comParada = htmlToMarkdown(html, "https://exemplo.com/", {
+    minCharsEntregaveis: HARD_MAX_CHARS,
+    diagnostico: diag,
+  });
+  assert.equal(diag.interrompida, true, "deveria ter interrompido no meio do texto");
+  const completo = htmlToMarkdown(html, "https://exemplo.com/");
+  assert.ok(completo.length > HARD_MAX_CHARS * 4, `a pagina deveria ser bem maior: ${completo.length}`);
+  assert.equal(
+    comParada.slice(0, HARD_MAX_CHARS),
+    completo.slice(0, HARD_MAX_CHARS),
+    "os caracteres entregaveis divergiram da conversao completa"
+  );
+  // Parou de verdade: nao converteu o documento inteiro.
+  assert.ok(
+    comParada.length < completo.length / 4,
+    `a parada nao reduziu o trabalho: ${comParada.length} de ${completo.length}`
+  );
+});
+
 test("a parada nao interfere em paginas pequenas (resultado identico)", () => {
   // Para pagina menor que o teto, o resultado com parada e o historico tem de
   // ser exatamente o mesmo — byte a byte.

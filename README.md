@@ -102,7 +102,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (40 arquivos, 368 testes, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (40 arquivos, 369 testes, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -356,7 +356,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.7 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.8 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -676,7 +676,9 @@ entregáveis inteiros — o que o cliente vê é o mesmo prefixo da conversão
 completa, o que muda é o trabalho jogado fora. Quando a conversão é
 interrompida, o cabeçalho marca `Conteudo: N+ caracteres` (havia mais além do
 teto). `HARD_MAX_CHARS` é o teto entregável por leitura; a parada usa ele como
-referência.
+referência. Um texto grande demais para chegar num token só (um parágrafo de
+1,4 MB, por exemplo) é emitido em fatias de 16 KB para a parada poder agir no
+meio dele — antes a conversão ia até o fim e entregava 25 mil caracteres.
 
 O **teto por host** (`HOST_MAX_CONCURRENCY`) garante justiça entre sites: um
 host lento ou com muitos pedidos não monopoliza as vagas globais de download —
