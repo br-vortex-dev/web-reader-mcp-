@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em dezoito módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em vinte e cinco módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -24,7 +24,14 @@ sai. O produto mora em `src/`, em dezoito módulos com uma responsabilidade cada
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `conversao.mjs` | A camada **memoizada** de HTML → markdown e links: um WeakMap chaveado pelo payload guarda meta, texto e lista de links, então a mesma página baixada é convertida uma vez só. Também é onde vivem a parada antecipada da conversão e a marca `Conteudo: N+`. |
 | `relevancia.mjs` | A busca por **trechos relevantes** (`find_relevant`): normaliza acento e maiúsculas, reduz plural regular, descarta palavras vazias, corta o texto em blocos com a seção anotada e pontua o que mais casa com o assunto. Casamento de palavras — sem sinônimo, sem regex e sem IA. |
-| `tools.mjs` | As 13 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca por termo e `find_relevant` a busca por assunto; `diff_page` compara com a leitura anterior. |
+| `busca-relevante.mjs` | As duas buscas por assunto: `find_relevant` (uma página) e `find_relevant_multi` (até 8 páginas em paralelo, com ranking global e teto por fonte). O resultado de uma consulta fica preso ao payload em cache, então as duas ferramentas não recalculam a mesma pontuação. |
+| `page-info.mjs` | `extract_page_info`: o cartão de identidade da página (título, descrição, autor, datas, idioma, site, URL canônica e tipos de dados estruturados) sem baixar o corpo inteiro para a resposta. |
+| `json-ld.mjs` | Leitor de JSON-LD compartilhado: achata `@graph`/arrays e resolve texto de `name`/`@value`/`headline`. É a fonte do cartão da página e das perguntas de FAQ. |
+| `tabelas.mjs` | `read_tables`: a mesma `<table>` do `read_page`, mas em JSON alinhado (colunas + linhas), com teto por célula, por linha e por chamada. `colspan`/`rowspan` não são expandidos — está declarado. |
+| `faq.mjs` | `extract_faq`: pares pergunta/resposta do JSON-LD `FAQPage` e da seção visível com título de FAQ; deduplica pergunta repetida e descarta rodapé que termina em "?". |
+| `archive.mjs` | `read_archived`: lê uma captura do Internet Archive (`web.archive.org/web/<data>id_/<url>`) e devolve o texto com a data da captura. Sem captura é resposta clara, não erro cru. |
+| `documentos.mjs` | `read_document`: DOCX, PPTX e EPUB lidos com `node:zlib` (ZIP montado à mão, sem dependência). Limites de entrada/saída contra zip bomb; PDF e Office antigo são recusados com a ferramenta certa. |
+| `tools.mjs` | O despacho das 19 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca por termo e `find_relevant` a busca por assunto; `diff_page` compara com a leitura anterior. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
 | `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
@@ -55,7 +62,7 @@ gasta menos tempo. Cada arquivo abre com um cabeçalho dizendo o que ele é, o q
 entra, o que sai e quem o usa — dá para pular direto para o que interessa.
 
 ```koda-passos
-{"titulo":"Ordem de leitura para quem está começando","passos":[{"titulo":"1. server.js e src/server.mjs","texto":"A porta de entrada. Entenda como uma mensagem JSON-RPC chega e vira resposta. Com isso você já sabe o formato de tudo."},{"titulo":"2. src/tool-schemas.mjs","texto":"O catálogo: a lista das 13 ferramentas, com nome, descrição e schema. Aqui você vê o que o servidor oferece ao mundo."},{"titulo":"3. src/tools.mjs","texto":"O corpo do trabalho. Repare em lerPaginaCompleta: é o caminho ÚNICO de leitura que todas as ferramentas de página compartilham."},{"titulo":"4. src/fetch.mjs","texto":"A única porta de saída para a internet. Leia as seis regras no cabeçalho: SSRF, DNS, redirect, retry, cache e junção de buscas."},{"titulo":"5. src/security.mjs e src/net.mjs","texto":"Os dois portões de segurança. Não precisa decorar; precisa saber que existem e onde procurar quando uma URL é bloqueada."},{"titulo":"6. src/html-parser.mjs","texto":"O conversor de HTML para markdown. É o arquivo mais reaproveitado do projeto e o que tem golden files: mude com cuidado e rode os testes."}]}
+{"titulo":"Ordem de leitura para quem está começando","passos":[{"titulo":"1. server.js e src/server.mjs","texto":"A porta de entrada. Entenda como uma mensagem JSON-RPC chega e vira resposta. Com isso você já sabe o formato de tudo."},{"titulo":"2. src/tool-schemas.mjs","texto":"O catálogo: a lista das 19 ferramentas, com nome, descrição e schema. Aqui você vê o que o servidor oferece ao mundo."},{"titulo":"3. src/tools.mjs","texto":"O corpo do trabalho. Repare em lerPaginaCompleta: é o caminho ÚNICO de leitura que todas as ferramentas de página compartilham."},{"titulo":"4. src/fetch.mjs","texto":"A única porta de saída para a internet. Leia as seis regras no cabeçalho: SSRF, DNS, redirect, retry, cache e junção de buscas."},{"titulo":"5. src/security.mjs e src/net.mjs","texto":"Os dois portões de segurança. Não precisa decorar; precisa saber que existem e onde procurar quando uma URL é bloqueada."},{"titulo":"6. src/html-parser.mjs","texto":"O conversor de HTML para markdown. É o arquivo mais reaproveitado do projeto e o que tem golden files: mude com cuidado e rode os testes."}]}
 ```
 
 **Como cada arquivo começa.** Todo módulo de `src/` abre com o mesmo bloco de
@@ -89,6 +96,12 @@ caractere (`48`, `57`).
 | `read_json(url, path?)`     | Lê uma resposta JSON pública, declara a forma e aceita `path` (ex.: `data.items`)        |
 | `find_on_page(url, query)`  | Busca um termo na página e devolve só os trechos com contexto (literal ou regex)         |
 | `find_relevant(url, query)` | Busca por **assunto** e devolve os trechos mais relevantes, com nota e seção (acento/plural tolerados) |
+| `find_relevant_multi(urls, query)` | A mesma busca em até 8 páginas, com ranking global e até `maxPorFonte` trechos por página |
+| `extract_page_info(url)`    | Cartão da página: título, descrição, autor, datas, idioma, site, canônica e dados estruturados |
+| `read_tables(url)`          | Todas as tabelas da página em JSON (colunas + linhas), com `maxTabelas`/`maxLinhas`/`maxChars` |
+| `extract_faq(url)`          | Perguntas frequentes (JSON-LD `FAQPage` + seção visível), sem repetir pergunta              |
+| `read_archived(url, timestamp?)` | Lê a captura mais recente (ou de uma data) no Internet Archive                        |
+| `read_document(url)`        | Extrai texto, metadados e estrutura de DOCX, PPTX e EPUB (zero dependência)              |
 | `diff_page(url)`            | Compara com a leitura anterior e devolve só o que mudou (linhas + e -)                  |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
@@ -105,7 +118,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (42 arquivos, 393 testes, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (43 arquivos, 418 testes, ~80 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -139,6 +152,7 @@ Roda os arquivos de `tests/` (42 arquivos, 393 testes, ~60 s, sem rede na maiori
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/relevancia.test.mjs` | `find_relevant`: acento e plural ("baus" acha "baú"), palavras vazias descartadas, cobertura de termos e seção na nota, seção de apêndice e bloco de "editar" fora do topo, `maxTrechos`, consulta só com palavras vazias, aviso de achado fraco e de cobertura parcial, **mesma consulta repetida devolve a resposta guardada** e `maxTrechos` diferente não reaproveita a anterior |
+| `tests/ferramentas-novas.test.mjs` | as seis ferramentas da 1.11.0: busca multi (duas fontes, URL que falha sem derrubar as outras, dedupe, teto de 8), cartão da página (meta + JSON-LD + canônica, URL não-HTML), tabelas em JSON (cabeçalho `<th>`, cabeçalho mais curto que os dados, `maxLinhas`, página sem tabela), FAQ (JSON-LD + seção visível + rodapé que termina em "?", `maxPerguntas`), timestamp inválido do `read_archived` e leitura de DOCX/PPTX/EPUB (ordem de slides/spine, link interno removido, arquivo que não é ZIP) |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
 | `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` converte a página gigante inteira para a marca (a conversão de exibição, que para aos 25 mil, não serve) — duas chamadas seguidas dão PRIMEIRA leitura e SEM MUDANÇA — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
@@ -166,7 +180,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 13 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 19 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 npm run test:stress   # bateria cronometrada de sites pesados, lentos e difíceis no ar
 ```
@@ -238,7 +252,13 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 13 ferramentas do MCP
+│   ├── tools.mjs      <- o despacho das 19 ferramentas do MCP
+│   ├── busca-relevante.mjs<- find_relevant + find_relevant_multi
+│   ├── page-info.mjs  <- extract_page_info: cartao da pagina
+│   ├── tabelas.mjs    <- read_tables: tabelas em JSON alinhado
+│   ├── faq.mjs        <- extract_faq: perguntas frequentes
+│   ├── archive.mjs    <- read_archived: captura do Internet Archive
+│   ├── documentos.mjs <- read_document: DOCX/PPTX/EPUB (zero deps)
 │   ├── video.mjs      <- read_video: metadados + transcricao de legendas
 │   ├── pdf.mjs        <- read_pdf: extracao de texto de PDF (zero deps)
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
@@ -361,7 +381,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.10.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.11.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -1131,6 +1151,42 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   contentor: redeploy e cold start depois do spin-down limpam-no (o
   `keep-alive.yml` só evita o sleep, não reinicia nada).
 
+## As ferramentas de dados (1.11.0)
+
+Seis ferramentas que devolvem **dados já recortados**, para a IA não pagar a
+leitura inteira quando só precisa de um campo, uma tabela ou uma pergunta.
+
+- **`find_relevant_multi(urls, query)`** — a mesma busca por assunto em até 8
+  páginas, baixadas em paralelo. O ranking é global, mas há um teto por fonte
+  (`maxPorFonte`, padrão 2): uma página excepcional não soterra as outras. URL
+  repetida (mesma chave canônica) é lida uma vez; URL que falha entra nos
+  avisos e **não** derruba as demais. Teto de 20 trechos por chamada.
+- **`extract_page_info(url)`** — o cartão da página: título, descrição, autor,
+  datas de publicação/modificação, idioma, nome do site, URL canônica e os
+  tipos de dados estruturados. É a chamada barata para decidir se vale ler o
+  corpo; em URL que não é HTML, diz qual ferramenta usar em vez de falhar.
+- **`read_tables(url)`** — todas as `<table>` da página em JSON
+  (`[{colunas, linhas, linhasOmitidas}]`), com teto de 30 tabelas, 200 linhas
+  por tabela e 400 caracteres por célula. A primeira linha só vira cabeçalho
+  quando **todas** as células dela vieram de `<th>`. `colspan`/`rowspan` não
+  são expandidos: cada célula ocupa uma posição, como no markdown.
+- **`extract_faq(url)`** — pares pergunta/resposta de duas fontes: JSON-LD
+  `FAQPage` (precisa) e a seção visível com título de FAQ (cobre site sem dados
+  estruturados). Pergunta repetida nas duas fontes entra uma vez. É heurística:
+  parágrafo com link ou cauda longa não vira pergunta, porque no fim da página
+  mora o rodapé.
+- **`read_archived(url, timestamp?)`** — lê a captura do Internet Archive, por
+  padrão a mais recente (`timestamp` aceita `AAAAMMDD` ou `AAAAMMDDhhmmss`). O
+  pedido usa `id_` para receber o documento cru, sem a barra do arquivo. Sem
+  captura, a resposta diz isso e aponta o `read_page`; o archive.org pode
+  responder 429 sob carga, e aí o erro é dele, não da página.
+- **`read_document(url)`** — DOCX, PPTX e EPUB lidos com `node:zlib`: o ZIP é
+  aberto à mão (índice central, entrada por entrada) com tetos de 16 MB por
+  entrada e 40 MB no total contra zip bomb. DOCX devolve parágrafos e células;
+  PPTX segue a ordem das relações da apresentação (não a numeração dos
+  arquivos); EPUB segue o spine do OPF. PDF continua no `read_pdf`; Office
+  97-2003 é recusado com a mensagem certa. Não há OCR nem leitura de imagens.
+
 ## Sessão e SSE (a spec do transporte HTTP)
 
 O transporte HTTP do MCP prevê `Mcp-Session-Id` desde a revisão `2025-03-26`.
@@ -1151,7 +1207,7 @@ A negociação de versão do `initialize` aceita `2024-11-05`, `2025-03-26`,
 (a mais nova que o servidor fala). O catálogo de `tools/list` traz, além do
 nome e do schema, um `title` legível e `annotations` (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint`) — os clientes usam isso
-para decidir sem executar. Todas as 13 ferramentas são de leitura; `diff_page`
+para decidir sem executar. Todas as 19 ferramentas são de leitura; `diff_page`
 é a única marcada como **não** idempotente, porque cada chamada move o ponto de
 comparação da seguinte.
 

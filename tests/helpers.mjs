@@ -66,6 +66,129 @@ export function construirPdfFixture() {
   return Buffer.from(corpo, "latin1");
 }
 
+// Monta um ZIP minimo para os fixtures de DOCX/PPTX/EPUB.
+//
+// Metodo "armazenado" (sem compressao) e CRC zerado: o leitor do servidor
+// aceita metodo 0 e nao confere CRC. O teste quer provar a extracao do TEXTO,
+// nao o descompactador — e nao vale carregar uma dependencia so para o fixture.
+export function construirZip(entradas) {
+  const partesLocais = [];
+  const partesCentrais = [];
+  let deslocamento = 0;
+
+  for (const [nome, conteudo] of Object.entries(entradas)) {
+    const nomeBuf = Buffer.from(nome, "utf8");
+    const dados = Buffer.isBuffer(conteudo) ? conteudo : Buffer.from(conteudo, "utf8");
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(dados.length, 18);
+    local.writeUInt32LE(dados.length, 22);
+    local.writeUInt16LE(nomeBuf.length, 26);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(dados.length, 20);
+    central.writeUInt32LE(dados.length, 24);
+    central.writeUInt16LE(nomeBuf.length, 28);
+    central.writeUInt32LE(deslocamento, 42);
+
+    partesLocais.push(local, nomeBuf, dados);
+    partesCentrais.push(central, nomeBuf);
+    deslocamento += local.length + nomeBuf.length + dados.length;
+  }
+
+  const tamanhoCentral = partesCentrais.reduce((soma, parte) => soma + parte.length, 0);
+  const total = Object.keys(entradas).length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(total, 8);
+  eocd.writeUInt16LE(total, 10);
+  eocd.writeUInt32LE(tamanhoCentral, 12);
+  eocd.writeUInt32LE(deslocamento, 16);
+
+  return Buffer.concat([...partesLocais, ...partesCentrais, eocd]);
+}
+
+export function construirDocxFixture() {
+  const documento =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+    "<w:p><w:r><w:t>Relatorio de teste</w:t></w:r></w:p>" +
+    "<w:p><w:r><w:t>Primeiro paragrafo do documento.</w:t></w:r></w:p>" +
+    "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Celula A</w:t></w:r></w:p></w:tc>" +
+    "<w:tc><w:p><w:r><w:t>Celula B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" +
+    "</w:body></w:document>";
+  const props =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ' +
+    'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">' +
+    "<dc:title>Contrato de teste</dc:title>" +
+    "<dc:creator>Equipe Fixture</dc:creator>" +
+    "<dcterms:modified>2026-10-20T10:00:00Z</dcterms:modified>" +
+    "</cp:coreProperties>";
+  return construirZip({ "word/document.xml": documento, "docProps/core.xml": props });
+}
+
+export function construirPptxFixture() {
+  const slide = (texto) =>
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+    "<p:cSld><p:spTree><p:sp><p:txBody>" +
+    `<a:p><a:r><a:t>${texto}</a:t></a:r></a:p>` +
+    "</p:txBody></p:sp></p:spTree></p:cSld></p:sld>";
+  // De proposito, a ORDEM da apresentacao aponta rId1 -> slide2 e
+  // rId2 -> slide1: so a leitura das relacoes devolve "Slide 1" = slide dois.
+  const apresentacao =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst>' +
+    "</p:presentation>";
+  const relacoes =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>' +
+    "</Relationships>";
+  return construirZip({
+    "ppt/presentation.xml": apresentacao,
+    "ppt/_rels/presentation.xml.rels": relacoes,
+    "ppt/slides/slide1.xml": slide("Conteudo do slide um"),
+    "ppt/slides/slide2.xml": slide("Conteudo do slide dois"),
+  });
+}
+
+export function construirEpubFixture() {
+  const container =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">' +
+    '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>' +
+    "</container>";
+  const opf =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">' +
+    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">' +
+    "<dc:title>Livro de teste</dc:title><dc:creator>Autora Fixture</dc:creator>" +
+    "<dc:date>2026-10-01</dc:date></metadata>" +
+    '<manifest><item id="c1" href="cap1.xhtml" media-type="application/xhtml+xml"/>' +
+    '<item id="c2" href="cap2.xhtml" media-type="application/xhtml+xml"/></manifest>' +
+    '<spine><itemref idref="c2"/><itemref idref="c1"/></spine></package>';
+  const capitulo = (titulo, texto) =>
+    `<!DOCTYPE html><html><head><title>${titulo}</title></head><body>` +
+    `<h1>${titulo}</h1><p>${texto}</p><p><a href="cap1.xhtml">Link interno</a></p></body></html>`;
+  return construirZip({
+    "META-INF/container.xml": container,
+    "OEBPS/content.opf": opf,
+    "OEBPS/cap1.xhtml": capitulo("Capitulo um", "Texto do primeiro capitulo."),
+    "OEBPS/cap2.xhtml": capitulo("Capitulo dois", "Texto do segundo capitulo."),
+  });
+}
+
 // Porta livre: abre em 0, le a porta atribuida e fecha.
 export function freePort() {
   return new Promise((resolve, reject) => {
@@ -1109,6 +1232,144 @@ export async function startFixture({ robots = "regras" } = {}) {
     if (path === "/json/invalido.json") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end("{ isto nao e json ");
+      return;
+    }
+
+    // ---- fixtures das ferramentas de dados e documentos ----
+
+    // /info -> metadados por <meta>, JSON-LD de artigo e canonical.
+    if (path === "/info") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html lang="pt-BR"><head>' +
+          "<title>Titulo da Meta | Site Fixture</title>" +
+          '<meta name="description" content="Uma descricao de teste com detalhes.">' +
+          '<meta name="author" content="Fulana de Tal">' +
+          '<meta property="article:published_time" content="2026-10-01T09:00:00Z">' +
+          '<meta property="article:modified_time" content="2026-10-02T10:30:00Z">' +
+          '<meta property="og:site_name" content="Site Fixture">' +
+          '<link rel="canonical" href="/info">' +
+          '<script type="application/ld+json">' +
+          '{"@context":"https://schema.org","@type":"NewsArticle","headline":"Titulo Estruturado",' +
+          '"author":{"@type":"Person","name":"Fulana de Tal"},"datePublished":"2026-10-01T09:00:00Z"}' +
+          "</script></head><body><h1>Noticia</h1><p>Corpo da noticia.</p></body></html>"
+      );
+      return;
+    }
+
+    // /info/json -> mesma URL com tipo nao-HTML (cartao tem de orientar).
+    if (path === "/info/json") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end('{"titulo":"isto nao e uma pagina"}');
+      return;
+    }
+
+    // /multi/a e /multi/b -> duas paginas sobre o mesmo assunto, com secoes
+    // de outro tema para a busca multi nao misturar.
+    if (path === "/multi/a") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Lobos A</title></head><body>" +
+          "<h1>Guia dos Lobos</h1>" +
+          "<h2>Habitat do lobo</h2>" +
+          "<p>O lobo vive em matas frias e caça em matilha durante a noite.</p>" +
+          "<h2>Pesca</h2><p>A pesca do salmao acontece no rio.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+    if (path === "/multi/b") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Lobos B</title></head><body>" +
+          "<h1>Biologia dos Lobos</h1>" +
+          "<h2>Alimentacao do lobo</h2>" +
+          "<p>O lobo e carnivoro e come veados, coelhos e outros animais.</p>" +
+          "<h2>Jardim</h2><p>Como plantar tomates no quintal.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /tabela-cabecalho-curto -> cabecalho com 1 <th> e dados com 2 colunas.
+    // A largura da tabela vem das linhas de dados; a linha de cabecalho mais
+    // curta nao pode derrubar a leitura.
+    if (path === "/tabela-cabecalho-curto") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Cabecalho curto</title></head><body>" +
+          "<table><tr><th>Nome</th></tr><tr><td>Ana</td><td>10</td></tr></table>" +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /tabelas -> uma tabela com cabecalho <th> e uma sem cabecalho.
+    if (path === "/tabelas") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Tabelas</title></head><body>" +
+          "<h1>Precos</h1>" +
+          "<table><thead><tr><th>Produto</th><th>Preco</th></tr></thead>" +
+          "<tbody><tr><td>Caneta</td><td>2</td></tr><tr><td>Caderno</td><td>15</td></tr></tbody></table>" +
+          "<table><tr><td>sem</td><td>cabecalho</td></tr><tr><td>x</td><td>y</td></tr></table>" +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // /faq -> FAQPage no JSON-LD E a mesma secao visivel (uma pergunta repetida
+    // de proposito, para provar a deduplicacao).
+    if (path === "/faq") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Duvidas</title>" +
+          '<script type="application/ld+json">' +
+          '{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[' +
+          '{"@type":"Question","name":"O envio e gratuito?",' +
+          '"acceptedAnswer":{"@type":"Answer","text":"Sim, o envio e gratuito para todo o Brasil."}},' +
+          '{"@type":"Question","name":"Posso trocar o produto?",' +
+          '"acceptedAnswer":{"@type":"Answer","text":"Sim, em ate 30 dias."}}]}' +
+          "</script></head><body><h1>Duvidas</h1>" +
+          "<h2>Perguntas frequentes</h2>" +
+          "<h3>O envio e gratuito?</h3><p>Sim, o envio e gratuito para todo o Brasil.</p>" +
+          "<h3>Qual o prazo de entrega?</h3><p>O prazo e de 5 dias uteis.</p>" +
+          // Rodapé que termina em "?" com link (o caso docs.python.org):
+          // não pode virar pergunta. A linha seguinte existe para dar um
+          // "resposta" ao falso positivo, como no site real.
+          '<p>Last updated on 2026-10-31. <a href="https://exemplo.org/bugs">Found a bug</a>?</p>' +
+          "<p>Created using Sphinx.</p>" +
+          "<h2>Contato</h2><p>Fale com a gente.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
+    // ---- fixtures do read_document ----
+    if (path === "/doc/exemplo.docx") {
+      res.writeHead(200, {
+        "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      res.end(construirDocxFixture());
+      return;
+    }
+    if (path === "/doc/exemplo.pptx") {
+      res.writeHead(200, {
+        "content-type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      });
+      res.end(construirPptxFixture());
+      return;
+    }
+    if (path === "/doc/exemplo.epub") {
+      res.writeHead(200, { "content-type": "application/epub+zip" });
+      res.end(construirEpubFixture());
+      return;
+    }
+    if (path === "/doc/falso.docx") {
+      res.writeHead(200, {
+        "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      res.end("isto nao e um arquivo zip");
       return;
     }
 

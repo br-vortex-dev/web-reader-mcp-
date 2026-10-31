@@ -6,7 +6,7 @@
 //   ROTAS     GET / e /health (200), GET /mcp (405), POST /mcp sem token (401),
 //             token errado (401), JSON invalido (400), corpo > 1 MB (413),
 //             metodo e ferramenta inexistentes (erro limpo, sem 5xx)
-//   FERRAM.   as 13 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
+//   FERRAM.   as 19 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
 //             redirect http->https, fidelidade (tabela GFM, acentos,
 //             indentacao de codigo) e cache (2a leitura mais rapida)
 //
@@ -133,9 +133,9 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     const r = await mcpCall("tools/list", undefined, 5);
     const tools = r.json?.result?.tools || [];
     const nomes = tools.map((t) => t.name).sort();
-    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json", "find_on_page", "find_relevant", "diff_page"];
-    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 13 ferramentas com schema", nomes.join(", "));
-  } catch (e) { check(false, "tools/list traz as 13 ferramentas com schema", e.message); }
+    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json", "find_on_page", "find_relevant", "diff_page", "find_relevant_multi", "extract_page_info", "read_tables", "extract_faq", "read_archived", "read_document"];
+    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 19 ferramentas com schema", nomes.join(", "));
+  } catch (e) { check(false, "tools/list traz as 19 ferramentas com schema", e.message); }
 
   // read_page numa pagina real e complexa (tabelas, links, acentos)
   try {
@@ -249,6 +249,81 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     check(!toolIsError(r) && temMeta && transcricaoDeclarada, "read_video le metadados de video (Vimeo)", `${encurta(rotulo, 20)}; ${transcricaoDeclarada ? "transcricao declarada" : "sem campo de transcricao"}`);
     if (/Transcricao: indisponivel/.test(t)) aviso("read_video: transcricao indisponivel agora", encurta((t.match(/Transcricao: indisponivel.*/) || [""])[0], 90));
   } catch (e) { check(false, "read_video le metadados de video (Vimeo)", e.message); }
+
+  // find_relevant_multi: o mesmo assunto em duas Wikipédias (pt/en).
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "find_relevant_multi",
+      arguments: {
+        urls: ["https://pt.wikipedia.org/wiki/Node.js", "https://en.wikipedia.org/wiki/Node.js"],
+        query: "JavaScript runtime",
+        maxTrechos: 4,
+      },
+    }, 23);
+    const t = toolText(r);
+    const grupos = (t.match(/^## \d+\. https:/gm) || []).length;
+    check(!toolIsError(r) && /Trechos relevantes em varias paginas/.test(t) && grupos >= 1, "find_relevant_multi busca em varias paginas", `${grupos} fonte(s) com trecho em ${r.ms} ms`);
+  } catch (e) { check(false, "find_relevant_multi busca em varias paginas", e.message); }
+
+  // extract_page_info: cartão barato da mesma Wikipédia.
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "extract_page_info",
+      arguments: { url: "https://pt.wikipedia.org/wiki/Node.js" },
+    }, 24);
+    const t = toolText(r);
+    const temTitulo = /\nTitulo: .+/.test(t);
+    const temIdioma = /\nIdioma: pt/.test(t);
+    check(!toolIsError(r) && /^# Informacoes da pagina/.test(t) && temTitulo && temIdioma && t.length < 1500, "extract_page_info devolve o cartao da pagina", `${t.length} chars em ${r.ms} ms`);
+  } catch (e) { check(false, "extract_page_info devolve o cartao da pagina", e.message); }
+
+  // read_tables: tabelas da Wikipédia como JSON.
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "read_tables",
+      arguments: { url: "https://pt.wikipedia.org/wiki/Node.js", maxTabelas: 2, maxLinhas: 3 },
+    }, 25);
+    const t = toolText(r);
+    const achadas = Number((t.match(/Tabelas: (\d+) encontrada/) || [])[1] || 0);
+    check(!toolIsError(r) && achadas > 0 && /```json/.test(t), "read_tables devolve tabelas como JSON", `${achadas} tabela(s) em ${r.ms} ms`);
+  } catch (e) { check(false, "read_tables devolve tabelas como JSON", e.message); }
+
+  // extract_faq: a FAQ de verdade da documentação do Python.
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "extract_faq",
+      arguments: { url: "https://www.python.org/doc/faq/general/", maxPerguntas: 3 },
+    }, 26);
+    const t = toolText(r);
+    const achadas = Number((t.match(/Perguntas: (\d+) de (\d+)/) || [])[1] || 0);
+    check(!toolIsError(r) && achadas > 0, "extract_faq extrai perguntas de uma FAQ real", `${achadas} pergunta(s) em ${r.ms} ms`);
+  } catch (e) { check(false, "extract_faq extrai perguntas de uma FAQ real", e.message); }
+
+  // read_archived: uma captura antiga do example.com no Internet Archive.
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "read_archived",
+      arguments: { url: "https://example.com", timestamp: "2020", maxChars: 800 },
+    }, 27);
+    const t = toolText(r);
+    if (/429|Too Many Requests/i.test(t)) {
+      aviso("read_archived: Internet Archive respondeu 429 agora", "limite do arquivo; a ferramenta em si respondeu");
+    } else {
+      const temData = /Captura: \d{4}-\d{2}-\d{2}/.test(t);
+      check(!toolIsError(r) && /^# Arquivado:/.test(t) && temData, "read_archived le uma captura do Internet Archive", `${encurta((t.match(/Captura: .*/) || [""])[0], 50)} em ${r.ms} ms`);
+    }
+  } catch (e) { check(false, "read_archived le uma captura do Internet Archive", e.message); }
+
+  // read_document: um DOCX público de verdade (demo do calibre).
+  try {
+    const r = await mcpCall("tools/call", {
+      name: "read_document",
+      arguments: { url: "https://calibre-ebook.com/downloads/demos/demo.docx", maxChars: 1200 },
+    }, 28);
+    const t = toolText(r);
+    const formato = (t.match(/\nFormato: (.+)/) || [])[1] || "";
+    check(!toolIsError(r) && /Formato: DOCX/.test(t) && t.length > 400, "read_document extrai texto de um DOCX", `${formato} em ${r.ms} ms`);
+  } catch (e) { check(false, "read_document extrai texto de um DOCX", e.message); }
 
   // cache: mesma URL duas vezes -> 2a leitura sai do cache (muito mais rapida)
   try {

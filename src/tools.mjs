@@ -50,7 +50,6 @@ import {
 } from "./fetch.mjs";
 import { hostOf, decodeEntities } from "./html-parser.mjs";
 import { registrarPedidoQuente } from "./warmer.mjs";
-import { termosDaConsulta, blocosDoMarkdown, pontuarBlocos, recortarTrecho } from "./relevancia.mjs";
 import {
   memoDoPayload,
   conversoesMemo,
@@ -66,6 +65,12 @@ import {
 import { toolReadVideo } from "./video.mjs";
 import { toolReadPdf } from "./pdf.mjs";
 import { toolReadFeed, toolReadJson } from "./feeds.mjs";
+import { toolFindRelevant, toolFindRelevantMulti } from "./busca-relevante.mjs";
+import { toolExtractPageInfo } from "./page-info.mjs";
+import { toolReadTables } from "./tabelas.mjs";
+import { toolExtractFaq } from "./faq.mjs";
+import { toolReadArchived } from "./archive.mjs";
+import { toolReadDocument } from "./documentos.mjs";
 import {
   buscarMarca,
   guardarMarca,
@@ -85,6 +90,18 @@ import {
   CrawlError,
   RespostaMuitoGrandeError,
 } from "./errors.mjs";
+
+// As ferramentas em módulo próprio continuam exportadas daqui: é daqui que o
+// teste de contrato de entrada importa, como faz com as ferramentas locais.
+export {
+  toolFindRelevant,
+  toolFindRelevantMulti,
+  toolExtractPageInfo,
+  toolReadTables,
+  toolExtractFaq,
+  toolReadArchived,
+  toolReadDocument,
+};
 
 /**
  * O conteúdo embutido (__NEXT_DATA__, JSON-LD, API interna) memoizado por
@@ -111,36 +128,6 @@ async function embeddedMemo(payload, timeoutMs) {
     conversoesMemo.caronas++;
   }
   return memo.embedded;
-}
-
-/**
- * Resultado do find_relevant por payload + consulta.
- *
- * A mesma pergunta sobre a mesma página (o caso comum de um site de IA: vários
- * usuários no mesmo assunto) requeria blocos+nota de novo — ~15 ms de CPU.
- * Aqui a resposta pronta fica presa ao PAYLOAD: quando o cache revalida e troca
- * o objeto da página, o WeakMap solta tudo sozinho, sem invalidação manual.
- * Teto por página para uma sessão que varre dezenas de assuntos não crescer
- * sem limite.
- */
-const memoDeBuscaRelevante = new WeakMap();
-const MEMO_BUSCA_POR_PAGINA = 16;
-
-function lerMemoDeBusca(payload, chave) {
-  return memoDeBuscaRelevante.get(payload)?.get(chave);
-}
-
-function guardarMemoDeBusca(payload, chave, texto) {
-  let porChave = memoDeBuscaRelevante.get(payload);
-  if (!porChave) {
-    porChave = new Map();
-    memoDeBuscaRelevante.set(payload, porChave);
-  }
-  if (!porChave.has(chave) && porChave.size >= MEMO_BUSCA_POR_PAGINA) {
-    porChave.delete(porChave.keys().next().value);
-  }
-  porChave.set(chave, texto);
-  return texto;
 }
 
 /**
@@ -838,105 +825,6 @@ export async function toolFindOnPage(args = {}) {
       ? `\n\n[... ${linhasOcultas} linha(s) com ocorrencias alem do limite; aumente maxHits ...]`
       : "")
   );
-}
-
-/**
- * Busca por TRECHOS RELEVANTES: a IA manda o assunto ("onde ficam os baús") e
- * recebe os parágrafos/tabelas que mais casam, já ordenados por nota — em vez
- * de mandar um termo exato (find_on_page) ou a página inteira (read_page).
- *
- * A consulta é tratada como CONJUNTO DE PALAVRAS, não como frase: acento e
- * plural não importam, e palavras vazias ("onde", "fica", "dos") são
- * descartadas para não casar com a página toda. Continua sendo casamento de
- * palavras — sinônimo ("baú" por "caixa") não é resolvido.
- */
-export async function toolFindRelevant(args = {}) {
-  const parsed = validateHttpUrl(args.url);
-  const query = String(args.query ?? "").trim();
-  if (!query) throw new ParametroInvalidoError("query", "informe o assunto a buscar");
-  const timeoutMs = clampTimeoutMs(args.timeoutMs);
-  // `Number(...) || 5` transformaria o 0 num pedido de 5; zero não faz sentido
-  // aqui, mas lixo/ausência é que viram o padrão.
-  const pedidoDeTrechos = Number(args.maxTrechos);
-  const maxTrechos = Number.isFinite(pedidoDeTrechos)
-    ? Math.max(1, Math.min(20, Math.floor(pedidoDeTrechos)))
-    : 5;
-
-  const termos = termosDaConsulta(query);
-  if (termos.length === 0) {
-    throw new ParametroInvalidoError(
-      "query",
-      "a consulta so tem palavras vazias (onde, fica, dos...); informe o assunto, ex.: 'baús'"
-    );
-  }
-
-  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
-  const { text: html, finalUrl, contentType } = payload;
-  ensureHtml(contentType, html, finalUrl);
-
-  const chaveMemo = JSON.stringify([query, maxTrechos]);
-  const respostaGuardada = lerMemoDeBusca(payload, chaveMemo);
-  if (respostaGuardada !== undefined) return respostaGuardada;
-
-  const bruto = isConteudoBruto(contentType, html);
-  let conteudo = bruto ? html.replace(/\r\n?/g, "\n") : markdownMemo(payload);
-  let interrompida = !bruto && markdownInterrompida(payload);
-
-  let blocos = blocosDoMarkdown(conteudo);
-  let achados = pontuarBlocos(blocos, termos);
-
-  // Mesma regra do find_on_page: parada antecipada sem NENHUM casamento na
-  // frente não pode virar "não achei" quando o assunto está no rabo.
-  if (interrompida && achados.length === 0) {
-    conteudo = markdownCompleto(payload);
-    interrompida = false;
-    blocos = blocosDoMarkdown(conteudo);
-    achados = pontuarBlocos(blocos, termos);
-  }
-
-  const avisoCobertura = payload.cortado
-    ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
-      `${payload.bytes} bytes, nao a pagina inteira.`
-    : interrompida
-    ? `\nAVISO: a pagina e grande demais para converter inteira — a busca cobriu os primeiros ` +
-      `${conteudo.length} caracteres do texto extraido, nao a pagina toda. O assunto pode estar no resto.`
-    : "";
-
-  const listaTermos = termos.map((t) => t.palavra).join(", ");
-
-  if (achados.length === 0) {
-    return guardarMemoDeBusca(
-      payload,
-      chaveMemo,
-      `Nenhum trecho relevante para "${query}" em ${finalUrl}.\n` +
-        `Termos usados (sem as palavras vazias): ${listaTermos}.\n` +
-        `A pagina tem ${blocos.length} bloco(s) de texto e ${conteudo.length} caracteres. ` +
-        `Tente palavras mais especificas ou leia a pagina com read_page.` +
-        avisoCobertura
-    );
-  }
-
-  const melhores = achados.slice(0, maxTrechos);
-  const termosVistos = new Set(achados.flatMap((a) => a.casados)).size;
-  const melhorNota = melhores[0].nota;
-  const avisoFraco =
-    termosVistos <= Math.floor(termos.length / 2) || melhorNota < 1.5
-      ? `\n\nAVISO: achado fraco — ${termosVistos} de ${termos.length} termo(s) aparecem e o melhor ` +
-        `trecho tem relevancia ${melhorNota}. Se nao responder a pergunta, leia a pagina com read_page.`
-      : "";
-
-  const cabecalho =
-    `# Trechos relevantes em: ${finalUrl}\n` +
-    `Consulta: "${query}" | termos usados: ${listaTermos}\n` +
-    `Trechos: ${melhores.length} de ${achados.length} bloco(s) com casamento` +
-    avisoCobertura;
-
-  const trechos = melhores.map((bloco, i) => {
-    const rotuloSecao = bloco.secao ? ` — secao: ${bloco.secao}` : "";
-    return `## ${i + 1}. relevancia ${bloco.nota}${rotuloSecao}\n${recortarTrecho(bloco.texto)}`;
-  });
-
-  return guardarMemoDeBusca(payload, chaveMemo, cabecalho + "\n\n" + trechos.join("\n\n") + avisoFraco);
 }
 
 /**
@@ -1667,6 +1555,18 @@ export async function callTool(name, args) {
       return await toolFindOnPage(args || {});
     case "find_relevant":
       return await toolFindRelevant(args || {});
+    case "find_relevant_multi":
+      return await toolFindRelevantMulti(args || {});
+    case "extract_page_info":
+      return await toolExtractPageInfo(args || {});
+    case "read_tables":
+      return await toolReadTables(args || {});
+    case "extract_faq":
+      return await toolExtractFaq(args || {});
+    case "read_archived":
+      return await toolReadArchived(args || {});
+    case "read_document":
+      return await toolReadDocument(args || {});
     case "diff_page":
       return await toolDiffPage(args || {});
     default:

@@ -635,6 +635,26 @@ function linhaDeTabela(cells, cols, celula) {
 }
 
 /**
+ * Cópia crua das linhas, para quem quer os DADOS da tabela (read_tables) em
+ * vez do desenho em markdown. A marca de cabeçalho acompanha cada célula
+ * porque só o parser sabe se ela veio de <th> ou <td> — adivinhar depois, pelo
+ * conteúdo, confundiria uma primeira linha de dados com cabeçalho.
+ */
+function capturarTabela(rows) {
+  const linhas = [];
+  for (const row of rows) {
+    if (row.cells.length === 0) continue;
+    linhas.push(
+      row.cells.map((cell) => ({
+        texto: String(cell ? cell.text : ""),
+        cabecalho: Boolean(cell && cell.header),
+      }))
+    );
+  }
+  return linhas;
+}
+
+/**
  * Renderiza as linhas de uma tabela em markdown GFM.
  * Linhas sem células são descartadas; o número de colunas é o maior entre as
  * linhas válidas (colspan vira uma célula a mais).
@@ -807,9 +827,15 @@ function criarEstadoConversao() {
     tableRows: [],
     tableRow: null,
     tableCell: null,
+    tabelas: [],
+    coletarTabelas: false,
+    // read_tables só quer as tabelas: sem isto, a conversão montava o markdown
+    // da página inteira (e o buffer de saída) para depois jogá-lo fora.
+    apenasTabelas: false,
     ultimoBlocoCodigo: null,
     emit(chunk) {
       if (this.tableCell) { this.tableCell.text += chunk; return; }
+      if (this.apenasTabelas) return;
       empurrar(this, chunk);
     },
   };
@@ -876,7 +902,7 @@ function abrirTabela(st, tag, emit) {
       emit("\n");
     }
   } else if (tag === "th" || tag === "td") {
-    if (st.tableDepth > 0) st.tableCell = { text: "" };
+    if (st.tableDepth > 0) st.tableCell = { text: "", header: tag === "th" };
     else emit(" ");
   } else {
     // caption/tbody/thead/tfoot fora de tabela
@@ -934,7 +960,8 @@ function fecharTabela(st, tag, emit) {
     if (st.tableDepth > 0) {
       st.tableDepth--;
       if (st.tableDepth === 0) {
-        empurrar(st, renderTable(st.tableRows));
+        if (st.coletarTabelas) st.tabelas.push(capturarTabela(st.tableRows));
+        if (!st.apenasTabelas) empurrar(st, renderTable(st.tableRows));
         st.tableRows = [];
         st.tableRow = null;
         st.tableCell = null;
@@ -1064,7 +1091,10 @@ function polirTexto(texto) {
 
 /** Fecha a conversão: tabela pendente, limpeza e polimento final. */
 function finalizarConversao(st) {
-  if (st.tableDepth > 0) empurrar(st, renderTable(st.tableRows));
+  if (st.tableDepth > 0) {
+    if (st.coletarTabelas) st.tabelas.push(capturarTabela(st.tableRows));
+    if (!st.apenasTabelas) empurrar(st, renderTable(st.tableRows));
+  }
   return polirTexto(cleanMarkdown(materializar(st)));
 }
 
@@ -1239,6 +1269,8 @@ function tentarFinalizar(st, { minimo, diagnostico }) {
 
 export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   const st = criarEstadoConversao();
+  st.coletarTabelas = opcoes.coletarTabelas === true;
+  st.apenasTabelas = opcoes.apenasTabelas === true;
   const emit = (chunk) => st.emit(chunk);
   const comLinks = opcoes.coletarLinks !== false;
   const coletor = comLinks ? criarColetorDeLinks(baseUrl) : null;
@@ -1372,7 +1404,11 @@ export function htmlToMarkdownComLinks(html, baseUrl, opcoes = {}) {
   });
 
   const markdown = markdownFinal !== null ? markdownFinal : finalizarConversao(st);
-  return { markdown, links: coletor === null ? [] : coletor.links };
+  return {
+    markdown,
+    links: coletor === null ? [] : coletor.links,
+    tabelas: st.tabelas,
+  };
 }
 
 /**

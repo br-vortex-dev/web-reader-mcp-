@@ -1015,11 +1015,11 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
  * não pedidos que a pediram (a rajada toda colapsa em uma). Erros são
  * engolidos: falhou, a entrada vencida segue valendo até sair da janela.
  */
-function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao = chave } = {}) {
+function revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao = chave, maxBytes = MAX_RESPONSE_BYTES } = {}) {
   coalescedorDeBuscas
     .executar(juncao, () => {
       revalidacoes.tentadas++;
-      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true, chave, extrair }).catch((err) => {
+      return buscarEAquecer(url, { timeoutMs, retries, revalidacao: true, chave, extrair, maxBytes }).catch((err) => {
         revalidacoes.falhas++;
         throw err;
       });
@@ -1164,7 +1164,17 @@ export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOU
   const juncao = chaveDaJuncao(chave, "d");
   const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, juncao });
+    // O teto da revalidação é o mesmo do download que criou a entrada: com o
+    // teto padrão de 5 MB, uma página de 10 MB vencia e a revalidação falhava
+    // em silêncio toda vez, ficando vencida até sair da janela.
+    if (hit.stale) {
+      revalidarEmSegundoPlano(chave, url, {
+        timeoutMs,
+        retries,
+        juncao,
+        maxBytes: MAX_RESPONSE_BYTES_DOCUMENTO,
+      });
+    }
     return hit.payload;
   }
   const busca = coalescedorDeBuscas.executar(juncao, async () => {
@@ -1184,28 +1194,48 @@ export async function fetchTextDocumentoCached(url, { timeoutMs = DEFAULT_TIMEOU
 }
 
 /**
- * Baixa um PDF e devolve os bytes CRUS, com o mesmo cache/junção/segurança da
- * leitura de HTML. O conteúdo é binário: `text` fica vazio e `buffer` é o PDF.
- * O cache guarda o resultado já extraído quando `extrair` é passado (o leitor
- * de PDF passa a função de extração) — assim uma releitura não reparseia.
+ * Baixa um arquivo binário e devolve os bytes CRUS, com o mesmo
+ * cache/junção/segurança da leitura de HTML. `text` fica vazio e `buffer` traz
+ * o conteúdo. Quando `extrair` é passado, o cache guarda o RESULTADO da
+ * extração em vez do binário — uma releitura não reparseia o arquivo e a
+ * entrada fica muito menor.
+ *
+ * `sufixo` isola o cache por TIPO de leitura. Compartilhar a chave com as
+ * leituras de texto envenenava os dois lados: o read_page sobre um PDF
+ * guardava o binário decodificado como se fosse página, e o leitor de PDF
+ * sobre HTML guardava texto vazio na entrada que o read_page depois servia
+ * como uma página em branco. PDF (`#pdf`) e documentos Office/EPUB (`#doc`)
+ * também não podem dividir entrada: o mesmo ZIP não é um PDF.
+ *
+ * `maxBytes` é o teto do arquivo inteiro. Binário cortado não serve para
+ * nada, então acima do teto a busca falha em vez de devolver um pedaço.
  */
-export async function fetchPdfCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, extrair } = {}) {
-  // Cache PRÓPRIO do PDF (`#pdf`). Compartilhar a chave com as leituras de
-  // texto envenenava os dois lados: o read_page sobre um PDF guardava o
-  // binário decodificado como se fosse página, e o read_pdf sobre HTML
-  // guardava texto vazio (não é PDF) na entrada que o read_page depois servia
-  // como uma página em branco.
-  const chave = chaveCanonica(url) + "#pdf";
-  const juncao = chaveDaJuncao(chave, "p");
+export async function fetchBinarioCached(url, {
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  signal,
+  retries,
+  extrair,
+  sufixo = "#bin",
+  maxBytes = MAX_RESPONSE_BYTES,
+} = {}) {
+  const chave = chaveCanonica(url) + sufixo;
+  const juncao = chaveDaJuncao(chave, "b" + sufixo);
   const hit = pageCache.get(chave);
   if (hit) {
-    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao });
+    if (hit.stale) revalidarEmSegundoPlano(chave, url, { timeoutMs, retries, extrair, juncao, maxBytes });
     return hit.payload;
   }
   const busca = coalescedorDeBuscas.executar(juncao, () =>
-    buscarEAquecer(url, { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs), retries, chave, extrair })
+    buscarEAquecer(url, { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs), retries, chave, extrair, maxBytes })
   );
   return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
+}
+
+/**
+ * PDF é um caso de `fetchBinarioCached` com cache próprio e teto de 5 MB.
+ */
+export async function fetchPdfCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, extrair } = {}) {
+  return fetchBinarioCached(url, { timeoutMs, signal, retries, extrair, sufixo: "#pdf" });
 }
 
 /**

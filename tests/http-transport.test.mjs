@@ -330,7 +330,7 @@ test("200: tools/list via POST /mcp com o token", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("access-control-allow-origin"), "*");
   const json = JSON.parse(r.body);
-  assert.equal(json.result.tools.length, 13);
+  assert.equal(json.result.tools.length, 19);
 });
 
 test("202: notificacao (sem id) nao gera resposta", async () => {
@@ -487,7 +487,7 @@ test("concorrencia: 12 tools/list simultaneos nao trocam id nem truncam", { time
   respostas.forEach((r, i) => {
     assert.equal(r.status, 200, "nenhum tools/list pode falhar por estar concorrendo");
     assert.equal(r.json.id, 1000 + i, "cada resposta leva o id do seu proprio pedido");
-    assert.equal(r.json.result.tools.length, 13, "a lista vem inteira, sem truncar");
+    assert.equal(r.json.result.tools.length, 19, "a lista vem inteira, sem truncar");
   });
 });
 
@@ -531,7 +531,7 @@ test("concorrencia: fila de admissao atende 16 tools/list com 2 vagas", { timeou
     respostas.forEach((r, i) => {
       assert.equal(r.status, 200, "quem espera na fila e atendido, nao recusado");
       assert.equal(r.json.id, 50 + i);
-      assert.equal(r.json.result.tools.length, 13);
+      assert.equal(r.json.result.tools.length, 19);
     });
   } finally {
     filho.kill();

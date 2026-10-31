@@ -33,8 +33,8 @@ after(async () => {
 
 /* ------------------------- catálogo MCP -------------------------------- */
 
-test("catálogo: as 13 ferramentas têm title e annotations de leitura", () => {
-  assert.equal(TOOLS.length, 13);
+test("catálogo: as 19 ferramentas têm title e annotations de leitura", () => {
+  assert.equal(TOOLS.length, 19);
   for (const tool of TOOLS) {
     assert.equal(typeof tool.title, "string", `${tool.name} sem title`);
     assert.ok(tool.title.length > 0, `${tool.name} com title vazio`);

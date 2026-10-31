@@ -352,6 +352,178 @@ export const TOOLS = [
     },
   },
   {
+    name: "find_relevant_multi",
+    title: "Buscar trechos em várias páginas",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Faz a busca por ASSUNTO em várias páginas (máx 8) numa chamada e devolve os melhores " +
+      "trechos de cada uma, com URL e seção. Use quando a resposta pode estar em mais de uma " +
+      "fonte (documentação + blog + FAQ) em vez de chamar find_relevant uma vez por página. " +
+      "Cada fonte contribui com até maxPorFonte trechos; a falha de uma URL não derruba as outras.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        urls: {
+          type: "array",
+          items: { type: "string" },
+          description: "URLs (http/https) onde buscar, máximo 8",
+        },
+        query: {
+          type: "string",
+          description: "Assunto a buscar (ex.: 'localização dos baús'); acento e plural são tolerados",
+        },
+        maxTrechos: {
+          type: "number",
+          description: "Máximo de trechos devolvidos no total (padrão 6, max 20)",
+        },
+        maxPorFonte: {
+          type: "number",
+          description: "Máximo de trechos por página, para uma fonte não soterrar as outras (padrão 2, max 5)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["urls", "query"],
+    },
+  },
+  {
+    name: "extract_page_info",
+    title: "Cartão da página",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Devolve o cartão da página — título, descrição, autor, datas de publicação e modificação, " +
+      "idioma, site, URL canônica e tipos de dados estruturados — sem o corpo. É a chamada barata " +
+      "para decidir se a página é a fonte certa antes de gastar um read_page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da página" },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "read_tables",
+    title: "Ler tabelas como dados",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Extrai as tabelas da página como DADOS em JSON ({colunas, linhas}), em vez do desenho em " +
+      "markdown. Use para preço, prazo, especificação ou comparação, que são difíceis de ler no " +
+      "read_page. Células mescladas (colspan/rowspan) não são expandidas.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da página" },
+        maxTabelas: { type: "number", description: "Máximo de tabelas a devolver (padrão 10, max 30)" },
+        maxLinhas: { type: "number", description: "Máximo de linhas por tabela (padrão 50, max 200)" },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres do JSON retornado (padrão 8000, max 25000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "extract_faq",
+    title: "Extrair perguntas frequentes",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Extrai as perguntas frequentes da página, com a resposta de cada uma. Lê os dados " +
+      "estruturados (FAQPage) e a seção visível com título de FAQ, sem repetir pergunta. Quando " +
+      "não encontra nenhuma, diz onde procurou — não devolve vazio sem explicação.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) da página" },
+        maxPerguntas: { type: "number", description: "Máximo de perguntas (padrão 15, max 50)" },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres da saída (padrão 8000, max 25000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "read_archived",
+    title: "Ler página arquivada",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Lê a versão arquivada de uma página no Internet Archive (Wayback Machine), com a data da " +
+      "captura. Use para página fora do ar, que mudou desde ontem, ou que o site bloqueia hoje. " +
+      "timestamp aceita AAAAMMDD ou AAAAMMDDhhmmss; sem ele, a captura mais recente.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL original (http/https) da página" },
+        timestamp: {
+          type: "string",
+          description: "Data da captura em AAAAMMDD ou AAAAMMDDhhmmss (padrão: a mais recente)",
+        },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres da saída (padrão 8000, max 25000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "read_document",
+    title: "Ler documento Office/EPUB",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Lê o TEXTO de um DOCX, PPTX ou EPUB servido numa URL, com título/autor/data quando o " +
+      "arquivo declara. Não lê .doc antigo (Word 97-2003) nem XLSX; para PDF use read_pdf. " +
+      "O arquivo pode ter até 24 MB.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completa (http/https) do arquivo" },
+        maxChars: {
+          type: "number",
+          description: "Máximo de caracteres do texto retornado (padrão 8000, max 25000)",
+        },
+        timeoutMs: { type: "number", description: "Timeout da requisição em ms (padrão 8000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
     name: "diff_page",
     title: "Comparar página com a leitura anterior",
     annotations: {

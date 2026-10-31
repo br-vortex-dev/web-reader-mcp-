@@ -18,6 +18,13 @@ import {
   toolReadDynamicPage,
   toolDiscoverUrls,
   toolCrawlSite,
+  toolFindRelevant,
+  toolFindRelevantMulti,
+  toolExtractPageInfo,
+  toolReadTables,
+  toolExtractFaq,
+  toolReadArchived,
+  toolReadDocument,
 } from "../src/tools.mjs";
 import { toolReadFeed, toolReadJson } from "../src/feeds.mjs";
 import { toolReadPdf } from "../src/pdf.mjs";
@@ -36,6 +43,13 @@ const FERRAMENTAS = [
   ["read_json", toolReadJson],
   ["read_pdf", toolReadPdf],
   ["read_video", toolReadVideo],
+  ["find_relevant", toolFindRelevant],
+  ["find_relevant_multi", toolFindRelevantMulti],
+  ["extract_page_info", toolExtractPageInfo],
+  ["read_tables", toolReadTables],
+  ["extract_faq", toolExtractFaq],
+  ["read_archived", toolReadArchived],
+  ["read_document", toolReadDocument],
 ];
 
 for (const [nome, ferramenta] of FERRAMENTAS) {
