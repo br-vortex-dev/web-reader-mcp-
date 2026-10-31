@@ -13,7 +13,7 @@
  *
  * QUEM USA
  *   Usado por: tools.mjs.
- *   Importa de: conversao, fetch, json-ld, relevancia.
+ *   Importa de: conversao, fetch, json-ld, relevancia, utils.
  */
 
 import {
@@ -26,7 +26,8 @@ import {
 } from "./fetch.mjs";
 import { markdownCompleto } from "./conversao.mjs";
 import { normalizarTexto, recortarTrecho } from "./relevancia.mjs";
-import { extrairJsonLd, tiposDe, textoDe } from "./json-ld.mjs";
+import { jsonLdDaPagina, tiposDe, textoDe } from "./json-ld.mjs";
+import { inteiroOuPadrao } from "./utils.mjs";
 
 const LIMITE_RESPOSTA = 1200;
 const TAMANHO_MAXIMO_PERGUNTA = 300;
@@ -195,16 +196,10 @@ const memoDePerguntas = new WeakMap();
 function perguntasDaPagina(payload) {
   const guardadas = memoDePerguntas.get(payload);
   if (guardadas) return guardadas;
-  const itens = extrairJsonLd(payload.text);
+  const itens = jsonLdDaPagina(payload);
   const perguntas = juntarPerguntas(perguntasDoJsonLd(itens), perguntasDaSecao(markdownCompleto(payload)));
   memoDePerguntas.set(payload, perguntas);
   return perguntas;
-}
-
-function inteiroOuPadrao(valor, padrao, minimo, maximo) {
-  const numero = Number(valor);
-  if (!Number.isFinite(numero)) return padrao;
-  return Math.max(minimo, Math.min(maximo, Math.floor(numero)));
 }
 
 /**

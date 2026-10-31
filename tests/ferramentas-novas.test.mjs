@@ -134,6 +134,26 @@ test("read_tables respeita maxLinhas e informa o que ficou de fora", async () =>
   assert.equal(tabelas[1].linhasOmitidas, 1);
 });
 
+test("read_tables corta por caracteres sem quebrar o JSON", async () => {
+  const r = await mcp.call("read_tables", {
+    url: `${fixture.url}/tabela-grande`,
+    maxLinhas: 30,
+    maxChars: 500,
+  });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Tabelas cortadas pelo limite de caracteres: \d+/);
+
+  const bloco = /```json\n([\s\S]*?)\n```/.exec(r.text);
+  assert.ok(bloco, `resposta sem bloco JSON:\n${r.text}`);
+  assert.ok(bloco[1].length <= 500, `JSON com ${bloco[1].length} caracteres`);
+
+  const tabelas = JSON.parse(bloco[1]);
+  assert.ok(tabelas.length < 3, `esperava corte de tabelas, vieram ${tabelas.length}`);
+  const exibidas = tabelas.reduce((soma, tabela) => soma + tabela.linhas.length, 0);
+  assert.ok(exibidas < 90, `esperava corte de linhas, vieram ${exibidas}`);
+  assert.match(r.text, new RegExp(`Linhas omitidas: ${90 - exibidas} `));
+});
+
 test("read_tables aceita cabecalho mais curto que as linhas de dados", async () => {
   const r = await mcp.call("read_tables", { url: `${fixture.url}/tabela-cabecalho-curto` });
   assert.equal(r.isError, false);

@@ -9,7 +9,7 @@
  *   interpretam esses objetos.
  *
  * O QUE ENTRA / O QUE SAI
- *   Entra: o HTML da página.
+ *   Entra: o payload da página (o mesmo objeto que o cache guarda).
  *   Sai:   uma lista de objetos JSON-LD já sem os envelopes (`@graph`, arrays).
  *
  * QUEM USA
@@ -42,7 +42,7 @@ function achatar(valor, saida) {
  * JSON quebrado é comum (vírgula sobrando, aspas soltas): um script inválido
  * não invalida a página, então ele é ignorado e os demais seguem valendo.
  */
-export function extrairJsonLd(html) {
+function extrairJsonLd(html) {
   const itens = [];
   const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let achado;
@@ -53,6 +53,21 @@ export function extrairJsonLd(html) {
       // script inválido: o próximo pode ser o bom
     }
   }
+  return itens;
+}
+
+/**
+ * Os dados estruturados da página, presos ao PAYLOAD: page-info e faq olham a
+ * mesma página em chamadas seguidas e, sem isto, parseariam o JSON-LD duas
+ * vezes. O WeakMap solta tudo quando o cache troca o objeto da página.
+ */
+const memoDeJsonLd = new WeakMap();
+
+export function jsonLdDaPagina(payload) {
+  let itens = memoDeJsonLd.get(payload);
+  if (itens) return itens;
+  itens = extrairJsonLd(String((payload && payload.text) || ""));
+  memoDeJsonLd.set(payload, itens);
   return itens;
 }
 
@@ -76,15 +91,6 @@ export function tiposDaPagina(itens) {
     }
   }
   return tipos;
-}
-
-/** Primeiro objeto do tipo pedido (comparação sem diferenciar maiúsculas). */
-export function acharPorTipo(itens, tipo) {
-  const alvo = String(tipo).toLowerCase();
-  for (const item of itens) {
-    if (tiposDe(item).some((t) => t.toLowerCase() === alvo)) return item;
-  }
-  return null;
 }
 
 /**

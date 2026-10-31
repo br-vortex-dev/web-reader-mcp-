@@ -2,11 +2,13 @@
  * utils.mjs — as peças de infraestrutura que não sabem nada de web.
  *
  * O QUE É
- *   Quatro utilidades genéricas, cada uma resolvendo um problema que aparece
- *   em vários pontos do projeto:
+ *   As utilidades genéricas que não sabem nada de web, cada uma resolvendo um
+ *   problema que aparece em vários pontos do projeto:
  *   - chaveCanonica: a MESMA página chega com utm_*, gclid, fbclid... Sem
  *     normalizar, cada variação seria outra URL (baixa de novo, converte de
  *     novo, ocupa outra vaga no cache).
+ *   - urlSemCredenciais: tira user:senha@ antes de ecoar uma URL.
+ *   - inteiroOuPadrao: parâmetro numérico dentro da faixa que o schema promete.
  *   - criarFila: fila FIFO para não disparar tudo de uma vez.
  *   - criarLimitador / criarLimitadorDeBytes / criarLimitadorPorChave: quantas
  *     requisições cabem ao mesmo tempo, no total e por host.
@@ -21,10 +23,22 @@
  * Nada aqui faz rede: é só controle de fluxo, memória e endereço.
  *
  * QUEM USA
- *   Usado por: fetch, security, snapshot.
+ *   Usado por: busca-relevante, faq, fetch, security, snapshot, tabelas.
  */
 
 import { ServidorOcupadoError } from "./errors.mjs";
+
+/* ============================ Números ============================ */
+
+/**
+ * Inteiro dentro de [minimo, maximo]. Ausência, texto ou lixo viram o padrão;
+ * os schemas são frouxos de propósito, mas o teto precisa valer de verdade.
+ */
+export function inteiroOuPadrao(valor, padrao, minimo, maximo) {
+  const numero = Number(valor);
+  if (!Number.isFinite(numero)) return padrao;
+  return Math.max(minimo, Math.min(maximo, Math.floor(numero)));
+}
 
 /* ============================ URL canônica ============================ *
  * A mesma página chega com parâmetros de rastreio a cada clique/`share`

@@ -20,7 +20,7 @@
 import { fetchTextDocumentoCached, validateHttpUrl, clampTimeoutMs, ensureHtml, isConteudoBruto } from "./fetch.mjs";
 import { decodeEntities } from "./html-parser.mjs";
 import { metaMemo } from "./conversao.mjs";
-import { extrairJsonLd, tiposDaPagina, tiposDe, textoDe, autorDe } from "./json-ld.mjs";
+import { jsonLdDaPagina, tiposDaPagina, tiposDe, textoDe, autorDe } from "./json-ld.mjs";
 
 // Teto de cada campo: descrição de página às vezes vem com um parágrafo
 // inteiro; o cartão existe para ser curto.
@@ -121,7 +121,7 @@ function dadosDaPagina(payload) {
   let dados = memoDeDados.get(payload);
   if (dados) return dados;
   const html = payload.text;
-  const itens = extrairJsonLd(html);
+  const itens = jsonLdDaPagina(payload);
   dados = {
     extras: lerMetaExtras(html),
     idioma: idiomaDaPagina(html),

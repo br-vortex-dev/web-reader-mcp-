@@ -20,11 +20,12 @@
  *
  * QUEM USA
  *   Usado por: tools.mjs.
- *   Importa de: fetch e html-parser.
+ *   Importa de: fetch, html-parser, utils.
  */
 
 import { fetchTextDocumentoCached, validateHttpUrl, clampTimeoutMs, clampMaxChars, ensureHtml } from "./fetch.mjs";
 import { htmlToMarkdownComLinks } from "./html-parser.mjs";
+import { inteiroOuPadrao } from "./utils.mjs";
 
 // Célula gigante não pode comer o orçamento da tabela inteira.
 const LIMITE_CELULA = 400;
@@ -88,13 +89,62 @@ function normalizarTabela(bruta) {
     return valores;
   });
 
-  return { colunas, linhas: linhasFinais, temCabecalho };
+  return { colunas, linhas: linhasFinais };
 }
 
-function inteiroOuPadrao(valor, padrao, minimo, maximo) {
-  const numero = Number(valor);
-  if (!Number.isFinite(numero)) return padrao;
-  return Math.max(minimo, Math.min(maximo, Math.floor(numero)));
+/**
+ * As primeiras `quantas` linhas da saída, preservando a ordem das tabelas.
+ * Tabela que fica sem linha sai do resultado; as linhas que ela perdeu entram
+ * no `linhasOmitidas` dela.
+ */
+function comLinhas(tabelas, quantas) {
+  if (quantas === 0) return [];
+  const saida = [];
+  let restantes = quantas;
+  for (const tabela of tabelas) {
+    const linhas = tabela.linhas.slice(0, restantes);
+    restantes -= linhas.length;
+    saida.push({
+      ...tabela,
+      linhas,
+      linhasOmitidas: tabela.linhasOmitidas + (tabela.linhas.length - linhas.length),
+    });
+    if (restantes === 0) break;
+  }
+  return saida;
+}
+
+/**
+ * Corta o JSON por LINHAS inteiras quando ele passa do teto de caracteres.
+ *
+ * O corte tira as últimas linhas primeiro. A busca binária existe porque o
+ * laço de uma linha por vez reserializava o JSON inteiro a cada descarte —
+ * O(n²): numa página com 10 tabelas de 200 linhas, o corte levava 26 s. A
+ * busca acha o mesmo ponto em ~log2(n) tentativas.
+ */
+function limitarPorCaracteres(tabelas, maxChars) {
+  const totalLinhas = tabelas.reduce((soma, tabela) => soma + tabela.linhas.length, 0);
+  let formatado = JSON.stringify(tabelas, null, 2);
+  if (formatado.length <= maxChars) return { tabelas, formatado, linhasCortadas: 0 };
+
+  let baixo = 0;
+  let alto = totalLinhas;
+  while (baixo < alto) {
+    const meio = Math.ceil((baixo + alto) / 2);
+    if (JSON.stringify(comLinhas(tabelas, meio), null, 2).length <= maxChars) baixo = meio;
+    else alto = meio - 1;
+  }
+
+  let recortadas = comLinhas(tabelas, baixo);
+  formatado = JSON.stringify(recortadas, null, 2);
+  // O contador de linhas omitidas muda de tamanho no JSON (9 → 10); o ajuste
+  // garante que o teto vale mesmo no degrau.
+  while (formatado.length > maxChars && baixo > 0) {
+    baixo--;
+    recortadas = comLinhas(tabelas, baixo);
+    formatado = JSON.stringify(recortadas, null, 2);
+  }
+  return { tabelas: recortadas, formatado, linhasCortadas: totalLinhas - baixo };
 }
 
 /**
@@ -126,46 +176,36 @@ export async function toolReadTables(args = {}) {
     if (tabela) normalizadas.push(tabela);
   }
 
-  let linhasOmitidas = 0;
-  const saida = normalizadas.map((tabela, i) => {
-    const omitidas = Math.max(0, tabela.linhas.length - maxLinhas);
-    linhasOmitidas += omitidas;
-    return {
-      indice: i + 1,
-      colunas: tabela.colunas,
-      linhas: tabela.linhas.slice(0, maxLinhas),
-      linhasOmitidas: omitidas,
-    };
-  });
+  const completas = normalizadas.map((tabela, i) => ({
+    indice: i + 1,
+    colunas: tabela.colunas,
+    linhas: tabela.linhas.slice(0, maxLinhas),
+    linhasOmitidas: Math.max(0, tabela.linhas.length - maxLinhas),
+  }));
+  const omitidasPorLinhas = completas.reduce((soma, tabela) => soma + tabela.linhasOmitidas, 0);
 
   // O teto de caracteres corta por TABELA/linha inteira, nunca no meio do
   // JSON: um JSON quebrado é pior que um JSON menor.
-  let formatado = JSON.stringify(saida, null, 2);
-  while (formatado.length > maxChars && saida.length > 0) {
-    const ultima = saida[saida.length - 1];
-    if (ultima.linhas.length > 0) {
-      ultima.linhas.pop();
-      ultima.linhasOmitidas++;
-      linhasOmitidas++;
-    } else {
-      saida.pop();
-    }
-    formatado = JSON.stringify(saida, null, 2);
-  }
+  const recorte = limitarPorCaracteres(completas, maxChars);
+  const linhasOmitidas = omitidasPorLinhas + recorte.linhasCortadas;
 
-  const exibindo = saida.length;
   const linhas = [
     `# Tabelas: ${payload.finalUrl}`,
     `URL: ${payload.finalUrl}`,
-    `Tabelas: ${brutas.length} encontrada(s), exibindo ${exibindo}` +
-      (exibindo < brutas.length ? ` (limite de ${maxTabelas} por chamada)` : ""),
+    `Tabelas: ${brutas.length} encontrada(s), exibindo ${recorte.tabelas.length}`,
   ];
+  if (normalizadas.length < brutas.length) {
+    linhas.push(`Tabelas nao exibidas: ${brutas.length - normalizadas.length} (limite de ${maxTabelas} por chamada)`);
+  }
+  if (recorte.tabelas.length < normalizadas.length) {
+    linhas.push(`Tabelas cortadas pelo limite de caracteres: ${normalizadas.length - recorte.tabelas.length}`);
+  }
   if (linhasOmitidas > 0) {
-    linhas.push(`Linhas omitidas: ${linhasOmitidas} (aumente maxLinhas para ver mais)`);
+    linhas.push(`Linhas omitidas: ${linhasOmitidas} (aumente maxLinhas ou maxChars para ver mais)`);
   }
   if (payload.cortado) {
     linhas.push(`AVISO: documento cortado no teto de download; tabelas depois do corte nao foram vistas.`);
   }
-  linhas.push("", "```json", formatado, "```");
+  linhas.push("", "```json", recorte.formatado, "```");
   return linhas.join("\n");
 }

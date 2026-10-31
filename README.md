@@ -118,7 +118,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (43 arquivos, 418 testes, ~80 s, sem rede na maioria):
+Roda os arquivos de `tests/` (43 arquivos, 419 testes, ~2 min, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -152,7 +152,7 @@ Roda os arquivos de `tests/` (43 arquivos, 418 testes, ~80 s, sem rede na maiori
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/relevancia.test.mjs` | `find_relevant`: acento e plural ("baus" acha "baú"), palavras vazias descartadas, cobertura de termos e seção na nota, seção de apêndice e bloco de "editar" fora do topo, `maxTrechos`, consulta só com palavras vazias, aviso de achado fraco e de cobertura parcial, **mesma consulta repetida devolve a resposta guardada** e `maxTrechos` diferente não reaproveita a anterior |
-| `tests/ferramentas-novas.test.mjs` | as seis ferramentas da 1.11.0: busca multi (duas fontes, URL que falha sem derrubar as outras, dedupe, teto de 8), cartão da página (meta + JSON-LD + canônica, URL não-HTML), tabelas em JSON (cabeçalho `<th>`, cabeçalho mais curto que os dados, `maxLinhas`, página sem tabela), FAQ (JSON-LD + seção visível + rodapé que termina em "?", `maxPerguntas`), timestamp inválido do `read_archived` e leitura de DOCX/PPTX/EPUB (ordem de slides/spine, link interno removido, arquivo que não é ZIP) |
+| `tests/ferramentas-novas.test.mjs` | as seis ferramentas da 1.11.0: busca multi (duas fontes, URL que falha sem derrubar as outras, dedupe, teto de 8), cartão da página (meta + JSON-LD + canônica, URL não-HTML), tabelas em JSON (cabeçalho `<th>`, cabeçalho mais curto que os dados, `maxLinhas`, corte por `maxChars` sem quebrar o JSON, página sem tabela), FAQ (JSON-LD + seção visível + rodapé que termina em "?", `maxPerguntas`), timestamp inválido do `read_archived` e leitura de DOCX/PPTX/EPUB (ordem de slides/spine, link interno removido, arquivo que não é ZIP) |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
 | `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` converte a página gigante inteira para a marca (a conversão de exibição, que para aos 25 mil, não serve) — duas chamadas seguidas dão PRIMEIRA leitura e SEM MUDANÇA — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
@@ -381,7 +381,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.11.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.11.1 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -1166,10 +1166,12 @@ leitura inteira quando só precisa de um campo, uma tabela ou uma pergunta.
   tipos de dados estruturados. É a chamada barata para decidir se vale ler o
   corpo; em URL que não é HTML, diz qual ferramenta usar em vez de falhar.
 - **`read_tables(url)`** — todas as `<table>` da página em JSON
-  (`[{colunas, linhas, linhasOmitidas}]`), com teto de 30 tabelas, 200 linhas
-  por tabela e 400 caracteres por célula. A primeira linha só vira cabeçalho
-  quando **todas** as células dela vieram de `<th>`. `colspan`/`rowspan` não
-  são expandidos: cada célula ocupa uma posição, como no markdown.
+  (`[{indice, colunas, linhas, linhasOmitidas}]`), com teto de 30 tabelas, 200
+  linhas por tabela e 400 caracteres por célula. A primeira linha só vira
+  cabeçalho quando **todas** as células dela vieram de `<th>`.
+  `colspan`/`rowspan` não são expandidos: cada célula ocupa uma posição, como
+  no markdown. O corte por `maxChars` remove linhas inteiras em busca binária:
+  nunca devolve JSON quebrado nem reserializa o documento a cada linha.
 - **`extract_faq(url)`** — pares pergunta/resposta de duas fontes: JSON-LD
   `FAQPage` (precisa) e a seção visível com título de FAQ (cobre site sem dados
   estruturados). Pergunta repetida nas duas fontes entra uma vez. É heurística:

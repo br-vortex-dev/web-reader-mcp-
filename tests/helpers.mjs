@@ -1318,6 +1318,28 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /tabela-grande -> tres tabelas longas. Serve para provar que o corte por
+    // maxChars sai com JSON valido e sem reserializar o documento a cada linha.
+    if (path === "/tabela-grande") {
+      const linhas = [];
+      for (let i = 1; i <= 30; i++) {
+        linhas.push(
+          `<tr><td>item ${i}</td><td>${"descricao longa ".repeat(4)}</td><td>${i * 10}</td></tr>`
+        );
+      }
+      const tabela =
+        "<table><tr><th>Item</th><th>Descricao</th><th>Valor</th></tr>" + linhas.join("") + "</table>";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Tabela grande</title></head><body>" +
+          tabela +
+          tabela +
+          tabela +
+          "</body></html>"
+      );
+      return;
+    }
+
     // /faq -> FAQPage no JSON-LD E a mesma secao visivel (uma pergunta repetida
     // de proposito, para provar a deduplicacao).
     if (path === "/faq") {

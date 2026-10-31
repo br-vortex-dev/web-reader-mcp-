@@ -28,7 +28,7 @@ import { fetchTextDocumentoCached, validateHttpUrl, clampTimeoutMs, ensureHtml, 
 import { termosDaConsulta, blocosDoMarkdown, pontuarBlocos, recortarTrecho } from "./relevancia.mjs";
 import { markdownMemo, markdownCompleto, markdownInterrompida } from "./conversao.mjs";
 import { ParametroInvalidoError, LimiteExcedidoError } from "./errors.mjs";
-import { chaveCanonica, urlSemCredenciais } from "./utils.mjs";
+import { chaveCanonica, urlSemCredenciais, inteiroOuPadrao } from "./utils.mjs";
 
 // Teto de páginas da busca múltipla. Oito é o ponto em que a chamada ainda
 // responde rápido mesmo com todas frias; acima disso a IA deve dividir em
@@ -136,13 +136,6 @@ function termosDaConsultaOuErro(consulta) {
   return termos;
 }
 
-/** Inteiro dentro de [minimo, maximo]; ausência ou lixo viram o padrão. */
-function inteiroOuPadrao(valor, padrao, minimo, maximo) {
-  const numero = Number(valor);
-  if (!Number.isFinite(numero)) return padrao;
-  return Math.max(minimo, Math.min(maximo, Math.floor(numero)));
-}
-
 function avisoDeAchadoFraco(termos, achados) {
   if (achados.length === 0) return "";
   const termosVistos = new Set(achados.flatMap((a) => a.casados)).size;
@@ -204,7 +197,7 @@ export async function toolFindRelevant(args = {}) {
  * de conexões do servidor) e cada uma devolve até `maxPorFonte` trechos.
  * Depois os trechos de todas as fontes são ordenados pela nota e cortados em
  * `maxTrechos` — assim uma página excepcional não soterra as outras: o teto
- * por fonte já distribuído antes.
+ * por fonte é distribuído antes.
  *
  * Falha de uma URL não derruba a chamada: ela entra na lista de erros e as
  * demais seguem. Requisição de várias fontes é justamente onde uma some.
