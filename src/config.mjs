@@ -19,7 +19,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.10.0";
+export const SERVER_VERSION = "1.10.1";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -267,10 +267,13 @@ export const CACHE_MAX_BYTES = Math.max(512, Math.floor(Number(process.env.CACHE
 // Teto de UMA entrada. Antes era metade do download máximo (2,5 MB com o
 // padrão de 5 MB), então página grande NUNCA entrava no cache: era baixada,
 // convertida e descartada a cada leitura. Agora o teto acompanha o teto de
-// download, e a página inteira cabe.
+// DOCUMENTO (24 MB): páginas gigantes que as ferramentas de busca precisam
+// ler inteiras ficam guardadas e a segunda chamada não paga o download de
+// novo. O teto TOTAL (128 MB) continua mandando; uma entrada grande só ocupa
+// o espaço de várias pequenas e o LRU despeja o resto.
 export const CACHE_MAX_ENTRY_BYTES = Math.min(
   Math.floor(CACHE_MAX_BYTES / 4),
-  MAX_RESPONSE_BYTES
+  MAX_RESPONSE_BYTES_DOCUMENTO
 );
 
 // Revalidação em segundo plano (stale-while-revalidate). Desligada por padrão:

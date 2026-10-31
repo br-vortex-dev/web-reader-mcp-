@@ -195,3 +195,21 @@ test("pagina gigante avisa que a busca cobriu so a frente convertida", async () 
   assert.equal(r.isError, false);
   assert.match(r.text, /AVISO: a pagina e grande demais para converter inteira/);
 });
+
+test("mesma consulta repetida devolve a mesma resposta", async () => {
+  const a = await mcp.call("find_relevant", { url: `${fixture.url}/baus`, query: "baús da floresta" });
+  const b = await mcp.call("find_relevant", { url: `${fixture.url}/baus`, query: "baús da floresta" });
+  assert.equal(a.isError, false);
+  assert.equal(b.isError, false);
+  assert.equal(b.text, a.text);
+});
+
+test("maxTrechos diferente nao reaproveita a resposta da consulta anterior", async () => {
+  const url = `${fixture.url}/baus`;
+  const um = await mcp.call("find_relevant", { url, query: "baús", maxTrechos: 1 });
+  const tres = await mcp.call("find_relevant", { url, query: "baús", maxTrechos: 3 });
+  const deNovo = await mcp.call("find_relevant", { url, query: "baús", maxTrechos: 1 });
+  assert.equal((um.text.match(/^## /gm) || []).length, 1);
+  assert.equal((tres.text.match(/^## /gm) || []).length, 3);
+  assert.equal(deNovo.text, um.text);
+});

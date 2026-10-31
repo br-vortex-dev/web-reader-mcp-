@@ -114,6 +114,36 @@ async function embeddedMemo(payload, timeoutMs) {
 }
 
 /**
+ * Resultado do find_relevant por payload + consulta.
+ *
+ * A mesma pergunta sobre a mesma página (o caso comum de um site de IA: vários
+ * usuários no mesmo assunto) requeria blocos+nota de novo — ~15 ms de CPU.
+ * Aqui a resposta pronta fica presa ao PAYLOAD: quando o cache revalida e troca
+ * o objeto da página, o WeakMap solta tudo sozinho, sem invalidação manual.
+ * Teto por página para uma sessão que varre dezenas de assuntos não crescer
+ * sem limite.
+ */
+const memoDeBuscaRelevante = new WeakMap();
+const MEMO_BUSCA_POR_PAGINA = 16;
+
+function lerMemoDeBusca(payload, chave) {
+  return memoDeBuscaRelevante.get(payload)?.get(chave);
+}
+
+function guardarMemoDeBusca(payload, chave, texto) {
+  let porChave = memoDeBuscaRelevante.get(payload);
+  if (!porChave) {
+    porChave = new Map();
+    memoDeBuscaRelevante.set(payload, porChave);
+  }
+  if (!porChave.has(chave) && porChave.size >= MEMO_BUSCA_POR_PAGINA) {
+    porChave.delete(porChave.keys().next().value);
+  }
+  porChave.set(chave, texto);
+  return texto;
+}
+
+/**
  * Extrai JSON de uma tag <script> pelo id.
  */
 function extractJsonById(html, id) {
@@ -844,6 +874,10 @@ export async function toolFindRelevant(args = {}) {
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
 
+  const chaveMemo = JSON.stringify([query, maxTrechos]);
+  const respostaGuardada = lerMemoDeBusca(payload, chaveMemo);
+  if (respostaGuardada !== undefined) return respostaGuardada;
+
   const bruto = isConteudoBruto(contentType, html);
   let conteudo = bruto ? html.replace(/\r\n?/g, "\n") : markdownMemo(payload);
   let interrompida = !bruto && markdownInterrompida(payload);
@@ -871,12 +905,14 @@ export async function toolFindRelevant(args = {}) {
   const listaTermos = termos.map((t) => t.palavra).join(", ");
 
   if (achados.length === 0) {
-    return (
+    return guardarMemoDeBusca(
+      payload,
+      chaveMemo,
       `Nenhum trecho relevante para "${query}" em ${finalUrl}.\n` +
-      `Termos usados (sem as palavras vazias): ${listaTermos}.\n` +
-      `A pagina tem ${blocos.length} bloco(s) de texto e ${conteudo.length} caracteres. ` +
-      `Tente palavras mais especificas ou leia a pagina com read_page.` +
-      avisoCobertura
+        `Termos usados (sem as palavras vazias): ${listaTermos}.\n` +
+        `A pagina tem ${blocos.length} bloco(s) de texto e ${conteudo.length} caracteres. ` +
+        `Tente palavras mais especificas ou leia a pagina com read_page.` +
+        avisoCobertura
     );
   }
 
@@ -900,7 +936,7 @@ export async function toolFindRelevant(args = {}) {
     return `## ${i + 1}. relevancia ${bloco.nota}${rotuloSecao}\n${recortarTrecho(bloco.texto)}`;
   });
 
-  return cabecalho + "\n\n" + trechos.join("\n\n") + avisoFraco;
+  return guardarMemoDeBusca(payload, chaveMemo, cabecalho + "\n\n" + trechos.join("\n\n") + avisoFraco);
 }
 
 /**

@@ -105,7 +105,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (42 arquivos, 391 testes, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (42 arquivos, 393 testes, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -138,7 +138,7 @@ Roda os arquivos de `tests/` (42 arquivos, 391 testes, ~60 s, sem rede na maiori
 | `tests/pdf.test.mjs` | `read_pdf`: extração de texto com espaços/quebras, contagem de páginas, não-PDF avisa sem erro cru, truncamento, cache |
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
-| `tests/relevancia.test.mjs` | `find_relevant`: acento e plural ("baus" acha "baú"), palavras vazias descartadas, cobertura de termos e seção na nota, seção de apêndice e bloco de "editar" fora do topo, `maxTrechos`, consulta só com palavras vazias, aviso de achado fraco e de cobertura parcial |
+| `tests/relevancia.test.mjs` | `find_relevant`: acento e plural ("baus" acha "baú"), palavras vazias descartadas, cobertura de termos e seção na nota, seção de apêndice e bloco de "editar" fora do topo, `maxTrechos`, consulta só com palavras vazias, aviso de achado fraco e de cobertura parcial, **mesma consulta repetida devolve a resposta guardada** e `maxTrechos` diferente não reaproveita a anterior |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
 | `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` converte a página gigante inteira para a marca (a conversão de exibição, que para aos 25 mil, não serve) — duas chamadas seguidas dão PRIMEIRA leitura e SEM MUDANÇA — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
@@ -530,6 +530,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). 
 | `METRICS_PUBLIC` | ligada | `1`/vazio deixa o `GET /metrics` aberto. `0` **fecha**: o endpoint passa a exigir o mesmo `Bearer` do `/mcp` (veja *Métricas*). |
 | `CACHE_MAX_BYTES` | `134217728` (128 MB) | Teto do cache em bytes. É o teto que importa; ao estourar, despeja os menos usados. O valor anterior (32 MB) enchia no próprio teste de carga e despejava página ainda quente. |
 | `CACHE_MAX_ENTRIES` | `512` | Teto de entradas do cache (o segundo teto, além dos bytes). Ajustável por env: subir diminui o despejo de páginas ainda quentes. |
+| `CACHE_MAX_ENTRY_BYTES` | `min(CACHE_MAX_BYTES / 4, MAX_RESPONSE_BYTES_DOCUMENTO)` = **24 MB** | Teto de UMA entrada do cache. Antes era metade do download normal (2,5 MB), então página maior que isso **nunca** entrava no cache: `find_relevant`/`find_on_page` a baixavam de novo a cada chamada. Agora acompanha o teto de documento; o teto TOTAL (128 MB) continua mandando e o LRU despeja o resto. |
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
 | `CACHE_SWR` | desligada | `1` liga a **revalidação em segundo plano**: entrada vencida dentro da janela de graça é servida na hora e atualizada atrás (passando pela junção em voo). O `render.yaml` liga. Desligada, vencida = busca de novo (comportamento conservador). |
 | `CACHE_STALE_WINDOW_MS` | `0` (2× o TTL) | Tamanho da janela de graça do SWR em ms. Fora dela, a entrada é descartada e a leitura espera a nova busca. |
@@ -870,7 +871,7 @@ para esgotar a memória só mandando valores de `x-forwarded-for` sempre diferen
   sem estourar memória.
 - **Orçamento de memória no plano free (512 MB)** — os tetos foram escolhidos
   para caber com folga:
-  - cache: `CACHE_MAX_BYTES` (32 MB) — é o teto real; a contagem de 100 entradas
+  - cache: `CACHE_MAX_BYTES` (128 MB) — é o teto real; a contagem de 512 entradas
     é o segundo teto.
   - download por requisição: `MAX_RESPONSE_BYTES` (5 MB), lido em **streaming**
     com corte (não carrega a resposta inteira antes de conferir).
@@ -1105,6 +1106,11 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   termos apareceram ou a melhor nota é fraca. Em página gigante vale a mesma
   regra do `find_on_page`: sem acerto na frente convertida, a página é convertida
   inteira antes do "não achei"; com acerto, avisa que o resto não foi coberto.
+  **Repetição é instantânea**: a resposta de uma consulta fica guardada junto da
+  página em cache (mesma `query` + mesmo `maxTrechos`); a página grande também
+  passou a caber no cache (até 24 MB), então a segunda consulta não paga o
+  download de novo. Medido localmente numa página de 15,7 MB: primeira leitura
+  ~1,7 s, repetição ~14 ms; assunto novo na mesma página ~27 ms.
 - **`diff_page(url)`** relê a URL, compara com a marca da leitura anterior e
   devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
   comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é
