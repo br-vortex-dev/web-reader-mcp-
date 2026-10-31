@@ -138,6 +138,10 @@ export async function startFixture({ robots = "regras" } = {}) {
   const contagem = new Map();
   // Candidatos "/api/..." que o servidor realmente buscou (ordem de chegada).
   const probes = [];
+  // Estatisticas dos fluxos escritos aos poucos (so o /cedo usa): prova, do
+  // lado do SERVIDOR, quanto do corpo foi realmente enviado antes do cliente
+  // desconectar.
+  const fluxo = new Map();
 
   const server = http.createServer((req, res) => {
     const path = String(req.url || "/");
@@ -394,6 +398,82 @@ export async function startFixture({ robots = "regras" } = {}) {
         `<!DOCTYPE html><html><head><title>Pagina Gigante</title></head><body>` +
           `<h1>INICIO-GIGANTE</h1>${blocos}<h1>FIM-GIGANTE</h1></body></html>`
       );
+      return;
+    }
+
+    // /quente -> pagina pequena e estavel, com contador por caminho. O teste
+    // do aquecedor le duas vezes (as duas do cache) e espera a rodada de fundo
+    // revalidar sozinha: o contador tem de subir SEM pedido de cliente novo.
+    if (path === "/quente") {
+      contagem.set(path, (contagem.get(path) || 0) + 1);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Quente</title></head><body>" +
+          `<h1>MARCADO-QUENTE</h1><p>${"conteudo quente ".repeat(60)}</p></body></html>`
+      );
+      return;
+    }
+
+    // /tarde -> o TEXTO so aparece depois de ~480 KB de comentarios. Com
+    // maxChars de 1000, o primeiro marco (256 KB) nao cobre o pedido e o MESMO
+    // download continua ate o fim (~535 KB) — antes, essa leitura pagava duas
+    // conexoes (o pedaco de 256 KB e o refazer largo). O contador prova que
+    // agora e UMA requisicao, e o cache guarda o documento inteiro.
+    if (path === "/tarde") {
+      contagem.set(path, (contagem.get(path) || 0) + 1);
+      const comentarios = "<!-- " + "z".repeat(480 * 1024) + " -->";
+      const blocos = Array.from(
+        { length: 260 },
+        (_, i) => `<p>MARCADO-TARDE paragrafo ${i} ${"conteudo ".repeat(20)}</p>`
+      ).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!DOCTYPE html><html><head><title>Tarde</title></head><body>` +
+          `${comentarios}<h1>MARCADO-TARDE</h1>${blocos}</body></html>`
+      );
+      return;
+    }
+
+    // /cedo -> o TEXTO vem primeiro e o rabo e um fluxo LONGO e lento (~8 MB em
+    // blocos de 2 KB a cada 1 ms). Com maxChars de 1000 o download tem de
+    // parar no primeiro marco (256 KB) e desconectar: `enviados` registra, do
+    // lado do servidor, que o rabo nao foi baixado, e `concluiu` diz se o
+    // fixture chegou a escrever tudo (nao pode).
+    if (path === "/cedo") {
+      contagem.set(path, (contagem.get(path) || 0) + 1);
+      const inicio =
+        "<!DOCTYPE html><html><head><title>Cedo</title></head><body>" +
+        "<h1>MARCADO-CEDO</h1><p>" + "texto ".repeat(20000) + "</p>";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.write(inicio);
+      let enviados = Buffer.byteLength(inicio);
+      let fechado = false;
+      let concluiu = false;
+      res.on("error", () => {});
+      res.on("close", () => {
+        fechado = true;
+        fluxo.set("cedo", { enviados, fechado: true, concluiu });
+      });
+      let i = 0;
+      const escrever = () => {
+        if (fechado) return;
+        if (i >= 4000) {
+          concluiu = true;
+          res.end("</body></html>");
+          return;
+        }
+        const bloco = "<!-- " + "z".repeat(2040) + " -->";
+        enviados += bloco.length;
+        try {
+          res.write(bloco);
+        } catch {
+          fechado = true;
+          return;
+        }
+        i++;
+        setTimeout(escrever, 1);
+      };
+      escrever();
       return;
     }
 
@@ -1028,6 +1108,8 @@ export async function startFixture({ robots = "regras" } = {}) {
       probes.length = 0;
     },
     contagemDe: (caminho) => contagem.get(caminho) || 0,
+    hitsDe: (id) => hits.get(id) || 0,
+    fluxoDe: (nome) => fluxo.get(nome) || null,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

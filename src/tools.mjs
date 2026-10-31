@@ -31,13 +31,14 @@ import {
   DEFAULT_MAX_CHARS,
   MAX_RESPONSE_BYTES,
   MAX_RESPONSE_BYTES_DOCUMENTO,
+  CHECKPOINT_ANTECIPADO_BYTES,
+  MARGEM_PARADA_DOWNLOAD,
   tetoDownloadPara,
 } from "./config.mjs";
 import {
   fetchTextCached,
   fetchTextComTeto,
   fetchTextDocumentoCached,
-  marcarCorteInutil,
   validateHttpUrl,
   clampMaxChars,
   clampTimeoutMs,
@@ -48,11 +49,13 @@ import {
   conteudoBrutoResult,
 } from "./fetch.mjs";
 import { hostOf, decodeEntities } from "./html-parser.mjs";
+import { registrarPedidoQuente } from "./warmer.mjs";
 import {
   memoDoPayload,
   conversoesMemo,
   metaMemo,
   markdownMemo,
+  markdownDeTexto,
   markdownCompleto,
   linksMemo,
   markdownELinksMemo,
@@ -507,18 +510,25 @@ function classifyFetchError(err) {
  * ===================================================================== */
 
 /**
- * Busca uma página com o teto de download proporcional — e REFAZ grande
- * quando o corte tirou texto que o cliente ia receber.
+ * Busca uma página com o teto de download proporcional — agora um MARCO de
+ * conferência, não o fim do download.
  *
- * A regra é a diferença entre otimizar e quebrar: cortar só é seguro quando o
- * que ficou de fora é o rabo que o truncate jogaria fora de qualquer jeito.
- * Então a decisão é tomada com o markdown na mão, não com bytes:
+ * O desenho anterior baixava até o teto apertado e, quando o texto convertido
+ * não cobria o pedido, pagava uma SEGUNDA conexão no teto largo. A pergunta (o
+ * texto que chegou já cobre o pedido?) sempre foi a certa; o desperdício era
+ * fechar a conexão para fazê-la de novo.
  *
- *   - o texto convertido já cobre o `maxChars` pedido  -> o corte não custou
- *     nada, entrega assim (é o caso das páginas gigantes de notícia);
- *   - o texto convertido é MENOR que o pedido          -> o corte pode ter
- *     levado conteúdo, então refaz com o teto largo (MEMORIZADO pelo tamanho,
- *     então essa segunda conexão acontece uma vez só por URL).
+ * Agora o download PAUSA no teto apertado e no marco antecipado, converte o
+ * que já chegou e decide:
+ *
+ *   - o texto cobre o `maxChars` com folga -> para AQUI, na mesma conexão, e
+ *     reaproveita a conversão recém-feita no resultado;
+ *   - ainda não cobre -> a MESMA conexão continua até o próximo marco (ou o
+ *     teto largo). Existe UMA leitura por página, sempre.
+ *
+ * A folga (MARGEM_PARADA_DOWNLOAD) garante o contrato: o parser só pode
+ * divergir no rabo do documento cortado, que fica DEPOIS da margem — os
+ * caracteres entregues são idênticos aos de uma conversão completa.
  */
 async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs, largoBytes = MAX_RESPONSE_BYTES }) {
   // O teto largo NUNCA passa do teto duro declarado pelo servidor. Tentar
@@ -529,47 +539,49 @@ async function buscarComTetoInteligente(parsed, { maxChars, timeoutMs, largoByte
   // tudo. Ferramenta que precisa do documento inteiro tem caminho próprio
   // (fetchTextDocumentoCached), e é lá que esse teto vale.
   const largo = Math.max(largoBytes, MAX_RESPONSE_BYTES);
-  const teto = tetoDownloadPara(maxChars, largo);
-  let payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, largoBytes: largo });
-  if (!payload.cortado) return payload;
-
-  // O corte tira o fim do HTML. Converter o que veio é a única forma honesta de
-  // saber se isso custou algo ao cliente — e é barato, porque a conversão é
-  // memoizada pelo conteúdo e vai ser reaproveitada na resposta.
-  const parcial = payload.text.replace(/\r\n?/g, "\n");
-  const markdownParcial =
-    parcial.length === 0 ? "" : isConteudoBruto(payload.contentType, parcial) ? parcial : markdownMemo(payload);
-
-  // O texto do pedaço já cobre o pedido? O corte não custou nada: o cliente
-  // pediu N e recebe N, mesmo que a página tenha mais no fim. Entregar agora
-  // evita a segunda conexão — e este é o caso das páginas grandes de verdade
-  // (jornais, documentação), o inverso do fixture sintético em que o peso é
-  // só script.
-  //
-  // Dois sinais diferentes, de propósito:
-  //   `cortado`     -> o download parou antes do fim (o `Conteudo:` ganha `+`)
-  //   `perdeuTexto` -> além de parar, o que sobrou não cobre o pedido, então a
-  //                    página pode ter mais conteúdo útil e vale refazer.
-  if (markdownParcial.length >= maxChars) {
-    return { ...payload, perdeuTexto: false };
+  const apertado = tetoDownloadPara(maxChars, largo);
+  // Marcos em ordem: o teto proporcional (o ponto onde o desenho antigo
+  // cortava) e o marco antecipado. Sem nenhum marco abaixo do largo — é o que
+  // acontece quando o teto proporcional está desligado — o comportamento é o
+  // de sempre: baixar até o largo e falhar se passar.
+  const marcos = [...new Set([apertado, CHECKPOINT_ANTECIPADO_BYTES])]
+    .filter((n) => n < largo)
+    .sort((a, b) => a - b);
+  const sabor = `p${largo > MAX_RESPONSE_BYTES ? "d" : ""}${maxChars}`;
+  if (!marcos.length) {
+    return fetchTextComTeto(parsed.href, { timeoutMs, largoBytes: largo, sabor });
   }
+  const limiar = maxChars + MARGEM_PARADA_DOWNLOAD;
+  let markdownPronto = null;
+  let textoPronto = null;
+  const aoCheckpoint = (texto, { contentType, finalUrl }) => {
+    // Texto puro/XML não passa por conversão e o cabeçalho dele não marca
+    // parcial — parar cedo aqui economizaria download, mas subnotificaria a
+    // página. Fica de fora.
+    if (isConteudoBruto(contentType, texto)) return false;
+    // Fora do que o ensureHtml aceita (JSON, binário disfarçado): não vale
+    // converter agora, a chamada vai recusar logo depois.
+    if (contentType ? !/html|xml|text\//.test(contentType) : !/^\s*</.test(texto)) return false;
+    const markdown = markdownDeTexto(texto, finalUrl);
+    if (markdown.length < limiar) return false;
+    markdownPronto = markdown;
+    textoPronto = texto;
+    return true;
+  };
+  const payload = await fetchTextComTeto(parsed.href, {
+    timeoutMs,
+    largoBytes: largo,
+    checkpoints: marcos,
+    aoCheckpoint,
+    sabor,
+  });
+  if (markdownPronto === null) return payload;
+  return { ...payload, text: textoPronto, markdownPronto };
+}
 
-  // Chegou aqui: o texto do pedaço não cobre o pedido, logo o corte PODE ter
-  // tirado conteúdo. Refaz uma vez com o teto largo, e a partir daí a URL fica
-  // marcada para ir direto no largo nas próximas leituras (memória em
-  // fetch.mjs) — sem ela, cada leitura pagaria dois downloads (medido: 40
-  // requisições para 20 páginas).
-  //
-  // A tentação era "só refazer se o que falta for grande". Foi medido e é
-  // errado: uma página com o texto todo no topo e o rodapé com links perdia
-  // 109 caracteres, e o "falta grande" não disparava porque o content-length
-  // declarado engana. Entre otimizar e entregar menos, entregar inteiro.
-  // Memoriza que, NESTA url, cortar não compensa: sem isso toda leitura pagava
-  // dois downloads (medido: +46% no washingtonpost, cujo topo é quase todo
-  // marcação e entrega pouco texto).
-  marcarCorteInutil(parsed.href);
-  payload = await fetchTextComTeto(parsed.href, { timeoutMs, maxBytes: teto, largoBytes: largo, forcarLargo: true });
-  return { ...payload, perdeuTexto: true };
+/** Markdown da página: o da conferência do download, quando houve parada. */
+function markdownDaPagina(payload) {
+  return payload.markdownPronto === undefined ? markdownMemo(payload) : payload.markdownPronto;
 }
 
 /**
@@ -585,11 +597,15 @@ export async function toolReadPage(args = {}) {
   const payload = await buscarComTetoInteligente(parsed, { maxChars, timeoutMs });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
+  // O placar do aquecedor só aceita página que o cache comporta — daí a
+  // checagem de tamanho lá dentro. Leitura cortada sem tamanho declarado fica
+  // de fora: não dá para saber se aquecer seria baixar para descartar.
+  registrarPedidoQuente(parsed.href, payload);
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
   }
   const meta = metaMemo(payload);
-  let markdown = markdownMemo(payload);
+  let markdown = markdownDaPagina(payload);
   let textoVisivel = comprimentoVisivel(markdown);
   if (textoVisivel < TEXTO_MINIMO_UTIL && isDynamicPage(html, markdown, textoVisivel)) {
     const dynamicMarkdown = await embeddedMemo(payload, timeoutMs);
@@ -617,9 +633,6 @@ export async function toolReadPage(args = {}) {
     markdown.trim().length === 0 || (estaticoCurto && cascaDeJavaScript)
       ? `Aviso: conteudo estatico muito curto (${markdown.trim().length} caracteres) — a pagina provavelmente e renderizada por JavaScript. Tente read_dynamic_page.`
       : undefined;
-  if (payload.cortado && payload.perdeuTexto) {
-    extraLabel = `${extraLabel ? extraLabel + " " : ""}Aviso: o download foi interrompido no teto de bytes e a pagina continuava — se o fim dela importa, peca de novo.`;
-  }
   return formatReadResult({ finalUrl, meta, text, truncated, fullLength: fullLengthDe(payload, markdown), extraLabel });
 }
 
@@ -1075,10 +1088,9 @@ export async function toolReadDynamicPage(args = {}) {
   // O `buscarComTetoInteligente` é reaproveitado de propósito em vez de um
   // teto "na unha": ele já resolve o caso perigoso desta ferramenta — se o
   // pedaço baixado não cobre o pedido (o que aconteceria se os dados bons
-  // estivessem num script no fim do documento), ele refaz uma vez com o teto
-  // largo e marca a URL para ir direto no largo nas próximas. Ou seja: o
-  // resultado é o mesmo de antes quando o corte custaria conteúdo, e é mais
-  // rápido quando não custa.
+  // estivessem num script no fim do documento), a MESMA conexão continua até o
+  // teto largo. Ou seja: o resultado é o mesmo de antes quando o corte custaria
+  // conteúdo, e é mais rápido quando não custa.
   const payload = await buscarComTetoInteligente(parsed, {
     maxChars,
     timeoutMs,
@@ -1091,6 +1103,7 @@ export async function toolReadDynamicPage(args = {}) {
   });
   const { text: html, finalUrl, contentType } = payload;
   ensureHtml(contentType, html, finalUrl);
+  registrarPedidoQuente(parsed.href, payload);
   if (isConteudoBruto(contentType, html)) {
     return conteudoBrutoResult(html, finalUrl, maxChars);
   }
@@ -1099,7 +1112,7 @@ export async function toolReadDynamicPage(args = {}) {
   const pareceDinamica = htmlIndicaDinamico(html);
 
   if (!pareceDinamica) {
-    const markdown = markdownMemo(payload);
+    const markdown = markdownDaPagina(payload);
     const { text, truncated } = truncate(markdown, maxChars);
     return formatReadResult({
       finalUrl,
@@ -1111,7 +1124,7 @@ export async function toolReadDynamicPage(args = {}) {
     });
   }
 
-  const markdown = markdownMemo(payload);
+  const markdown = markdownDaPagina(payload);
   const estaticoCompleto = markdown.replace(/\s+/g, " ").trim().length >= TEXTO_MINIMO_UTIL;
 
   if (estaticoCompleto) {

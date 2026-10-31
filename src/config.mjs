@@ -19,7 +19,7 @@
  */
 
 export const SERVER_NAME = "web-reader";
-export const SERVER_VERSION = "1.9.8";
+export const SERVER_VERSION = "1.9.9";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -147,6 +147,30 @@ export const DOWNLOAD_MIN_BYTES = Math.min(
 /** O teto proporcional está ativo? (piso abaixo do teto duro) */
 export const DOWNLOAD_PROPORCIONAL_ATIVO = DOWNLOAD_MIN_BYTES < MAX_RESPONSE_BYTES;
 
+// Primeiro checkpoint do download progressivo. O teto proporcional deixa de
+// ser um fim e vira uma parada para conferir se o texto já cobre o pedido.
+// Quando cobre, o download termina ali; quando não cobre, o MESMO download
+// continua até o teto largo — sem uma segunda conexão. 1 MB é o ponto em que
+// a documentação densa (nodejs all.html) já rende as 25 mil letras; páginas
+// leves nem chegam a este marco e o teto apertado é o único checkpoint.
+export const CHECKPOINT_ANTECIPADO_BYTES = Math.max(
+  64 * 1024,
+  Math.min(
+    MAX_RESPONSE_BYTES_DOCUMENTO,
+    Math.floor(Number(process.env.CHECKPOINT_ANTECIPADO_BYTES) || 1024 * 1024)
+  )
+);
+// Folga entre o texto disponível no checkpoint e o maxChars pedido. O parser
+// pode diferir nos últimos caracteres de um documento cortado (tag/cerca
+// aberta); exigir esta folga garante que o prefixo ENTREGUE nunca seja
+// afetado pelo ponto onde o download parou.
+export const MARGEM_PARADA_DOWNLOAD = clampEnv(
+  process.env.MARGEM_PARADA_DOWNLOAD,
+  5000,
+  1000,
+  100000
+);
+
 /**
  * Teto de download para uma leitura que busca `maxChars` caracteres de texto.
  * Nunca passa do teto duro (MAX_RESPONSE_BYTES): acima dele o erro continua.
@@ -260,6 +284,63 @@ export const CACHE_STALE_WINDOW_MS = clampEnvZero(
   0,
   0,
   Number.MAX_SAFE_INTEGER
+);
+
+// Aquecedor de cache: mantém quentes as páginas mais pedidas.
+//
+// O problema que isto resolve: numa página popular (ex.: a documentação que o
+// agente lê a cada tarefa), a PRIMEIRA leitura depois do TTL de 7,5 min paga a
+// espera do site + download de novo. Medido em produção: leitura quente ~220 ms,
+// leitura fria 377–1500 ms — a diferença inteira é a espera do site.
+//
+// Desligado por padrão (CACHE_WARMER=1 liga): o aquecedor faz chamadas de rede
+// por conta própria, e isso é comportamento que a suíte sem a env não deve
+// assumir. Em produção está ligado no render.yaml.
+export const CACHE_WARMER = process.env.CACHE_WARMER === "1";
+// De quanto em quanto tempo o aquecedor olha o placar de páginas pedidas.
+export const CACHE_WARMER_INTERVAL_MS = clampEnv(
+  process.env.CACHE_WARMER_INTERVAL_MS,
+  60000,
+  5000,
+  3600000
+);
+// Quantas URLs ele tenta manter quentes por rodada (as mais pedidas primeiro).
+// Serial de propósito: é trabalho de fundo, não pode competir com o tráfego.
+export const CACHE_WARMER_MAX_URLS = clampEnv(
+  process.env.CACHE_WARMER_MAX_URLS,
+  8,
+  1,
+  256
+);
+// Página só entra no placar depois de N pedidos: uma leitura isolada não paga
+// o custo de mantê-la quente.
+export const CACHE_WARMER_MIN_PEDIDOS = clampEnv(
+  process.env.CACHE_WARMER_MIN_PEDIDOS,
+  2,
+  1,
+  1000
+);
+// Pedido mais velho que isto não conta (a página deixou de ser "quente").
+export const CACHE_WARMER_JANELA_MS = clampEnv(
+  process.env.CACHE_WARMER_JANELA_MS,
+  30 * 60 * 1000,
+  60000,
+  24 * 3600 * 1000
+);
+// Margem antes do vencimento para reaquecer: com idade >= TTL - margem, a
+// próxima leitura já pagaria o download, então o aquecedor renova agora.
+export const CACHE_WARMER_MARGEM_MS = clampEnv(
+  process.env.CACHE_WARMER_MARGEM_MS,
+  90000,
+  5000,
+  3600000
+);
+// Teto de espera de UMA revalidação feita pelo aquecedor.
+export const CACHE_WARMER_TIMEOUT_MS = clampEnv(
+  process.env.CACHE_WARMER_TIMEOUT_MS,
+  8000,
+  1000,
+  60000
 );
 
 // Cache NEGATIVO: respostas HTTP que não vão mudar tão cedo (404, 410, 401,

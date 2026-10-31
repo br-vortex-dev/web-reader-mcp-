@@ -47,6 +47,7 @@ import { admissaoHttp, limiteSaida, limitesPorHost, orcamentoSaida, cacheStats, 
 import { conversoesMemo } from "./conversao.mjs";
 import { analisesVideo } from "./video.mjs";
 import { estatisticasSnapshot, esperarEscritasDeMarcas } from "./snapshot.mjs";
+import { estatisticasAquecedor } from "./warmer.mjs";
 import { CorpoMuitoGrandeError } from "./errors.mjs";
 
 // Referência global ao servidor HTTP (para encerramento por erro fatal).
@@ -368,11 +369,13 @@ export function readBody(req, maxBytes) {
 }
 
 /**
- * Monta o texto do /health. Formato preservado byte a byte.
+ * Monta o texto do /health. Os campos são acrescentados ao fim; nada que já
+ * existia muda de posição (clientes e testes leem por trecho).
  */
 export async function montarTextoHealth(server) {
   const cache = cacheStats();
   const marcas = estatisticasSnapshot();
+  const aquecimento = estatisticasAquecedor();
   const req_ = admissaoHttp.stats;
   const out = limiteSaida.stats;
   const mem = process.memoryUsage();
@@ -405,6 +408,8 @@ export async function montarTextoHealth(server) {
     ` | video: ${analisesVideo.realizadas} (reaproveitadas ${analisesVideo.caronas})`,
     ` | marcas: ${marcas.entries} (${marcas.persistencia ? "disco" : "memoria"}, escritas ${marcas.gravacoes.escritas}, lidas do disco ${marcas.gravacoes.lidasDoDisco}${marcas.gravacoes.falhas ? `, falhas ${marcas.gravacoes.falhas}` : ""})`,
     ` | sessoes: ${estatisticasSessoes().sessoes} (canais ${estatisticasSessoes().canaisSse})`,
+    ` | aquecimento: ${aquecimento.ligado ? "ligado" : "desligado"} `,
+    `(${aquecimento.quentes} quentes, ${aquecimento.aquecidas} aquecidas, ${aquecimento.falhas} falhas)`,
   ].join("");
 }
 

@@ -602,6 +602,15 @@ export class CacheLRU {
     if (this.bytes < 0) this.bytes = 0;
   }
 
+  /**
+   * Idade da entrada em ms, sem tocar na ordem do LRU. -1 quando não existe.
+   * É o que o aquecedor usa para saber se a página quente está perto de vencer.
+   */
+  idadeMs(key) {
+    const entry = this.map.get(key);
+    return entry ? Date.now() - entry.at : -1;
+  }
+
   get size() {
     return this.map.size;
   }

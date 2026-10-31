@@ -297,19 +297,38 @@ function classificarErro(errBruto, url, timeoutMs) {
  *   passar da reserva pede a diferença antes de entrar no buffer — o teto
  *   de memória acompanha os bytes REAIS, não a promessa do servidor.
  *
+ * Com `checkpoints`, a reserva inicial acompanha o PRIMEIRO marco: no
+ * download progressivo o teto de bytes é só um limite, e reservar de saída o
+ * documento inteiro declarado (3,7 MB, por exemplo) estrangulava o orçamento
+ * de memória sem necessidade — o que de fato chega continua sendo cobrado
+ * em `aoChunk`.
+ *
  * O que sobrou da reserva volta no finally, sempre.
  */
-async function lerCorpoComOrcamento(stream, headers, maxBytes, url, signal, permitirCorte = false) {
+async function lerCorpoComOrcamento(stream, headers, { maxBytes, url, signal, permitirCorte = false, checkpoints = null, aoCheckpoint = null }) {
   const declarado = Number(headers["content-length"]);
   const estimativa = Number.isFinite(declarado) && declarado > 0 ? declarado : 256 * 1024;
-  let reservado = Math.min(maxBytes, estimativa);
+  const marcos = Array.isArray(checkpoints) ? checkpoints.filter((n) => Number.isFinite(n) && n > 0) : [];
+  const primeiroMarco = marcos.length ? Math.min(...marcos) : maxBytes;
+  let reservado = Math.min(maxBytes, primeiroMarco, estimativa);
   await orcamentoSaida.adquirir(reservado);
+  const contentType = String(headers["content-type"] || "").toLowerCase();
   try {
     return await coletarComTeto(stream, {
       maxBytes,
       url,
       signal,
       permitirCorte,
+      checkpoints: marcos,
+      // O conferidor da camada de cima trabalha com TEXTO: decodificar aqui é
+      // o que mantém fetch.mjs alheio a markdown e o chamador alheio a charset.
+      aoCheckpoint:
+        typeof aoCheckpoint === "function"
+          ? async (parcial) => {
+              const texto = await decodeBuffer(parcial, contentType);
+              return await aoCheckpoint(texto, { bytes: parcial.length, finalUrl: url, contentType });
+            }
+          : null,
       aoChunk: async (bytesTotais) => {
         const falta = bytesTotais - reservado;
         if (falta > 0) {
@@ -444,6 +463,9 @@ function descreverPayload({ finalUrl, resposta, buffer }) {
     // Marca de corte: o documento veio INCOMPLETO porque o teto apertado
     // parou o download. Quem recebe isto precisa avisar e NÃO guardar.
     cortado: buffer.cortado === true,
+    // Bytes em que a parada progressiva aconteceu (0 = não houve): é o marco
+    // que decidiu que o texto já cobria o pedido. Só observabilidade.
+    paradaEmCheckpoint: buffer.paradaEmCheckpoint || 0,
     // Bytes que de fato vieram (e o que o servidor declarou, quando ele
     // declara). É o que diz se o corte tirou texto: com content-length a
     // decisão é exata; sem ele, `bytes` é o tamanho do teto.
@@ -478,7 +500,7 @@ function chaveDaJuncao(cacheKey, sabor) {
   return `${cacheKey}|${sabor}`;
 }
 
-export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null, permitirCorte = false } = {}) {
+export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries = 2, signal: externo, maxBytes = MAX_RESPONSE_BYTES, condicional = null, decodificar = false, headers: headersExtra = null, permitirCorte = false, checkpoints = null, aoCheckpoint = null } = {}) {
   let lastError = null;
   // Tetos do retry: número inteiro entre 0 e 5. Antes, um valor negativo (ou
   // NaN) podia pular o laço inteiro e o throw final lançar `null`.
@@ -535,10 +557,14 @@ export async function fetchBytes(url, { timeoutMs = DEFAULT_TIMEOUT_MS, retries 
       const buffer = await lerCorpoComOrcamento(
         desembrulhar(resposta.stream, resposta.headers),
         resposta.headers,
-        maxBytes,
-        finalUrl,
-        controller.signal,
-        permitirCorte
+        {
+          maxBytes,
+          url: finalUrl,
+          signal: controller.signal,
+          permitirCorte,
+          checkpoints,
+          aoCheckpoint,
+        }
       );
       const base = descreverPayload({ finalUrl, resposta, buffer });
       if (!decodificar) {
@@ -573,109 +599,42 @@ export function fetchText(url, options) {
 }
 
 /**
- * Tamanho REAL já observado por URL: quanto precisou ser baixado para ter o
- * documento inteiro (ou, no caso do corte, o tamanho do teto que cortou — que
- * é um piso do tamanho de verdade).
+ * Fetch com teto de bytes que decide, DENTRO do mesmo download, se o texto
+ * que já chegou cobre o pedido (`checkpoints` + `aoCheckpoint`).
  *
- * Serve para não pagar o download em duas etapas duas vezes: sem esta memória,
- * toda leitura de uma página maior que o teto baixaria o pedaço, descobriria o
- * corte e baixaria o resto — dois downloads em vez de um.
- */
-const tamanhosConhecidos = new Map();
-const TAMANHO_CONHECIDO_TTL_MS = 10 * 60 * 1000;
-const TAMANHO_CONHECIDO_MAX = 512;
-
-/**
- * Chave da memória de tamanho: host + caminho, sem query. Parâmetros de
- * rastreio não mudam o tamanho do documento, e é comum o cliente repetir a
- * leitura com a URL "suja" — com a chave completa, a memória nunca acertaria.
- */
-function chaveDeTamanho(cacheKey) {
-  try {
-    const u = new URL(cacheKey);
-    return `${u.host}${u.pathname}`;
-  } catch {
-    return cacheKey;
-  }
-}
-
-function registrarTamanho(chave, bytes) {
-  if (!chave || !Number.isFinite(bytes) || bytes <= 0) return;
-  if (tamanhosConhecidos.size >= TAMANHO_CONHECIDO_MAX && !tamanhosConhecidos.has(chave)) {
-    tamanhosConhecidos.delete(tamanhosConhecidos.keys().next().value);
-  }
-  tamanhosConhecidos.set(chave, { at: Date.now(), bytes });
-}
-
-function tamanhoConhecido(chave) {
-  const r = tamanhosConhecidos.get(chave);
-  if (!r) return 0;
-  if (Date.now() - r.at > TAMANHO_CONHECIDO_TTL_MS) {
-    tamanhosConhecidos.delete(chave);
-    return 0;
-  }
-  return r.bytes;
-}
-
-/**
- * URLs em que o corte JÁ se mostrou inútil: a leitura do pedaço não cobriu o
- * `maxChars`, então o chamador teve de refazer o download inteiro. Guardar isso
- * poupa a segunda conexão nas próximas leituras.
+ * O desenho antigo era em duas etapas: baixava até o teto apertado, o chamador
+ * convertia o pedaço, e — quando não cobria o pedido — refazia a leitura no
+ * teto largo. Duas conexões para a mesma página, e o segundo download era o
+ * preço de uma dúvida que só a conversão podia responder.
  *
- * O caso real medido: a home do washingtonpost tem 4 MB de markdown, mas o
- * topo do HTML é quase todo marcação — cortar em 480 KB entrega pouco texto,
- * refaz largo, e cada leitura pagava DOIS downloads (46% mais lenta que sem o
- * recurso). Com a memória, a estreia ainda paga dois; as seguintes pagam um.
+ * Agora o teto apertado é o primeiro MARCO de conferência, não um fim: o
+ * coletor pausa ali, o chamador decide com o texto na mão, e a MESMA conexão
+ * continua quando a resposta é "ainda não". O download só é cortado de fato
+ * quando o texto disponível passa do que o cliente pediu (com folga) — e aí o
+ * corte é sinalizado (`cortado: true`) e nada entra no cache.
+ *
+ * O teto largo continua sendo erro quando estourado: aqui o coletor nunca
+ * entrega um pedaço sem o chamador saber (`permissoDeCorte: false`); a única
+ * parada que existe é a dos marcos, decidida de propósito.
  */
-const semCorteUtil = new Map();
-const SEM_CORTE_TTL_MS = 10 * 60 * 1000;
-
-/** Marca que, para esta URL, cortar o download não vale a pena. */
-export function marcarCorteInutil(url) {
-  const chave = chaveDeTamanho(chaveCanonica(url));
-  if (semCorteUtil.size >= TAMANHO_CONHECIDO_MAX && !semCorteUtil.has(chave)) {
-    semCorteUtil.delete(semCorteUtil.keys().next().value);
-  }
-  semCorteUtil.set(chave, Date.now());
-}
-
-function corteInutil(chave) {
-  const at = semCorteUtil.get(chave);
-  if (!at) return false;
-  if (Date.now() - at > SEM_CORTE_TTL_MS) {
-    semCorteUtil.delete(chave);
-    return false;
-  }
-  return true;
-}
-
-export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, retries, maxBytes, largoBytes = MAX_RESPONSE_BYTES, forcarLargo = false } = {}) {
+export async function fetchTextComTeto(url, {
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  signal,
+  retries,
+  largoBytes = MAX_RESPONSE_BYTES,
+  checkpoints = null,
+  aoCheckpoint = null,
+  sabor = "m",
+} = {}) {
   const cacheKey = chaveCanonica(url);
-  let apertado = Math.min(maxBytes || largoBytes, largoBytes);
-  // `forcarLargo` é o chamador dizendo "o documento inteiro importa desta vez":
-  // acontece quando o corte custou texto que o cliente ia receber. Na prática,
-  // é a PRIMEIRA leitura de uma página cujo topo não cobre o pedido.
-  if (forcarLargo) apertado = largoBytes;
-  // Cortar já se mostrou inútil nesta URL (o pedaço não cobria o pedido):
-  // vai direto ao largo em vez de pagar dois downloads de novo.
-  if (!forcarLargo && corteInutil(chaveDeTamanho(cacheKey))) apertado = largoBytes;
-  // A memória de tamanho manda direto ao teto largo quando a página já se
-  // mostrou MAIOR que o teto apertado numa leitura anterior — mas só quando o
-  // que falta é pequeno a ponto de não valer a economia.
-  //
-  // Medido em dev/_mede-teto.mjs (página de 3,8 MB, teto de 1,1 MB): largar o
-  // corte de vez levava a repetição de 310 ms para 1.029 ms. Ou seja, insistir
-  // no corte COMPENSA nesse caso — o download economizado é grande — e a
-  // memória só deve entrar quando o resto é pequeno perto do que já se baixou.
-  const conhecido = forcarLargo ? 0 : tamanhoConhecido(chaveDeTamanho(cacheKey));
-  const restoPequeno = conhecido > 0 && conhecido - apertado <= apertado;
-  if (restoPequeno) apertado = largoBytes;
-
-  const teoCorte = apertado < largoBytes;
-  // O teto apertado entra na chave da junção: quem pediu 480 KB não pode
-  // caronar num download de 24 MB e receber um payload fora do seu contrato
-  // (nem o contrário, recebendo um documento cortado).
-  const juncao = chaveDaJuncao(cacheKey, `m${apertado}`);
+  const marcos =
+    Array.isArray(checkpoints) && typeof aoCheckpoint === "function"
+      ? [...new Set(checkpoints)].filter((n) => Number.isFinite(n) && n > 0 && n < largoBytes).sort((a, b) => a - b)
+      : [];
+  // O "sabor" da junção separa pedidos com EXIGÊNCIAS diferentes: quem para
+  // num marco recebe um documento incompleto, e um carona que pediu mais texto
+  // não pode herdar esse recorte só porque chegou enquanto o download corria.
+  const juncao = chaveDaJuncao(cacheKey, `${sabor}-${marcos[0] || largoBytes}`);
   const guardado = pageCache.get(cacheKey);
   if (guardado) {
     if (guardado.stale) revalidarEmSegundoPlano(cacheKey, url, { timeoutMs, retries, juncao });
@@ -693,12 +652,11 @@ export async function fetchTextComTeto(url, { timeoutMs = DEFAULT_TIMEOUT_MS, si
       timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs),
       retries,
       chave: cacheKey,
-      maxBytes: apertado,
-      // Corte só vale quando existe um teto MAIOR para refazer. Se o apertado
-      // já é o máximo do servidor, cortar em silêncio entregaria um documento
-      // incompleto sem saída — aí o erro é o comportamento correto (e é o que
-      // a suíte trava em tests/parada-antecipada.test.mjs).
-      permissoDeCorte: teoCorte,
+      // O download pode ir até o teto largo; são os marcos que decidem parar.
+      maxBytes: largoBytes,
+      permissoDeCorte: false,
+      checkpoints: marcos,
+      aoCheckpoint: marcos.length ? aoCheckpoint : null,
     });
   });
   return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
@@ -914,12 +872,6 @@ export function conteudoBrutoResult(html, finalUrl, maxChars) {
 }
 
 /**
- * Busca de verdade: valida segurança (SSRF + robots), baixa e grava no cache.
- * É o corpo que roda sob a junção em voo (um por URL em andamento). Com
- * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
- * propósito; o objetivo é atualizá-la.
- */
-/**
  * Guarda no cache o resultado de um download, decidindo ANTES se pode guardar.
  *
  * Duas regras que existem por motivo concreto:
@@ -971,28 +923,12 @@ function guardarNoCache({ cacheKey, payload, extrair }) {
 }
 
 /**
- * Lembra o tamanho real do documento para a próxima leitura da MESMA página
- * decidir de primeira — sem esta memória, toda leitura de página maior que o
- * teto pagaria dois downloads (o pedaço e o resto).
- *
- * A chave ignora a query de rastreio (`?utm_*`, `?v=`, `?releitura=`): duas
- * visitas à mesma página com parâmetro diferente são a mesma página, e é
- * justamente nelas que o cliente repete a leitura.
- *
- * Só registra quando o número é CONFIÁVEL:
- *  - o servidor declarou o tamanho (content-length é o tamanho real), ou
- *  - o download NÃO foi cortado (então `bytes` é o documento inteiro).
- * Um download cortado sem content-length tem `bytes` = tamanho do teto, que
- * não diz nada sobre a página — gravar isso envenenava a memória e desligava
- * o corte na leitura seguinte (medido: o valor do teto virava "tamanho da
- * página" e `restoPequeno` passava a ser verdadeiro por engano).
+ * Busca de verdade: valida segurança (SSRF + robots), baixa e grava no cache.
+ * É o corpo que roda sob a junção em voo (um por URL em andamento). Com
+ * `revalidacao`, pula a rechecagem de cache — a versão vencida está lá de
+ * propósito; o objetivo é atualizá-la.
  */
-function lembrarTamanho(cacheKey, payload) {
-  const confiavel = payload.bytesDeclarados || (!payload.cortado ? payload.bytes : 0);
-  if (confiavel) registrarTamanho(chaveDeTamanho(cacheKey), confiavel);
-}
-
-async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null, maxBytes = MAX_RESPONSE_BYTES, permissoDeCorte = false } = {}) {
+async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = false, chave = null, extrair = null, maxBytes = MAX_RESPONSE_BYTES, permissoDeCorte = false, checkpoints = null, aoCheckpoint = null } = {}) {
   const cacheKey = chave || chaveCanonica(url);
   if (!revalidacao) {
     // Quem esperou na junção pode encontrar a entrada que outro pedido acabou
@@ -1041,7 +977,17 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   try {
     payload = await limitesPorHost.executar(hostOf(url), () =>
       limiteSaida.executar(() =>
-        fetchTextWithFallback(url, { timeoutMs, signal, retries, condicional, decodificar: !extrair, maxBytes, permitirCorte: permissoDeCorte })
+        fetchTextWithFallback(url, {
+          timeoutMs,
+          signal,
+          retries,
+          condicional,
+          decodificar: !extrair,
+          maxBytes,
+          permitirCorte: permissoDeCorte,
+          checkpoints,
+          aoCheckpoint,
+        })
       )
     );
   } catch (err) {
@@ -1056,10 +1002,6 @@ async function buscarEAquecer(url, { timeoutMs, signal, retries, revalidacao = f
   // Negado => RobotBloqueadoError sobe e o corpo baixado é descartado sem
   // entrar no cache (mesmo efeito de antes, só sem somar as duas latências).
   await robotsEmCurso;
-
-  // Tamanho real do documento fica lembrado para a próxima leitura da MESMA
-  // página decidir de primeira.
-  lembrarTamanho(cacheKey, payload);
 
   // Gravação no cache (com a transformação opcional do PDF, quando houver).
   return guardarNoCache({ cacheKey, payload, extrair });
@@ -1169,6 +1111,37 @@ export async function fetchTextCached(url, { timeoutMs = DEFAULT_TIMEOUT_MS, sig
     buscarEAquecer(url, { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs), retries, chave })
   );
   return aguardarBuscaCompartilhada(busca, { timeoutMs, signal, url });
+}
+
+/**
+ * Idade (ms) da entrada de cache de uma URL, ou -1 quando não há entrada.
+ * É o que o aquecedor usa para saber se a página está perto de vencer.
+ */
+export function idadeNoCache(url) {
+  return pageCache.idadeMs(chaveCanonica(url));
+}
+
+/**
+ * Revalida uma URL sem cliente esperando (só o aquecedor usa). Segue o mesmo
+ * caminho de `fetchTextCached` — segurança, junção e cache — mas SEMPRE pela
+ * revalidação: a entrada vencida está lá de propósito e o objetivo é renová-la.
+ * Se a entrada sumiu entre a decisão e a chamada, busca do zero normalmente.
+ */
+export async function reaquecerNoCache(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const chave = chaveCanonica(url);
+  // Mesmo sabor da junção do `fetchTextCached` ("t"): se um cliente já está
+  // baixando esta URL, o aquecedor pega carona nesse download em vez de abrir
+  // um segundo — trabalho de fundo não pode duplicar o de quem está esperando.
+  const juncao = chaveDaJuncao(chave, "t");
+  const busca = coalescedorDeBuscas.executar(juncao, () =>
+    buscarEAquecer(url, {
+      timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, timeoutMs),
+      retries: 0,
+      revalidacao: true,
+      chave,
+    })
+  );
+  return aguardarBuscaCompartilhada(busca, { timeoutMs, url });
 }
 
 /**

@@ -38,3 +38,8 @@ services:
       # esperar, e a atualização acontece uma vez só, atrás.
       - key: CACHE_SWR
         value: "1"
+      # Aquecedor de cache: as URLs mais pedidas são revalidadas antes de
+      # vencer, para a primeira leitura depois do TTL não pagar a espera do
+      # site de novo. Trabalho de fundo serial, com poucas URLs por rodada.
+      - key: CACHE_WARMER
+        value: "1"

@@ -292,13 +292,42 @@ function normalizarErroDeLeitura(err, signal, url) {
  * Consome um stream com teto de bytes. `aoChunk(bytesLidos)` (opcional) é
  * chamado ANTES de aceitar cada pedaço — é o gancho do orçamento de memória,
  * que assim acompanha os bytes REAIS, sem confiar no content-length.
+ *
+ * `checkpoints` + `aoCheckpoint` são a parada PROGRESSIVA: nos marcos de bytes,
+ * `aoCheckpoint(bufferParcial)` decide se o que já chegou basta (true = para) ou
+ * se o MESMO download continua (false). Parar num marco marca o buffer como
+ * `cortado` (documento incompleto, não pode ir para o cache) e libera a conexão
+ * — é o que evita a segunda conexão que existia antes, quando o pedaço do teto
+ * apertado não cobria o pedido e o chamador refazia tudo no teto largo.
+ *
+ * A conferência acontece quando o pedaço SEGUINTE chega, nunca no fim do
+ * fluxo: se o documento terminou exatamente num marco, ele está inteiro e não
+ * há corte nenhum a declarar.
  */
-export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida", signal, aoChunk, permitirCorte = false } = {}) {
+export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida", signal, aoChunk, permitirCorte = false, checkpoints = null, aoCheckpoint = null } = {}) {
   const chunks = [];
   let total = 0;
   let cortado = false;
+  let paradaEmCheckpoint = 0;
+  const marcos =
+    Array.isArray(checkpoints) && typeof aoCheckpoint === "function"
+      ? [...new Set(checkpoints)].filter((n) => Number.isFinite(n) && n > 0 && n < maxBytes).sort((a, b) => a - b)
+      : [];
+  let proximoMarco = 0;
   try {
     for await (const pedaco of fonte) {
+      if (proximoMarco < marcos.length && total >= marcos[proximoMarco]) {
+        // Um pedaço grande pode pular mais de um marco: só o maior vencido
+        // importa — o texto num marco menor é um prefixo do texto neste.
+        while (proximoMarco < marcos.length && total >= marcos[proximoMarco]) proximoMarco++;
+        const parcial = Buffer.concat(chunks, total);
+        if (await aoCheckpoint(parcial)) {
+          cortado = true;
+          paradaEmCheckpoint = total;
+          descartarCorpo(fonte);
+          break;
+        }
+      }
       const pedacoBuf = Buffer.isBuffer(pedaco) ? pedaco : Buffer.from(pedaco);
       if (total + pedacoBuf.length > maxBytes) {
         // Teto estourado. Sem `permitirCorte`, é erro (comportamento de sempre:
@@ -337,6 +366,9 @@ export async function coletarComTeto(fonte, { maxBytes, url = "URL desconhecida"
   // Propriedade não-enumerável: o retorno continua sendo um Buffer (nada que
   // já consumia coletarComTeto muda), e quem quiser sabe que houve corte.
   if (cortado) Object.defineProperty(buffer, "cortado", { value: true, enumerable: false });
+  if (paradaEmCheckpoint) {
+    Object.defineProperty(buffer, "paradaEmCheckpoint", { value: paradaEmCheckpoint, enumerable: false });
+  }
   return buffer;
 }
 

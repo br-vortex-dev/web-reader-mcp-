@@ -153,3 +153,50 @@ test("a parada mantem o pareamento de cercas de codigo no prefixo exibido", () =
   const cercas = (resultado.match(/```/g) || []).length;
   assert.equal(cercas % 2, 0, `cercas desemparelhadas no resultado: ${cercas}`);
 });
+
+async function esperarFluxo(nome, ms = 3000) {
+  const ate = Date.now() + ms;
+  while (Date.now() < ate) {
+    const stats = fixture.fluxoDe(nome);
+    if (stats) return stats;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+
+test("texto depois do peso: UMA conexao continua ate o fim e a pagina inteira entra no cache", { timeout: 60000 }, async () => {
+  // /tarde tem 480 KB de comentarios antes do texto. O primeiro marco (256 KB)
+  // nao cobre o pedido, e a MESMA conexao continua ate o fim (~535 KB). O
+  // desenho antigo pagava duas conexoes aqui (o pedaco e o refazer largo); o
+  // contador de requisicoes prova que agora e uma so — e que o documento
+  // inteiro ficou no cache.
+  const a = await mcp.call("read_page", { url: `${fixture.url}/tarde`, maxChars: 1000, timeoutMs: 20000 });
+  assert.equal(a.isError, false, `read_page falhou: ${a.text.slice(0, 300)}`);
+  assert.match(a.text, /MARCADO-TARDE/);
+  assert.match(a.text, /Conteudo: \d+ caracteres/);
+  assert.doesNotMatch(a.text, /Conteudo: \d+\+/, "o documento terminou antes de qualquer marco: nao e parcial");
+  assert.equal(fixture.contagemDe("/tarde"), 1, "a leitura pagou duas conexoes");
+
+  const b = await mcp.call("read_page", { url: `${fixture.url}/tarde`, maxChars: 1000, timeoutMs: 20000 });
+  assert.equal(b.isError, false, `segunda leitura falhou: ${b.text.slice(0, 300)}`);
+  assert.match(b.text, /MARCADO-TARDE/);
+  assert.equal(fixture.contagemDe("/tarde"), 1, "a segunda leitura deveria vir do cache");
+});
+
+test("download para no marco quando o texto ja chegou (o rabo nao e baixado)", { timeout: 60000 }, async () => {
+  // /cedo entrega o texto de cara e depois um rabo de ~8 MB, escrito aos
+  // poucos. Com maxChars de 1000, o download tem de parar no primeiro marco
+  // (256 KB) e desconectar: `Conteudo: N+` marca a parcial, o contador prova
+  // que nao houve segunda conexao, e o fixture registra que o rabo nao foi
+  // enviado.
+  const r = await mcp.call("read_page", { url: `${fixture.url}/cedo`, maxChars: 1000, timeoutMs: 20000 });
+  assert.equal(r.isError, false, `read_page falhou: ${r.text.slice(0, 300)}`);
+  assert.match(r.text, /MARCADO-CEDO/);
+  assert.match(r.text, /Conteudo: \d+\+ caracteres/);
+  assert.equal(fixture.contagemDe("/cedo"), 1, "houve segunda conexao");
+
+  const stats = await esperarFluxo("cedo");
+  assert.ok(stats, "o fixture nao registrou o fechamento do fluxo");
+  assert.equal(stats.concluiu, false, "o rabo de 8 MB foi escrito inteiro (o cliente nao parou)");
+  assert.ok(stats.enviados < 2 * 1024 * 1024, `bytes enviados antes do fechamento: ${stats.enviados}`);
+});

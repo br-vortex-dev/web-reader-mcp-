@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em dezesseis módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em dezessete módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -19,7 +19,8 @@ sai. O produto mora em `src/`, em dezesseis módulos com uma responsabilidade ca
 | `utils.mjs` | Fila FIFO com índice de cabeça, os dois limitadores de carga (concorrência e bytes), o cache LRU com TTL, a **junção de buscas em voo** (single-flight) e a **chave de cache canônica** (descarta rastreio, ordena os parâmetros). |
 | `security.mjs` | A guarda de segurança: SSRF (IPv4/IPv6 privado/reservado, NAT64, 6to4) e robots.txt. |
 | `net.mjs` | O transporte de saída **com IP fixado**: `node:http`/`node:https` com Agent validado (anti-DNS-rebinding real), descompressão gzip/deflate/br, leitura com teto e descarte de corpos que não interessam. O `fetch` global não é usado — ele ignora a opção `agent`. |
-| `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. |
+| `fetch.mjs` | O fetch de baixo nível: cache (por chave canônica), **junção de buscas em voo**, revalidação em segundo plano (SWR), **revalidação condicional** (`If-None-Match`/`If-Modified-Since` + 304), redirects manuais, retries com `Retry-After`, teto em bytes em streaming e decodificação de charset. O teto proporcional do `read_page` virou **marco de conferência**: o mesmo download continua quando o texto ainda não cobre o pedido. |
+| `warmer.mjs` | O **aquecedor de cache**: mantém o placar das URLs mais pedidas e, em rodadas seriais de fundo, revalida as entradas perto do vencimento (e recompleta as que o LRU despejou). Trabalho de fundo não compete com o tráfego: poucas URLs por rodada, prazo próprio, e só páginas que cabem no cache entram no placar. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `conversao.mjs` | A camada **memoizada** de HTML → markdown e links: um WeakMap chaveado pelo payload guarda meta, texto e lista de links, então a mesma página baixada é convertida uma vez só. Também é onde vivem a parada antecipada da conversão e a marca `Conteudo: N+`. |
 | `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
@@ -102,7 +103,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (40 arquivos, 369 testes, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (41 arquivos, 374 testes, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -128,7 +129,8 @@ Roda os arquivos de `tests/` (40 arquivos, 369 testes, ~60 s, sem rede na maiori
 | `tests/limits.test.mjs` | controle de carga: limite de downloads respeitado, fila cheia recusa com erro claro, orçamento de memória reservado e devolvido, 503 sob saturação, `/health` isento do controle |
 | `tests/host-limit.test.mjs` | teto por host: um host lento não monopoliza as vagas, fila do host cheia devolve erro claro, estado por host não vaza |
 | `tests/cluster.test.mjs` | `WEB_CONCURRENCY=2` sobe workers, atende e encerra; sem a variável, processo único |
-| `tests/parada-antecipada.test.mjs` | parada do parse no teto de saída: página gigante idêntica à conversão completa, páginas pequenas intactas, cercas pareadas no prefixo |
+| `tests/parada-antecipada.test.mjs` | parada do parse no teto de saída: página gigante idêntica à conversão completa, páginas pequenas intactas, cercas pareadas no prefixo; e a parada do **download**: texto depois do peso continua na MESMA conexão e entra inteiro no cache (1 requisição), texto que já chegou corta o rabo lento (o fixture registra que parou de enviar) |
+| `tests/warmer.test.mjs` | **aquecedor de cache** (`CACHE_WARMER=1`): desligado não faz chamada de rede sozinho; ligado revalida a página popular perto do vencimento sem pedido de cliente (e a página pedida uma vez só fica de fora); entrada fresca não é rebaixada à toa |
 | `tests/endurecimento.test.mjs` | transporte pinado com DNS quebrado, gzip/br, redirect/erro com corpo infinito, robots não toca host bloqueado, faixas reservadas, `%` malformado, teto do stdio |
 | `tests/integration.test.mjs` | a web pública de verdade: ler página https, seguir redirect http→https, extrair tabelas |
 | `tests/pdf.test.mjs` | `read_pdf`: extração de texto com espaços/quebras, contagem de páginas, não-PDF avisa sem erro cru, truncamento, cache |
@@ -356,7 +358,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.8 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.9 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -364,9 +366,11 @@ sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
    `revalidacoes: N (falhas M)` (atualizações em segundo plano),
    `conversoes: N (reaproveitadas M)` (conversões de fato executadas vs. reaproveitadas),
    `video: N (reaproveitadas M)` (análises de vídeo executadas vs. reaproveitadas —
-   releitura do mesmo vídeo com cache quente não reanalisa) e
+   releitura do mesmo vídeo com cache quente não reanalisa),
    `marcas: N (disco|memoria, escritas E, lidas do disco L[, falhas F])` — as marcas
-   do `diff_page` e onde estão a viver.
+   do `diff_page` e onde estão a viver — e
+   `aquecimento: ligado|desligado (N quentes, A aquecidas, F falhas)` — o placar do
+   aquecedor de cache.
 
 ### Conectar o MCP remoto
 
@@ -526,6 +530,13 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). 
 | `CACHE_TTL_MS` | `450000` (7,5 min) | Validade de cada entrada do cache. |
 | `CACHE_SWR` | desligada | `1` liga a **revalidação em segundo plano**: entrada vencida dentro da janela de graça é servida na hora e atualizada atrás (passando pela junção em voo). O `render.yaml` liga. Desligada, vencida = busca de novo (comportamento conservador). |
 | `CACHE_STALE_WINDOW_MS` | `0` (2× o TTL) | Tamanho da janela de graça do SWR em ms. Fora dela, a entrada é descartada e a leitura espera a nova busca. |
+| `CACHE_WARMER` | desligada | `1` liga o **aquecedor de cache**: as URLs mais pedidas são revalidadas antes de vencer, para a leitura seguinte não pagar a espera do site. Desligada por padrão porque é chamada de rede por conta própria; o `render.yaml` liga. Contadores no `/health` (`aquecimento: ...`). |
+| `CACHE_WARMER_INTERVAL_MS` | `60000` (1 min) | De quanto em quanto tempo o aquecedor olha o placar (5 s–1 h). |
+| `CACHE_WARMER_MAX_URLS` | `8` | Quantas URLs ele tenta manter quentes por rodada (as mais pedidas primeiro, serial de propósito). |
+| `CACHE_WARMER_MIN_PEDIDOS` | `2` | Página só entra no placar depois de N pedidos — uma leitura isolada não paga o custo de mantê-la quente. |
+| `CACHE_WARMER_MARGEM_MS` | `90000` (1,5 min) | Margem antes do vencimento para reaquecer: com `idade >= TTL − margem`, a próxima leitura já pagaria o download, então o aquecedor renova agora. |
+| `CACHE_WARMER_JANELA_MS` | `1800000` (30 min) | Pedido mais velho que isto não conta: a página deixou de ser "quente". |
+| `CACHE_WARMER_TIMEOUT_MS` | `8000` | Prazo de UMA revalidação feita pelo aquecedor (não herda o prazo de nenhum cliente). |
 | `CACHE_NEGATIVO_TTL_MS` | `120000` (2 min) | Por quanto tempo uma falha **permanente** (404, 410, 403, 401) fica lembrada. Sem isso, uma URL que responde 404 custava conexão + TLS + headers a cada chamada para receber a mesma negativa. Medido: a segunda chamada voltou em **0,23 ms e com zero requisições ao servidor**. Só status 4xx permanente entra; `429`, `408` e 5xx ficam de fora (são passageiros e o retry cuida deles). |
 | `CACHE_NEGATIVO_MAX_ENTRIES` | `256` | Teto de entradas do cache negativo. `0` desliga o recurso. |
 | `MAX_PRAZO_MULTI_MS` | `60000` (60 s) | Teto duro do **prazo final** de `read_multiple_pages` e `crawl_site`. Antes, a resposta só saía quando a ÚLTIMA página terminasse — 29 prontas ficavam presas atrás de uma lenta, e o cliente desistia perdendo tudo. Estourou: devolve o que já leu, avisa quantas faltaram, e o que está em voo segue aquecendo o cache. |
@@ -542,8 +553,10 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). 
 | `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
 | `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. É o teto DURO: acima dele a leitura falha com "Resposta muito grande". |
 | `MAX_RESPONSE_BYTES_DOCUMENTO` | `25165824` (24 MB) | Teto de download das ferramentas que precisam do documento INTEIRO: `extract_links`, `find_on_page` e `diff_page`. Nunca menor que `MAX_RESPONSE_BYTES`. Acima dele o download é cortado e a saída AVISA — antes, a chamada falhava por completo. `diff_page` recusa em vez de comparar um trecho (diff falso). |
-| `DOWNLOAD_FOLGA_POR_CHAR` | `60` | Teto de download PROPORCIONAL ao `maxChars` pedido, no `read_page`/`read_dynamic_page`: `maxChars × folga`, limitado ao `MAX_RESPONSE_BYTES`. A folga existe porque HTML tem muita marcação em volta do texto. Só corta página grande; abaixo do piso nada muda. No `read_dynamic_page` o retry largo pode ir até `MAX_RESPONSE_BYTES_DOCUMENTO` (a ferramenta existe para páginas pesadas, cujos dados moram no script do fim do documento); no `read_page` o teto duro continua valendo. |
+| `DOWNLOAD_FOLGA_POR_CHAR` | `60` | Teto de download PROPORCIONAL ao `maxChars` pedido, no `read_page`/`read_dynamic_page`: `maxChars × folga`, limitado ao `MAX_RESPONSE_BYTES`. A folga existe porque HTML tem muita marcação em volta do texto. Abaixo do piso nada muda. Esse teto é o **primeiro marco de conferência** do download progressivo: o servidor pausa ali, converte e, se o texto ainda não cobre o pedido, continua o MESMO download (antes eram duas conexões: o pedaço e o refazer largo). No `read_dynamic_page` o download pode seguir até `MAX_RESPONSE_BYTES_DOCUMENTO` (a ferramenta existe para páginas pesadas, cujos dados moram no script do fim do documento); no `read_page`, até o teto duro — acima dele a leitura falha como antes. |
 | `DOWNLOAD_MIN_BYTES` | `262144` (256 KB) | Piso do teto proporcional. Página menor que isto nunca é cortada. **Não subir para 1 MB**: com folga de 60x, todo `maxChars` abaixo de ~17.000 encosta no piso e o teto deixa de ser proporcional — o washingtonpost (3,7 MB) era cortado em 1 MB, tinha de ser relido inteiro e ficava 50% mais lento que sem o recurso. Definir igual ao `MAX_RESPONSE_BYTES` **desliga** o recurso (útil para medir o comportamento antigo). |
+| `CHECKPOINT_ANTECIPADO_BYTES` | `1048576` (1 MB) | Marco antecipado de conferência: mesmo com `maxChars` grande, a primeira parada do download acontece aqui. Se o texto já cobre o pedido, o resto do corpo não é baixado. É o que economiza o rabo de páginas enormes sem mudar um caractere do que o cliente recebe. |
+| `MARGEM_PARADA_DOWNLOAD` | `5000` | Folga de caracteres sobre o `maxChars` para decidir a parada do download: ele só para quando o markdown no marco cobre `maxChars + margem` (a mesma folga evita parar para depois faltar texto por causa de espaço em branco). |
 | `MAX_BODY_BYTES` | `1048576` (1 MB) | Teto do corpo do POST em `/mcp`. Acima disso responde **413**. |
 | `FETCH_CONCURRENCY` | `32` | Quantas páginas são baixadas em paralelo por `read_multiple_pages` e `crawl_site`. É o teto de memória simultânea. |
 | `API_MAX_CANDIDATES` | `2` | Máximo de `/api/...` que o `read_page` busca sozinho. `0` desliga essa busca. |
@@ -563,7 +576,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). 
 | `OUTBOUND_MAX_QUEUE` | `100` | Quantos downloads esperam por vaga. Fila cheia = erro claro e imediato. |
 | `HOST_MAX_CONCURRENCY` | `64` | Downloads simultâneos **por host**: um site lento não consome todas as vagas enquanto os outros esperam. Calibrado pelo joelho da curva (com 32, o harness mediu 52 req/s num host único estrangulado; com 64, os mesmos 76 req/s de antes). |
 | `HOST_MAX_QUEUE` | `256` | Quantos pedidos do mesmo host esperam por vaga. Fila cheia = erro claro e imediato. Quem espera na fila do host **não** segura vaga global. |
-| `OUTBOUND_MEMORY_BUDGET` | `67108864` (64 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, MAX_RESPONSE_BYTES)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. |
+| `OUTBOUND_MEMORY_BUDGET` | `67108864` (64 MB) | **O teto de memória que importa**: cada download reserva `min(content-length, teto do download, primeiro marco)` **antes** de ler. É por bytes, não por número de downloads — muitas páginas pequenas passam juntas, poucas grandes são limitadas. Com o download progressivo a reserva é o primeiro marco (256 KB–1 MB), não o teto inteiro: a memória comprometida é a do pedaço que chega primeiro. |
 | `WEB_CONCURRENCY` | `1` | Quantos workers do cluster (um servidor por worker, mesma porta). **Opt-in**: sem a variável, processo único como sempre. Em máquina com núcleos sobrando, `2`/`4` multiplicam o teto de CPU (medido: +35% com 2 workers quando a CPU ainda sobra). |
 | `HTTP_KEEPALIVE_TIMEOUT_MS` | `32500` | Keep-alive do servidor. O padrão do Node é 5 s, o que causa **churn de conexão** sob carga; e precisa ser **maior que o idle timeout do balanceador**, senão dá 502. |
 | `HTTP_HEADERS_TIMEOUT_MS` | `33000` | Precisa ser ≥ keep-alive. |
@@ -727,6 +740,15 @@ resolvem, e eles trabalham juntos:
    `WeakMap`); acerto de cache não paga parser de novo. Conteúdo novo (TTL
    vencido, revalidação) é objeto novo e converte de novo — sem invalidação para
    esquecer. No `/health`: `conversoes: N (reaproveitadas M)`.
+4. **Aquecedor de cache (`CACHE_WARMER=1`).** As URLs mais pedidas são
+   revalidadas **antes de vencer**, em rodadas seriais de fundo com prazo
+   próprio. Numa página popular, a primeira leitura depois do vencimento deixa
+   de pagar a espera do site de novo — e, sem o aquecedor, cada vencimento é um
+   instante em que toda a rajada depende da mesma revalidação. Ele também
+   recompleta a entrada que o LRU despejou por pressão de memória, desde que a
+   página caiba numa entrada. Só entra no placar o que pode ser aquecido: corte
+   sem tamanho declarado e página acima do teto de uma entrada ficam de fora.
+   No `/health`: `aquecimento: (N quentes, A aquecidas, F falhas)`.
 
 Efeito combinado, medido nos testes: **12 leituras simultâneas da mesma URL = 1
 acesso** ao site (`tests/coalesce.test.mjs`), **8 pedidos no vencimento = 1

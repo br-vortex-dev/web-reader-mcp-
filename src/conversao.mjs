@@ -100,8 +100,19 @@ export function fullLengthDe(payload, markdown) {
   return markdown.length;
 }
 
-export function markdownMemo(payload) {
-  const memo = memoDoPayload(payload);
+/**
+ * Converte texto JÁ DECODIFICADO com as mesmas opções da exibição. É a
+ * conversão de conferência do checkpoint do download: quando o texto que
+ * chegou já cobre o pedido, o resultado é reaproveitado como markdown final
+ * (mesmo texto de entrada + mesmas opções = mesmo prefixo que markdownMemo
+ * produziria). Fora do checkpoint, quem converte payload é markdownMemo.
+ */
+export function markdownDeTexto(texto, finalUrl) {
+  conversoesMemo.realizadas++;
+  return htmlToMarkdown(texto, finalUrl, OPCOES_MARKDOWN_EXIBIVEL);
+}
+
+export function markdownMemo(payload) {  const memo = memoDoPayload(payload);
   if (!memo) {
     conversoesMemo.realizadas++;
     const diagnostico = { interrompida: false };

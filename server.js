@@ -26,6 +26,7 @@
 import { SERVER_NAME, ALLOW_PRIVATE_HOSTS, SNAPSHOT_DIR } from "./src/config.mjs";
 import { carregarSnapshotsDoDisco } from "./src/snapshot.mjs";
 import { startStdio, startHttp, encerrarPorErro } from "./src/server.mjs";
+import { iniciarAquecedor } from "./src/warmer.mjs";
 
 if (ALLOW_PRIVATE_HOSTS) {
   console.error(
@@ -61,6 +62,9 @@ process.on("unhandledRejection", (err) => {
 
 if (HTTP_MODE) {
   await startHttp();
+  // Só no modo HTTP/produção: em stdio o processo vive o que a conversa dura e
+  // não existe tráfego de vários clientes para justificar aquecimento.
+  iniciarAquecedor();
 } else {
   startStdio();
 }

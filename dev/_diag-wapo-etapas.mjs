@@ -1,31 +1,29 @@
 #!/usr/bin/env node
 /**
- * _diag-wapo-etapas.mjs — onde o read_page gasta 985 ms DE NÓS no washingtonpost.
+ * _diag-wapo-etapas.mjs — quanto o read_page baixa e converte no washingtonpost.
  *
- * Medido em dev/_diag-read-page-etapas.mjs: download cru 582 ms, pipeline
- * 1.567 ms. Sobram ~985 ms que são nossos. A suspeita número um é o download
- * DUPLO do corte proporcional (dev/_mede-*): com maxChars 25000 e folga 60x o
- * teto fica em 1,5 MB, e a página tem 4,4 MB. Se o pedaço não cobrir o
- * maxChars, o código refaz o download inteiro — e aí pagamos duas vezes.
- *
- * Este script instrumenta o transporte para CONTAR as requisições reais e
- * cronometra cada etapa do pipeline separadamente.
+ * O desenho antigo era em duas etapas (baixava o pedaço apertado, convertia e,
+ * se não cobrisse o pedido, refazia o download inteiro). Agora o teto apertado
+ * é um MARCO na mesma conexão: o download só continua quando a conversão no
+ * marco não cobre o maxChars. Este script mostra, por volta, em qual marco a
+ * leitura parou e quantos bytes vieram — e compara com o documento inteiro.
  *
  * Uso: node dev/_diag-wapo-etapas.mjs [url] [voltas]
  */
 import { fetchTextComTeto, fetchTextCached } from "../src/fetch.mjs";
 import { htmlToMarkdown, extractMeta } from "../src/html-parser.mjs";
+import {
+  MAX_RESPONSE_BYTES,
+  CHECKPOINT_ANTECIPADO_BYTES,
+  MARGEM_PARADA_DOWNLOAD,
+  tetoDownloadPara,
+} from "../src/config.mjs";
 
 const URL_ALVO = process.argv[2] || "https://www.washingtonpost.com/";
 const VOLTAS = Math.max(1, Number(process.argv[3] || 3));
 const MAX_CHARS = 25000;
 
-const t = (rotulo, fn) => {
-  const t0 = performance.now();
-  const r = fn();
-  return { ms: performance.now() - t0, r };
-};
-const ta = async (rotulo, fn) => {
+const ta = async (fn) => {
   const t0 = performance.now();
   try {
     const r = await fn();
@@ -35,40 +33,64 @@ const ta = async (rotulo, fn) => {
   }
 };
 
+const apertado = tetoDownloadPara(MAX_CHARS, MAX_RESPONSE_BYTES);
+const marcos = [...new Set([apertado, CHECKPOINT_ANTECIPADO_BYTES])]
+  .filter((n) => n < MAX_RESPONSE_BYTES)
+  .sort((a, b) => a - b);
+const limiar = MAX_CHARS + MARGEM_PARADA_DOWNLOAD;
+
 for (let v = 1; v <= VOLTAS; v++) {
-  // 1) Download com o TETO PROPORCIONAL (o caminho do read_page).
-  const comTeto = await ta("fetchTextComTeto", () =>
-    fetchTextComTeto(URL_ALVO, { timeoutMs: 120000, maxBytes: MAX_CHARS * 60, maxChars: MAX_CHARS })
+  // 1) Leitura progressiva: o mesmo caminho do read_page.
+  let markdownPronto = null;
+  const aoCheckpoint = (texto, { finalUrl }) => {
+    const md = htmlToMarkdown(texto, finalUrl);
+    if (md.length < limiar) return false;
+    markdownPronto = md;
+    return true;
+  };
+  const comTeto = await ta(() =>
+    fetchTextComTeto(URL_ALVO, {
+      timeoutMs: 120000,
+      largoBytes: MAX_RESPONSE_BYTES,
+      checkpoints: marcos,
+      aoCheckpoint,
+      sabor: `diag${MAX_CHARS}`,
+    })
   );
   const p1 = comTeto.r;
 
-  // 2) Download com o cache/documento inteiro (como as outras ferramentas fazem).
-  const inteiro = await ta("fetchTextCached", () => fetchTextCached(URL_ALVO, { timeoutMs: 120000 }));
+  // 2) Documento inteiro (o que as ferramentas de documento usam).
+  const inteiro = await ta(() => fetchTextCached(URL_ALVO, { timeoutMs: 120000 }));
   const p2 = inteiro.r;
 
   console.log(
-    `volta ${v} | teto proporcional: ${comTeto.ms.toFixed(0)} ms ` +
-      `${comTeto.ok ? `${p1.text.length} chars cortado=${p1.cortado}` : `ERRO ${comTeto.erro}`}`
+    `volta ${v} | progressiva: ${comTeto.ms.toFixed(0)} ms ` +
+      (comTeto.ok
+        ? `${p1.text.length} chars baixados, cortado=${p1.cortado}` +
+          (p1.paradaEmCheckpoint ? ` no marco ${p1.paradaEmCheckpoint}` : " (foi ate o fim)")
+        : `ERRO ${comTeto.erro}`)
   );
   console.log(
-    `         | documento inteiro:  ${inteiro.ms.toFixed(0)} ms ` +
-      `${inteiro.ok ? `${p2.text.length} chars` : `ERRO ${inteiro.erro}`}`
+    `         | documento inteiro: ${inteiro.ms.toFixed(0)} ms ` +
+      (inteiro.ok ? `${p2.text.length} chars` : `ERRO ${inteiro.erro}`)
   );
 
   if (comTeto.ok) {
-    const mdTeto = t("md", () => htmlToMarkdown(p1.text, p1.finalUrl));
-    console.log(`         | markdown do pedaco:  ${mdTeto.ms.toFixed(1)} ms -> ${mdTeto.r.length} chars`);
-    const cobre = mdTeto.r.length >= MAX_CHARS;
+    const t0 = performance.now();
+    const md = markdownPronto ?? htmlToMarkdown(p1.text, p1.finalUrl);
+    const ms = performance.now() - t0;
     console.log(
-      `         | cobre o maxChars?    ${cobre ? "SIM (nada a refazer)" : "NAO -> o read_page refaz o download inteiro"}` +
-        ` (precisa >= ${MAX_CHARS}, tem ${mdTeto.r.length})`
+      `         | markdown: ${md.length} chars (${ms.toFixed(1)} ms) ` +
+        `| cobre ${MAX_CHARS}? ${md.length >= MAX_CHARS ? "SIM" : "NAO"}`
     );
   }
   if (inteiro.ok) {
-    const mdInt = t("md2", () => htmlToMarkdown(p2.text, p2.finalUrl));
-    const meta = t("meta", () => extractMeta(p2.text, p2.finalUrl));
+    const t0 = performance.now();
+    const mdInt = htmlToMarkdown(p2.text, p2.finalUrl);
+    const meta = extractMeta(p2.text);
     console.log(
-      `         | markdown inteiro:    ${mdInt.ms.toFixed(1)} ms -> ${mdInt.r.length} chars | meta ${meta.ms.toFixed(1)} ms`
+      `         | markdown inteiro: ${mdInt.length} chars (${(performance.now() - t0).toFixed(1)} ms) ` +
+        `| meta "${meta.title || ""}"`
     );
   }
   console.log("");
