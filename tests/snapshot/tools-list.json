@@ -377,6 +377,42 @@
     }
   },
   {
+    "name": "find_relevant",
+    "title": "Buscar trechos relevantes",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "description": "Busca por ASSUNTO numa página e devolve os parágrafos/tabelas mais relevantes, com nota e seção — em vez de entregar a página inteira. Diferente do find_on_page: ignora acento e singular/plural ('baus' acha 'baú') e descarta palavras vazias ('onde', 'fica', 'dos'), então a IA manda 'localização dos baús' em vez da frase exata. Ainda é casamento de palavras (sinônimo não é resolvido); quando acha pouco, avisa.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL completa (http/https) da página"
+        },
+        "query": {
+          "type": "string",
+          "description": "Assunto a buscar (ex.: 'localização dos baús'); acento e plural são tolerados"
+        },
+        "maxTrechos": {
+          "type": "number",
+          "description": "Máximo de trechos devolvidos, do mais relevante para o menos (padrão 5, max 20)"
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout da requisição em ms (padrão 8000)"
+        }
+      },
+      "required": [
+        "url",
+        "query"
+      ]
+    }
+  },
+  {
     "name": "diff_page",
     "title": "Comparar página com a leitura anterior",
     "annotations": {

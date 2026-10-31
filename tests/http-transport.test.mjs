@@ -330,7 +330,7 @@ test("200: tools/list via POST /mcp com o token", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("access-control-allow-origin"), "*");
   const json = JSON.parse(r.body);
-  assert.equal(json.result.tools.length, 12);
+  assert.equal(json.result.tools.length, 13);
 });
 
 test("202: notificacao (sem id) nao gera resposta", async () => {
@@ -473,7 +473,7 @@ test("cliente que morre no meio do corpo nao prende a vaga de admissao", { timeo
 // tempo. A resposta e a MESMA constante de ~6,5 KB para todo mundo, entao o
 // risco nao e o tamanho, e sim a resposta se misturar: um pedido receber o
 // corpo do outro (id trocado) ou o cliente receber menos ferramentas. Aqui os
-// 12 pedidos saem juntos e cada um tem de voltar com o SEU id e as 12.
+// 12 pedidos saem juntos e cada um tem de voltar com o SEU id e as 13.
 test("concorrencia: 12 tools/list simultaneos nao trocam id nem truncam", { timeout: 30000 }, async () => {
   const respostas = await Promise.all(
     Array.from({ length: 12 }, (_, i) =>
@@ -487,7 +487,7 @@ test("concorrencia: 12 tools/list simultaneos nao trocam id nem truncam", { time
   respostas.forEach((r, i) => {
     assert.equal(r.status, 200, "nenhum tools/list pode falhar por estar concorrendo");
     assert.equal(r.json.id, 1000 + i, "cada resposta leva o id do seu proprio pedido");
-    assert.equal(r.json.result.tools.length, 12, "a lista vem inteira, sem truncar");
+    assert.equal(r.json.result.tools.length, 13, "a lista vem inteira, sem truncar");
   });
 });
 
@@ -531,7 +531,7 @@ test("concorrencia: fila de admissao atende 16 tools/list com 2 vagas", { timeou
     respostas.forEach((r, i) => {
       assert.equal(r.status, 200, "quem espera na fila e atendido, nao recusado");
       assert.equal(r.json.id, 50 + i);
-      assert.equal(r.json.result.tools.length, 12);
+      assert.equal(r.json.result.tools.length, 13);
     });
   } finally {
     filho.kill();

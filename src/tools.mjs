@@ -50,6 +50,7 @@ import {
 } from "./fetch.mjs";
 import { hostOf, decodeEntities } from "./html-parser.mjs";
 import { registrarPedidoQuente } from "./warmer.mjs";
+import { termosDaConsulta, blocosDoMarkdown, pontuarBlocos, recortarTrecho } from "./relevancia.mjs";
 import {
   memoDoPayload,
   conversoesMemo,
@@ -810,6 +811,99 @@ export async function toolFindOnPage(args = {}) {
 }
 
 /**
+ * Busca por TRECHOS RELEVANTES: a IA manda o assunto ("onde ficam os baús") e
+ * recebe os parágrafos/tabelas que mais casam, já ordenados por nota — em vez
+ * de mandar um termo exato (find_on_page) ou a página inteira (read_page).
+ *
+ * A consulta é tratada como CONJUNTO DE PALAVRAS, não como frase: acento e
+ * plural não importam, e palavras vazias ("onde", "fica", "dos") são
+ * descartadas para não casar com a página toda. Continua sendo casamento de
+ * palavras — sinônimo ("baú" por "caixa") não é resolvido.
+ */
+export async function toolFindRelevant(args = {}) {
+  const parsed = validateHttpUrl(args.url);
+  const query = String(args.query ?? "").trim();
+  if (!query) throw new ParametroInvalidoError("query", "informe o assunto a buscar");
+  const timeoutMs = clampTimeoutMs(args.timeoutMs);
+  // `Number(...) || 5` transformaria o 0 num pedido de 5; zero não faz sentido
+  // aqui, mas lixo/ausência é que viram o padrão.
+  const pedidoDeTrechos = Number(args.maxTrechos);
+  const maxTrechos = Number.isFinite(pedidoDeTrechos)
+    ? Math.max(1, Math.min(20, Math.floor(pedidoDeTrechos)))
+    : 5;
+
+  const termos = termosDaConsulta(query);
+  if (termos.length === 0) {
+    throw new ParametroInvalidoError(
+      "query",
+      "a consulta so tem palavras vazias (onde, fica, dos...); informe o assunto, ex.: 'baús'"
+    );
+  }
+
+  const payload = await fetchTextDocumentoCached(parsed.href, { timeoutMs });
+  const { text: html, finalUrl, contentType } = payload;
+  ensureHtml(contentType, html, finalUrl);
+
+  const bruto = isConteudoBruto(contentType, html);
+  let conteudo = bruto ? html.replace(/\r\n?/g, "\n") : markdownMemo(payload);
+  let interrompida = !bruto && markdownInterrompida(payload);
+
+  let blocos = blocosDoMarkdown(conteudo);
+  let achados = pontuarBlocos(blocos, termos);
+
+  // Mesma regra do find_on_page: parada antecipada sem NENHUM casamento na
+  // frente não pode virar "não achei" quando o assunto está no rabo.
+  if (interrompida && achados.length === 0) {
+    conteudo = markdownCompleto(payload);
+    interrompida = false;
+    blocos = blocosDoMarkdown(conteudo);
+    achados = pontuarBlocos(blocos, termos);
+  }
+
+  const avisoCobertura = payload.cortado
+    ? `\nAVISO: documento maior que o teto de download — a busca cobre apenas os primeiros ` +
+      `${payload.bytes} bytes, nao a pagina inteira.`
+    : interrompida
+    ? `\nAVISO: a pagina e grande demais para converter inteira — a busca cobriu os primeiros ` +
+      `${conteudo.length} caracteres do texto extraido, nao a pagina toda. O assunto pode estar no resto.`
+    : "";
+
+  const listaTermos = termos.map((t) => t.palavra).join(", ");
+
+  if (achados.length === 0) {
+    return (
+      `Nenhum trecho relevante para "${query}" em ${finalUrl}.\n` +
+      `Termos usados (sem as palavras vazias): ${listaTermos}.\n` +
+      `A pagina tem ${blocos.length} bloco(s) de texto e ${conteudo.length} caracteres. ` +
+      `Tente palavras mais especificas ou leia a pagina com read_page.` +
+      avisoCobertura
+    );
+  }
+
+  const melhores = achados.slice(0, maxTrechos);
+  const termosVistos = new Set(achados.flatMap((a) => a.casados)).size;
+  const melhorNota = melhores[0].nota;
+  const avisoFraco =
+    termosVistos <= Math.floor(termos.length / 2) || melhorNota < 1.5
+      ? `\n\nAVISO: achado fraco — ${termosVistos} de ${termos.length} termo(s) aparecem e o melhor ` +
+        `trecho tem relevancia ${melhorNota}. Se nao responder a pergunta, leia a pagina com read_page.`
+      : "";
+
+  const cabecalho =
+    `# Trechos relevantes em: ${finalUrl}\n` +
+    `Consulta: "${query}" | termos usados: ${listaTermos}\n` +
+    `Trechos: ${melhores.length} de ${achados.length} bloco(s) com casamento` +
+    avisoCobertura;
+
+  const trechos = melhores.map((bloco, i) => {
+    const rotuloSecao = bloco.secao ? ` — secao: ${bloco.secao}` : "";
+    return `## ${i + 1}. relevancia ${bloco.nota}${rotuloSecao}\n${recortarTrecho(bloco.texto)}`;
+  });
+
+  return cabecalho + "\n\n" + trechos.join("\n\n") + avisoFraco;
+}
+
+/**
  * Snapshot e diff de página: relê a URL, compara com a marca da leitura
  * anterior e devolve SÓ o que mudou.
  *
@@ -1535,6 +1629,8 @@ export async function callTool(name, args) {
       return await toolReadJson(args || {});
     case "find_on_page":
       return await toolFindOnPage(args || {});
+    case "find_relevant":
+      return await toolFindRelevant(args || {});
     case "diff_page":
       return await toolDiffPage(args || {});
     default:

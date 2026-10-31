@@ -10,7 +10,7 @@ Servidor **MCP feito do zero** para ler páginas web.
 ## Arquitetura
 
 O `server.js` é só a entrada: escolhe stdio ou HTTP, liga os sinais de erro fatal e
-sai. O produto mora em `src/`, em dezessete módulos com uma responsabilidade cada:
+sai. O produto mora em `src/`, em dezoito módulos com uma responsabilidade cada:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -23,7 +23,8 @@ sai. O produto mora em `src/`, em dezessete módulos com uma responsabilidade ca
 | `warmer.mjs` | O **aquecedor de cache**: mantém o placar das URLs mais pedidas e, em rodadas seriais de fundo, revalida as entradas perto do vencimento (e recompleta as que o LRU despejou). Trabalho de fundo não compete com o tráfego: poucas URLs por rodada, prazo próprio, e só páginas que cabem no cache entram no placar. |
 | `html-parser.mjs` | O parser HTML → markdown feito à mão (tokenizador + regras de emissão) e a extração de links e metadados. |
 | `conversao.mjs` | A camada **memoizada** de HTML → markdown e links: um WeakMap chaveado pelo payload guarda meta, texto e lista de links, então a mesma página baixada é convertida uma vez só. Também é onde vivem a parada antecipada da conversão e a marca `Conteudo: N+`. |
-| `tools.mjs` | As 12 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca dentro da página; `diff_page` compara com a leitura anterior. |
+| `relevancia.mjs` | A busca por **trechos relevantes** (`find_relevant`): normaliza acento e maiúsculas, reduz plural regular, descarta palavras vazias, corta o texto em blocos com a seção anotada e pontua o que mais casa com o assunto. Casamento de palavras — sem sinônimo, sem regex e sem IA. |
+| `tools.mjs` | As 13 ferramentas e a lógica de leitura: o pipeline de uma página vive em **um** lugar (`lerPaginaCompleta`), compartilhado por `read_multiple_pages` e `crawl_site`. `read_feed`/`read_json` moram em `feeds.mjs`; `find_on_page` é a busca por termo e `find_relevant` a busca por assunto; `diff_page` compara com a leitura anterior. |
 | `video.mjs` | A leitura de vídeo: detecção de plataforma (YouTube/Vimeo/página/legenda), metadados publicados (playerResponse, config do player, og tags, JSON-LD) e a transcrição das legendas VTT/SRT/json3. **Não baixa mídia e não gera quadros** — só o que a plataforma publica como texto acessível. |
 | `pdf.mjs` | A leitura de PDF (`read_pdf`): baixa os bytes crus, infla os streams FlateDecode com `node:zlib` e interpreta os operadores de texto (`Tj/TJ/TD/Tm`) para reconstruir espaços e quebras. Sem OCR. |
 | `feeds.mjs` | `read_feed` (RSS 2.0/RDF/Atom/JSON Feed) e `read_json` (API pública): parser de XML próprio, com CDATA e entidades tratadas, e formatação de JSON com `path` opcional. |
@@ -54,7 +55,7 @@ gasta menos tempo. Cada arquivo abre com um cabeçalho dizendo o que ele é, o q
 entra, o que sai e quem o usa — dá para pular direto para o que interessa.
 
 ```koda-passos
-{"titulo":"Ordem de leitura para quem está começando","passos":[{"titulo":"1. server.js e src/server.mjs","texto":"A porta de entrada. Entenda como uma mensagem JSON-RPC chega e vira resposta. Com isso você já sabe o formato de tudo."},{"titulo":"2. src/tool-schemas.mjs","texto":"O catálogo: a lista das 12 ferramentas, com nome, descrição e schema. Aqui você vê o que o servidor oferece ao mundo."},{"titulo":"3. src/tools.mjs","texto":"O corpo do trabalho. Repare em lerPaginaCompleta: é o caminho ÚNICO de leitura que todas as ferramentas de página compartilham."},{"titulo":"4. src/fetch.mjs","texto":"A única porta de saída para a internet. Leia as seis regras no cabeçalho: SSRF, DNS, redirect, retry, cache e junção de buscas."},{"titulo":"5. src/security.mjs e src/net.mjs","texto":"Os dois portões de segurança. Não precisa decorar; precisa saber que existem e onde procurar quando uma URL é bloqueada."},{"titulo":"6. src/html-parser.mjs","texto":"O conversor de HTML para markdown. É o arquivo mais reaproveitado do projeto e o que tem golden files: mude com cuidado e rode os testes."}]}
+{"titulo":"Ordem de leitura para quem está começando","passos":[{"titulo":"1. server.js e src/server.mjs","texto":"A porta de entrada. Entenda como uma mensagem JSON-RPC chega e vira resposta. Com isso você já sabe o formato de tudo."},{"titulo":"2. src/tool-schemas.mjs","texto":"O catálogo: a lista das 13 ferramentas, com nome, descrição e schema. Aqui você vê o que o servidor oferece ao mundo."},{"titulo":"3. src/tools.mjs","texto":"O corpo do trabalho. Repare em lerPaginaCompleta: é o caminho ÚNICO de leitura que todas as ferramentas de página compartilham."},{"titulo":"4. src/fetch.mjs","texto":"A única porta de saída para a internet. Leia as seis regras no cabeçalho: SSRF, DNS, redirect, retry, cache e junção de buscas."},{"titulo":"5. src/security.mjs e src/net.mjs","texto":"Os dois portões de segurança. Não precisa decorar; precisa saber que existem e onde procurar quando uma URL é bloqueada."},{"titulo":"6. src/html-parser.mjs","texto":"O conversor de HTML para markdown. É o arquivo mais reaproveitado do projeto e o que tem golden files: mude com cuidado e rode os testes."}]}
 ```
 
 **Como cada arquivo começa.** Todo módulo de `src/` abre com o mesmo bloco de
@@ -87,6 +88,7 @@ caractere (`48`, `57`).
 | `read_feed(url)`            | Lê um feed RSS/Atom/JSON Feed e lista os itens (título, link, data, autor, resumo)       |
 | `read_json(url, path?)`     | Lê uma resposta JSON pública, declara a forma e aceita `path` (ex.: `data.items`)        |
 | `find_on_page(url, query)`  | Busca um termo na página e devolve só os trechos com contexto (literal ou regex)         |
+| `find_relevant(url, query)` | Busca por **assunto** e devolve os trechos mais relevantes, com nota e seção (acento/plural tolerados) |
 | `diff_page(url)`            | Compara com a leitura anterior e devolve só o que mudou (linhas + e -)                  |
 | `discover_urls(url)`        | Descobre as URLs de um site pelo sitemap.xml (ou links internos da home)                |
 | `crawl_site(url)`           | Varre um site sozinho: lê a URL inicial e segue os links internos (BFS), até 30 páginas |
@@ -103,7 +105,7 @@ A suíte também roda sozinha em cada push e em cada PR (`.github/workflows/ci.y
 Node 18 e 22 — o piso declarado em `engines` e o que corre no Render), depois do
 lint de imports. Não há `npm install`: o CI só precisa do Node.
 
-Roda os arquivos de `tests/` (41 arquivos, 374 testes, ~60 s, sem rede na maioria):
+Roda os arquivos de `tests/` (42 arquivos, 391 testes, ~60 s, sem rede na maioria):
 
 | Arquivo | O que cobre |
 | --- | --- |
@@ -136,6 +138,7 @@ Roda os arquivos de `tests/` (41 arquivos, 374 testes, ~60 s, sem rede na maiori
 | `tests/pdf.test.mjs` | `read_pdf`: extração de texto com espaços/quebras, contagem de páginas, não-PDF avisa sem erro cru, truncamento, cache |
 | `tests/feeds.test.mjs` | `read_feed` (RSS/Atom/JSON Feed, CDATA, página que anuncia feed) e `read_json` (formatação, `path`, JSON inválido) |
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
+| `tests/relevancia.test.mjs` | `find_relevant`: acento e plural ("baus" acha "baú"), palavras vazias descartadas, cobertura de termos e seção na nota, seção de apêndice e bloco de "editar" fora do topo, `maxTrechos`, consulta só com palavras vazias, aviso de achado fraco e de cobertura parcial |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
 | `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` converte a página gigante inteira para a marca (a conversão de exibição, que para aos 25 mil, não serve) — duas chamadas seguidas dão PRIMEIRA leitura e SEM MUDANÇA — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
@@ -163,7 +166,7 @@ TEST_SERVER_PATH=/caminho/para/server-antigo.js npm test
 ### Teste ponta a ponta
 
 ```bash
-npm run test:e2e      # cliente MCP mínimo: lista e exercita as 12 ferramentas
+npm run test:e2e      # cliente MCP mínimo: lista e exercita as 13 ferramentas
 npm run test:live     # verificação pós-deploy: passa a URL e o token do serviço no ar
 npm run test:stress   # bateria cronometrada de sites pesados, lentos e difíceis no ar
 ```
@@ -235,7 +238,7 @@ web-reader-mcp/
 │   ├── net.mjs        <- transporte pinado: IP fixado, gzip/br, teto de leitura
 │   ├── fetch.mjs      <- fetch com cache, redirects, retries e teto de bytes
 │   ├── html-parser.mjs<- parser HTML -> markdown feito a mao
-│   ├── tools.mjs      <- as 12 ferramentas do MCP
+│   ├── tools.mjs      <- as 13 ferramentas do MCP
 │   ├── video.mjs      <- read_video: metadados + transcricao de legendas
 │   ├── pdf.mjs        <- read_pdf: extracao de texto de PDF (zero deps)
 │   ├── tool-schemas.mjs<- JSON Schemas das ferramentas (tools/list)
@@ -358,7 +361,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.9 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.10.0 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -552,7 +555,7 @@ Todas são opcionais menos `MCP_AUTH_TOKEN` (que é obrigatória no modo HTTP). 
 | `ROBOTS_MAX_CONCURRENCY` | `16` | Quantas buscas de `robots.txt` (uma por origem nova) rodam ao mesmo tempo. |
 | `STDIO_MAX_LINE_BYTES` | `4194304` (4 MB) | Teto de UMA linha no modo stdio. Linha maior vira `Parse error` e é descartada — o buffer não cresce sem limite. |
 | `MAX_RESPONSE_BYTES` | `5242880` (5 MB) | Teto de download por requisição, lido em streaming com corte. É o teto DURO: acima dele a leitura falha com "Resposta muito grande". |
-| `MAX_RESPONSE_BYTES_DOCUMENTO` | `25165824` (24 MB) | Teto de download das ferramentas que precisam do documento INTEIRO: `extract_links`, `find_on_page` e `diff_page`. Nunca menor que `MAX_RESPONSE_BYTES`. Acima dele o download é cortado e a saída AVISA — antes, a chamada falhava por completo. `diff_page` recusa em vez de comparar um trecho (diff falso). |
+| `MAX_RESPONSE_BYTES_DOCUMENTO` | `25165824` (24 MB) | Teto de download das ferramentas que precisam do documento INTEIRO: `extract_links`, `find_on_page`, `find_relevant` e `diff_page`. Nunca menor que `MAX_RESPONSE_BYTES`. Acima dele o download é cortado e a saída AVISA — antes, a chamada falhava por completo. `diff_page` recusa em vez de comparar um trecho (diff falso). |
 | `DOWNLOAD_FOLGA_POR_CHAR` | `60` | Teto de download PROPORCIONAL ao `maxChars` pedido, no `read_page`/`read_dynamic_page`: `maxChars × folga`, limitado ao `MAX_RESPONSE_BYTES`. A folga existe porque HTML tem muita marcação em volta do texto. Abaixo do piso nada muda. Esse teto é o **primeiro marco de conferência** do download progressivo: o servidor pausa ali, converte e, se o texto ainda não cobre o pedido, continua o MESMO download (antes eram duas conexões: o pedaço e o refazer largo). No `read_dynamic_page` o download pode seguir até `MAX_RESPONSE_BYTES_DOCUMENTO` (a ferramenta existe para páginas pesadas, cujos dados moram no script do fim do documento); no `read_page`, até o teto duro — acima dele a leitura falha como antes. |
 | `DOWNLOAD_MIN_BYTES` | `262144` (256 KB) | Piso do teto proporcional. Página menor que isto nunca é cortada. **Não subir para 1 MB**: com folga de 60x, todo `maxChars` abaixo de ~17.000 encosta no piso e o teto deixa de ser proporcional — o washingtonpost (3,7 MB) era cortado em 1 MB, tinha de ser relido inteiro e ficava 50% mais lento que sem o recurso. Definir igual ao `MAX_RESPONSE_BYTES` **desliga** o recurso (útil para medir o comportamento antigo). |
 | `CHECKPOINT_ANTECIPADO_BYTES` | `1048576` (1 MB) | Marco antecipado de conferência: mesmo com `maxChars` grande, a primeira parada do download acontece aqui. Se o texto já cobre o pedido, o resto do corpo não é baixado. É o que economiza o rabo de páginas enormes sem mudar um caractere do que o cliente recebe. |
@@ -635,7 +638,7 @@ retomada e dois objetos por token), os atributos de `<a>`/`<img>` ganharam um
 leitor próprio que só materializa `href`, `src`, `alt` e `aria-hidden` (os quatro
 que algum consumidor lê), cada link é resolvido com **uma** `new URL` (antes eram
 duas: `resolveUrl` + `hostOf`), a coleta de links só acontece quando a ferramenta
-devolve links — `read_page`, `find_on_page` e `diff_page` não devolvem — e
+devolve links — `read_page`, `find_on_page`, `find_relevant` e `diff_page` não devolvem — e
 `extractMeta` trocou a varredura por regex das tags `<meta>` por `indexOf("<")`.
 Prova: `dev/_ab-total.mjs` compara o HEAD anterior com a versão atual no mesmo
 processo, intercalado, e exige markdown, links e meta **byte a byte idênticos**.
@@ -889,8 +892,8 @@ o cabeçalho `Conteudo: N+` avisa quando o documento tem mais do que foi lido.
   rodapé — justamente o que o corte tira. Medido com 20 páginas de 2 MB, o
   corte fazia o texto entregue sair **3% menor**. Entregar menos não é
   otimização.
-- `extract_links`, `discover_urls`, `find_on_page`, `diff_page`: precisam do
-  documento inteiro para achar links, sitemap, o termo buscado ou o diff.
+- `extract_links`, `discover_urls`, `find_on_page`, `find_relevant`, `diff_page`: precisam do
+  documento inteiro para achar links, sitemap, o termo buscado, o assunto ou o diff.
 
 **Como o corte se protege contra perder conteúdo:**
 
@@ -1082,7 +1085,7 @@ Agora existem:
 Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devolvem
 "vazio" silencioso.
 
-## find_on_page e diff_page (ler menos para ler melhor)
+## find_on_page, find_relevant e diff_page (ler menos para ler melhor)
 
 - **`find_on_page(url, query)`** busca um termo e devolve **só os trechos que
   casam**, com número de linha e contexto. Aceita texto literal (inclusive com
@@ -1093,6 +1096,15 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   novo antes de responder "nenhuma ocorrência" — o termo do fim não vira falso
   negativo. Se houver acertos na frente, a resposta sai na hora e **avisa** que
   o resto não foi coberto.
+- **`find_relevant(url, query)`** busca por **assunto**: a IA manda "localização
+  dos baús" e recebe os parágrafos/tabelas mais relevantes, ranqueados, com nota
+  e seção. Diferente do `find_on_page`, tolera acento e singular/plural ("baus"
+  acha "baú"), descarta palavras vazias ("onde", "fica", "dos") e valoriza quem
+  cobre mais termos — não exige a frase exata. Continua sendo casamento de
+  palavras (sinônimo não é resolvido) e, quando acha pouco, **avisa**: poucos
+  termos apareceram ou a melhor nota é fraca. Em página gigante vale a mesma
+  regra do `find_on_page`: sem acerto na frente convertida, a página é convertida
+  inteira antes do "não achei"; com acerto, avisa que o resto não foi coberto.
 - **`diff_page(url)`** relê a URL, compara com a marca da leitura anterior e
   devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
   comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é
@@ -1133,7 +1145,7 @@ A negociação de versão do `initialize` aceita `2024-11-05`, `2025-03-26`,
 (a mais nova que o servidor fala). O catálogo de `tools/list` traz, além do
 nome e do schema, um `title` legível e `annotations` (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint`) — os clientes usam isso
-para decidir sem executar. Todas as 12 ferramentas são de leitura; `diff_page`
+para decidir sem executar. Todas as 13 ferramentas são de leitura; `diff_page`
 é a única marcada como **não** idempotente, porque cada chamada move o ponto de
 comparação da seguinte.
 
@@ -1155,6 +1167,7 @@ vazia"**. O contrato é:
 | `read_feed` numa URL que é HTML | **não** é erro: avisa que não é feed e, se a página anuncia um `<link rel="alternate" type="application/rss+xml">`, aponta a URL do feed |
 | `read_json` num corpo que não é JSON | **não** é erro: `JSON invalido` com o motivo, e aponta `read_page` quando o corpo é HTML |
 | `find_on_page` sem ocorrências | **não** é erro: avisa que não achou e diz quantas linhas/caracteres a página tem |
+| `find_relevant` sem casamento | **não** é erro: avisa que não achou, lista os termos usados (sem palavras vazias) e o tamanho da página; achado fraco vem com `AVISO` |
 | `diff_page` na primeira leitura de uma URL | **não** é erro: grava a marca e avisa que não havia ponto de comparação |
 
 ## Limitações conhecidas

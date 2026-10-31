@@ -414,6 +414,31 @@ export async function startFixture({ robots = "regras" } = {}) {
       return;
     }
 
+    // /baus -> guia de jogo com secoes sobre baus e uma secao de outro
+    // assunto. A busca por relevancia tem de achar os trechos de bau (mesmo
+    // com a consulta sem acento) e deixar "Combate" de fora.
+    if (path === "/baus") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><html><head><title>Guia de Baus</title></head><body>" +
+          "<h1>Guia do Jogo</h1>" +
+          "<p>Um guia completo com mapas, itens e estrategias para terminar o jogo.</p>" +
+          "<h2>Localização dos Baús</h2>" +
+          "<p>Os baús ficam espalhados pelo mapa. O primeiro baú fica perto da vila inicial, atrás da casa do ferreiro.</p>" +
+          "<p>O segundo baú fica na caverna ao norte; para abrir, use a chave dourada.</p>" +
+          "<h2>Baús da Floresta</h2>" +
+          "<p>Na floresta existem três baús escondidos entre as árvores. O baú de madeira tem moedas; o baú de prata tem uma espada; o baú dourado tem a armadura.</p>" +
+          "<table><thead><tr><th>Baú</th><th>Localização</th><th>Recompensa</th></tr></thead>" +
+          "<tbody><tr><td>Baú de madeira</td><td>Floresta, atrás da ponte</td><td>Moedas</td></tr>" +
+          "<tr><td>Baú de prata</td><td>Caverna do norte</td><td>Espada</td></tr>" +
+          "<tr><td>Baú dourado</td><td>Torre do castelo</td><td>Armadura</td></tr></tbody></table>" +
+          "<h2>Combate</h2>" +
+          "<p>Aprenda a esquivar e contra-atacar. A espada e o escudo sao essenciais nas primeiras batalhas.</p>" +
+          "</body></html>"
+      );
+      return;
+    }
+
     // /tarde -> o TEXTO so aparece depois de ~480 KB de comentarios. Com
     // maxChars de 1000, o primeiro marco (256 KB) nao cobre o pedido e o MESMO
     // download continua ate o fim (~535 KB) — antes, essa leitura pagava duas

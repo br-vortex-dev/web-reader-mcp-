@@ -6,7 +6,7 @@
 //   ROTAS     GET / e /health (200), GET /mcp (405), POST /mcp sem token (401),
 //             token errado (401), JSON invalido (400), corpo > 1 MB (413),
 //             metodo e ferramenta inexistentes (erro limpo, sem 5xx)
-//   FERRAM.   as 12 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
+//   FERRAM.   as 13 ferramentas, SSRF (169.254.169.254 e 127.0.0.1),
 //             redirect http->https, fidelidade (tabela GFM, acentos,
 //             indentacao de codigo) e cache (2a leitura mais rapida)
 //
@@ -133,9 +133,9 @@ const encurta = (s, n = 70) => String(s || "").replace(/\s+/g, " ").trim().slice
     const r = await mcpCall("tools/list", undefined, 5);
     const tools = r.json?.result?.tools || [];
     const nomes = tools.map((t) => t.name).sort();
-    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json", "find_on_page", "diff_page"];
-    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 12 ferramentas com schema", nomes.join(", "));
-  } catch (e) { check(false, "tools/list traz as 12 ferramentas com schema", e.message); }
+    const todas = ["crawl_site", "discover_urls", "extract_links", "read_dynamic_page", "read_multiple_pages", "read_page", "read_video", "read_pdf", "read_feed", "read_json", "find_on_page", "find_relevant", "diff_page"];
+    check(todas.every((n) => nomes.includes(n)) && tools.every((t) => t.inputSchema?.type === "object"), "tools/list traz as 13 ferramentas com schema", nomes.join(", "));
+  } catch (e) { check(false, "tools/list traz as 13 ferramentas com schema", e.message); }
 
   // read_page numa pagina real e complexa (tabelas, links, acentos)
   try {

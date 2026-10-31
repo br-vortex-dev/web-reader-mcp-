@@ -93,7 +93,7 @@ async function main() {
   const list = await rpc("tools/list");
   const names = (list.tools || []).map((t) => t.name);
   console.log("Ferramentas:", names.join(", "));
-  check(names.length === 12, "tools/list retornou as 12 ferramentas");
+  check(names.length === 13, "tools/list retornou as 13 ferramentas");
 
   const p1 = await rpc("tools/call", {
     name: "read_page",
@@ -110,6 +110,16 @@ async function main() {
   const t2 = (p2.content || []).map((c) => c.text).join("\n");
   check(!p2.isError && t2.length > 300 && /Node\.js/.test(t2), "read_page leu pagina complexa (Wikipedia)");
   show("read_page(pt.wikipedia.org/wiki/Node.js)", t2);
+
+  // A busca por assunto usa a MESMA pagina (cache quente): tem de devolver
+  // trechos ranqueados, nao o texto inteiro.
+  const fr1 = await rpc("tools/call", {
+    name: "find_relevant",
+    arguments: { url: "https://pt.wikipedia.org/wiki/Node.js", query: "história node javascript" },
+  });
+  const tfr1 = (fr1.content || []).map((c) => c.text).join("\n");
+  check(!fr1.isError && /# Trechos relevantes/.test(tfr1) && /## 1\./.test(tfr1), "find_relevant achou trechos na Wikipedia");
+  show("find_relevant(Node.js)", tfr1, 500);
 
   const l1 = await rpc("tools/call", {
     name: "extract_links",
@@ -236,7 +246,7 @@ async function main() {
     });
     check(initData.result?.serverInfo?.name === "web-reader", "HTTP initialize respondeu serverInfo");
     const listData = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    check((listData.result?.tools || []).length === 12, "HTTP tools/list retornou 12 ferramentas");
+    check((listData.result?.tools || []).length === 13, "HTTP tools/list retornou 13 ferramentas");
     const callData = await post({
       jsonrpc: "2.0",
       id: 3,
