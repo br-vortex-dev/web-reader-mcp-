@@ -80,7 +80,6 @@ import {
   FerramentaDesconhecidaError,
   CrawlError,
   RespostaMuitoGrandeError,
-  TextoIncompletoError,
 } from "./errors.mjs";
 
 /**
@@ -811,15 +810,14 @@ export async function toolDiffPage(args = {}) {
     throw new RespostaMuitoGrandeError(MAX_RESPONSE_BYTES_DOCUMENTO, finalUrl);
   }
 
-  const conteudo = isConteudoBruto(contentType, html) ? html : markdownMemo(payload);
-
-  // O mesmo motivo do bloqueio acima, por outra causa: com a conversao parada no
-  // teto de saida o download veio inteiro mas o texto nao. Guardar essa marca
-  // deixaria uma pagina de 12 MB "SEM MUDANCA" para tudo o que estivesse alem da
-  // frente convertida — o hash nao conta nada do resto do documento.
-  if (markdownInterrompida(payload)) {
-    throw new TextoIncompletoError(finalUrl, conteudo.length);
-  }
+  // A marca precisa do documento INTEIRO: a conversão de exibição para de
+  // propósito no teto de saída (HARD_MAX_CHARS), e usá-la aqui fazia o
+  // diff_page recusar qualquer página com mais de ~25 mil caracteres — a home
+  // do Guardian, por exemplo, falhava mesmo com o download completo. A
+  // conversão sem parada antecipada é o caminho que o find_on_page já usa
+  // quando precisa do rabo; o download acima garante que exista documento
+  // inteiro para converter.
+  const conteudo = isConteudoBruto(contentType, html) ? html : markdownCompleto(payload);
 
   // O hash é do texto NORMALIZADO, o mesmo que o diff compara: uma diferença
   // só de espaços no fim da linha não é "o conteúdo mudou" — antes o hash cru

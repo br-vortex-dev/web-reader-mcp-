@@ -74,17 +74,19 @@ test("find_on_page: pagina que cabe toda no teto NAO leva aviso de cobertura", a
 
 /* ----------------------------- diff_page: marca ---------------------------- */
 
-test("diff_page: recusa pagina maior que o teto de conversao (marca parcial mentiria)", async () => {
+test("diff_page: pagina maior que o teto de exibicao grava marca do texto inteiro", async () => {
+  // A conversao de exibicao para no teto (HARD_MAX_CHARS) e nunca serve para
+  // a marca: ela precisa do documento inteiro, que o download ja trouxe.
+  // Antes o diff_page recusava qualquer pagina acima de ~25 mil caracteres
+  // (a home do Guardian falhava mesmo com o download completo).
   const url = `${fixture.url}/gigante`;
   const r = await mcp.call("diff_page", { url });
-  assert.equal(r.isError, true);
-  assert.match(r.text, /Nao foi possivel obter o texto inteiro/);
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /PRIMEIRA leitura/);
 
-  // A recusa tambem nao gravou nada: uma segunda chamada continua a recusar,
-  // em vez de "SEM MUDANCA" comparando contra um hash de meio documento.
   const r2 = await mcp.call("diff_page", { url });
-  assert.equal(r2.isError, true);
-  assert.doesNotMatch(r2.text, /SEM MUDANCA|PRIMEIRA leitura/);
+  assert.equal(r2.isError, false, r2.text);
+  assert.match(r2.text, /SEM MUDANCA/);
 });
 
 test("diff_page: pagina que cabe inteiro continua a gravar a marca", async () => {

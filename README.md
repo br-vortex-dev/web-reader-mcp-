@@ -136,7 +136,7 @@ Roda os arquivos de `tests/` (40 arquivos, 368 testes, ~60 s, sem rede na maiori
 | `tests/find-on-page.test.mjs` | `find_on_page`: literal com caractere de regex, regex de verdade, termo ausente, `maxHits` |
 | `tests/snapshot.test.mjs` | `diff_page`: primeira leitura grava, idêntica sem mudança, mudou devolve só a linha, `force`, normalização e LCS |
 | `tests/snapshot-disco.test.mjs` | **persistência das marcas** (`SNAPSHOT_DIR`): sobrevive ao restart, worker que não gravou vê a marca do outro, sem a variável nada muda, disco avariado degrada para memória sem virar erro, ficheiro vencido/corrompido/forjado não vira marca |
-| `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` recusa gravar marca de texto parcial — duas chamadas seguidas na mesma página gigante continuam sem marca — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
+| `tests/cobertura-parcial.test.mjs` | **o que a ferramenta viu quando não viu tudo**: `find_on_page` avisa que a busca parou no teto da conversão (e não avisa na página que leu inteira), `diff_page` converte a página gigante inteira para a marca (a conversão de exibição, que para aos 25 mil, não serve) — duas chamadas seguidas dão PRIMEIRA leitura e SEM MUDANÇA — e `read_page` avisa na casca de JavaScript que deixa migalhas (a grande e a de 5,8 KB), sem avisar na página pequena de verdade nem na que só carrega um script de medição (o falso positivo que só apareceu no ar, no `example.com`) |
 | `tests/http-transport.test.mjs` | caracterização do HTTP: status, headers e corpos de `/health`, 401, 405, 413, 404 e 400; sessão (`Mcp-Session-Id`) e canal SSE (400 sem sessão); **concorrência**: 12 `tools/list` simultâneos sem trocar o id, 16 pedidos na fila de admissão com só 2 vagas, e o cliente que morre no meio do corpo (a vaga volta e o servidor segue atendendo) |
 | `tests/metrics-e-documento.test.mjs` | `/metrics` no formato do Prometheus (HELP/TYPE, histograma fechado, contado de verdade, `METRICS_PUBLIC=0`) e multi/crawl lendo página acima do teto duro de 5 MB |
 | `tests/tools-list.test.mjs` | `tools/list` bate com o snapshot em `tests/snapshot/tools-list.json` (JSON exato) |
@@ -356,7 +356,7 @@ arrancar sem autenticação e explica o motivo no log. Para um teste local rápi
 sem token, a saída explícita é `-e MCP_ALLOW_ANONYMOUS=1`.
 
 4. Teste: `curl https://SEU-APP.onrender.com/health` deve voltar algo como  
-   `web-reader-mcp v1.9.6 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
+   `web-reader-mcp v1.9.7 OK | cache: 0 entradas, 0 bytes / 134217728 bytes (max 512 entradas, ttl 8 min)`.
    A versão vem da constante `SERVER_VERSION` em `src/config.mjs`, e o `/health` também
    informa o uso atual do cache (entradas e bytes) — é assim que dá para observar
    o cache em produção. No fim da linha vêm os contadores das otimizações de rajada:
@@ -1073,6 +1073,9 @@ Se a URL for HTML, as duas explicam e apontam a ferramenta certa — nunca devol
   devolve só o que mudou (linhas `+` e `-`). A primeira chamada grava o ponto de
   comparação; `force: true` regrava sem comparar ("marque como lido"). A marca é
   um hash + o texto normalizado, com TTL — não páginas inteiras em memória.
+  Em página maior que o teto de exibição, a marca usa o documento **inteiro**
+  (o download já o trouxe, até 24 MB); só um download cortado no teto de bytes
+  impede a marca, porque aí o resto do documento não foi visto.
 - **A marca pode ir para disco** (`SNAPSHOT_DIR`). Só em memória, o ponto de
   comparação morre com o processo: um segundo worker do `WEB_CONCURRENCY`, ou
   simplesmente reiniciar o serviço, respondia "PRIMEIRA leitura" a uma página já

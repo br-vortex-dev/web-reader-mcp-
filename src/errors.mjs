@@ -137,25 +137,6 @@ export class RespostaMuitoGrandeError extends WebReaderError {
   }
 }
 
-/**
- * O texto da página não pôde ser obtido inteiro — ou o download parou no teto
- * de bytes, ou a conversão parou no teto de saída. Só o diff_page recusa assim:
- * nas outras ferramentas o parcial com aviso vale mais que nada, mas uma marca
- * de diff parcial faria uma mudança no resto do documento vir "SEM MUDANCA".
- */
-export class TextoIncompletoError extends WebReaderError {
-  constructor(url, caracteres) {
-    super(
-      `Nao foi possivel obter o texto inteiro desta pagina (a extracao parou em ${caracteres} caracteres). ` +
-        `Um diff parcial gravaria uma marca que nao ve o resto do documento — compare com read_page, ` +
-        `ou aponte o diff_page para uma pagina menor.`,
-      { code: "TEXTO_INCOMPLETO", url }
-    );
-    this.name = "TextoIncompletoError";
-    this.caracteres = caracteres;
-  }
-}
-
 export class RedeError extends WebReaderError {
   constructor(mensagem, url, causa = null) {
     super(mensagem, { code: "REDE_ERRO", url, cause: causa });
